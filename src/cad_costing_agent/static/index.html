@@ -1,0 +1,873 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>CAD Costing Agent</title>
+<link rel="stylesheet" href="styles.css">
+</head>
+<body>
+<header>
+  <h1>CAD Costing Agent</h1>
+  <nav>
+    <button class="tab active" data-tab="estimate">Estimate</button>
+    <button class="tab" data-tab="history">History</button>
+    <span class="nav-sep" aria-hidden="true"></span>
+    <button class="tab" data-tab="setup">Rate sets</button>
+    <button class="tab" data-tab="timesetup">Time profiles</button>
+    <button class="tab" data-tab="feedback">Engineering</button>
+  </nav>
+</header>
+
+<main>
+<!-- ===================== ESTIMATE ===================== -->
+<section id="tab-estimate" data-flow="overview">
+
+  <!-- Context bar. Always answers "what am I looking at, and what does it cost"
+       so the answer does not depend on which section is open. Every figure here
+       is a string the backend produced; nothing is computed in the browser. -->
+  <div class="estimate-bar">
+    <div class="eb-identity">
+      <strong id="eb-name">No CAD file yet</strong>
+      <span id="eb-sub" class="muted">Upload a model to begin</span>
+    </div>
+    <div class="eb-figures">
+      <div class="eb-figure">
+        <span class="label">Unit cost</span>
+        <strong id="eb-unit">—</strong>
+      </div>
+      <div class="eb-figure">
+        <span class="label">Total</span>
+        <strong id="eb-total">—</strong>
+      </div>
+    </div>
+  </div>
+
+  <!-- The workflow. Upload → understand → plan → cost → quote, one section at a
+       time, because everything at once is what this replaced. -->
+  <nav class="flow-nav" id="flow-nav" aria-label="Estimate sections">
+    <button type="button" class="flow-tab active" data-flow="overview">Overview</button>
+    <button type="button" class="flow-tab" data-flow="cad">CAD</button>
+    <button type="button" class="flow-tab" data-flow="manufacturing">Manufacturing</button>
+    <button type="button" class="flow-tab" data-flow="cost">Cost</button>
+    <button type="button" class="flow-tab" data-flow="assembly" id="flow-tab-assembly">Assembly</button>
+    <button type="button" class="flow-tab" data-flow="quote">Quote</button>
+  </nav>
+
+  <div id="error" class="error hidden"></div>
+
+  <div class="stage">
+
+    <!-- ---------------- persistent 3D viewer ----------------
+         One viewer, kept in the DOM rather than rebuilt per section, so
+         selecting a feature still highlights it and the exploded view keeps its
+         state. CSS shows it for the sections that are about the model. -->
+    <div class="stage-viewer">
+      <section class="viewer-panel" id="drop" aria-label="3D model viewer">
+        <div class="panel-head">
+          <h2>3D model</h2>
+          <div class="viewer-tools">
+            <button type="button" id="viewer-fit" class="secondary tiny" title="Frame the whole model (F)">Fit</button>
+            <button type="button" id="viewer-reset" class="secondary tiny" title="Back to the default isometric view (R)">Reset view</button>
+          </div>
+        </div>
+
+        <div class="viewer-stage">
+          <div id="viewer-canvas"></div>
+          <div id="viewer-overlay" class="viewer-overlay"></div>
+        </div>
+
+        <!-- Exploded view. Hidden unless an assembly with drawable components is
+             loaded, so a single part never grows an assembly control it has no
+             use for. -->
+        <div id="explode-controls" class="explode hidden">
+          <label for="explode" class="explode-label">Explode</label>
+          <input type="range" id="explode" min="0" max="100" step="1" value="0">
+          <output id="explode-value" for="explode">0%</output>
+          <button type="button" id="explode-reset" class="secondary tiny">Reset explosion</button>
+          <p class="explode-note">
+            A <strong>visual exploded arrangement</strong>, derived from the assembly's own
+            placements and hierarchy. It is not an assembly or disassembly sequence, and the
+            connector lines are a reading aid, not a path a part travels.
+          </p>
+        </div>
+
+        <p class="viewer-help">
+          Drag to rotate · Shift-drag or right-drag to pan · Scroll to zoom ·
+          <kbd>F</kbd> fit · <kbd>R</kbd> reset · arrow keys orbit
+        </p>
+      </section>
+    </div>
+
+    <div class="stage-panes">
+
+      <!-- ============================================================
+           OVERVIEW — what this is, what it costs, what to do next
+           ============================================================ -->
+      <div class="flow-pane" data-pane="overview">
+
+        <div class="card" id="overview-card">
+          <h2>Overview</h2>
+          <p class="hint" id="overview-empty">
+            Upload a CAD file to see what the system reads from it. Nothing is costed until
+            you ask for it.
+          </p>
+          <div id="overview-summary" class="stat-grid hidden"></div>
+          <div id="overview-warnings" class="overview-warnings"></div>
+          <div id="overview-next" class="next-action hidden"></div>
+        </div>
+
+        <div class="card">
+          <h2>CAD file</h2>
+          <p class="hint">
+            Drag a file onto the viewer, or
+            <button type="button" id="browse" class="link">browse</button>.
+          </p>
+          <input type="file" id="file" hidden>
+          <div id="file-info" class="file-info hidden">
+            <span class="label">Selected</span>
+            <strong id="file-name"></strong>
+            <span id="file-size" class="muted"></span>
+            <span id="geo-status" class="muted"></span>
+          </div>
+          <div id="import-report" class="import-report hidden"></div>
+          <!-- Rendered from /cad/formats, never hardcoded: the list of formats and
+               what each can do comes from the same declarations the endpoints
+               enforce, so this panel cannot promise something the backend refuses.
+               Folded away because it is reference material, not a result. -->
+          <details class="detail-toggle" id="formats-toggle">
+            <summary>Which CAD formats are supported, and what each one can do</summary>
+            <div id="format-support" class="formats"></div>
+          </details>
+        </div>
+
+        <div class="card">
+          <h2>Part</h2>
+          <div class="grid2">
+            <label>Part ID <input id="part_id" value="P-001"></label>
+            <label>Part name <input id="part_name" value="Bracket"></label>
+            <label>Material <select id="material"></select></label>
+            <label>Quantity <input id="quantity" type="number" min="1" step="1" value="10"></label>
+          </div>
+          <label class="unit-row">Length unit of the CAD file
+            <select id="source_unit">
+              <option value="mm" selected>mm</option>
+              <option value="cm">cm</option>
+              <option value="m">m</option>
+              <option value="inch">inch</option>
+            </select>
+          </label>
+          <p id="unit-note" class="hint"></p>
+        </div>
+
+        <div class="card gap-card hidden" id="geometry-gap">
+          <h2>Incomplete CAD geometry</h2>
+          <p id="gap-summary"></p>
+          <p id="gap-explanation" class="provenance"></p>
+          <p class="hint">Choose how to continue. Whatever you enter is recorded on the estimate as
+            your assumption — it is never presented as a measurement of the CAD.</p>
+          <div class="gap-choices">
+            <label class="choice"><input type="radio" name="gap-method" value="total_volume" checked>
+              Enter total part volume</label>
+            <label class="choice"><input type="radio" name="gap-method" value="missing_volume">
+              Enter missing volume (added to what was measured)</label>
+            <label class="choice"><input type="radio" name="gap-method" value="upload_corrected_cad">
+              Upload a corrected CAD file instead</label>
+          </div>
+          <div id="gap-entry" class="gap-entry">
+            <label>Volume (mm³) <input id="gap-volume" type="number" step="any" min="0"></label>
+            <button type="button" id="apply-gap">Apply geometry assumption</button>
+            <span id="gap-status" class="muted"></span>
+          </div>
+          <p id="gap-upload-note" class="hint hidden">Pick a different file above. A solid B-Rep
+            export needs no assumption at all.</p>
+          <div id="gap-applied" class="verdict-ok hidden"></div>
+        </div>
+
+      </div>
+
+      <!-- ============================================================
+           CAD — what the system read from the model
+           ============================================================ -->
+      <div class="flow-pane hidden" data-pane="cad">
+
+        <div class="card">
+          <h2>Geometry</h2>
+          <p class="hint">Measured from the exact geometry, not from the display mesh.</p>
+          <div id="model-info" class="model-info hidden">
+            <table class="mini">
+              <tr><th>File</th><td id="mi-file"></td></tr>
+              <tr><th>Format</th><td id="mi-format"></td></tr>
+              <tr><th>Volume</th><td id="mi-volume"></td></tr>
+              <tr><th>Surface area</th><td id="mi-area"></td></tr>
+              <tr><th>Bounding box</th><td id="mi-bbox"></td></tr>
+              <tr><th>Units in file</th><td id="mi-unit"></td></tr>
+              <tr><th>Derived mass</th><td id="mi-mass"></td></tr>
+              <tr><th>Preview mesh</th><td id="mi-mesh"></td></tr>
+            </table>
+            <p id="mi-note" class="provenance"></p>
+          </div>
+        </div>
+
+        <!-- ---------------- detected features ---------------- -->
+        <div class="card" id="features-card">
+          <div class="panel-head">
+            <h2>Recognized features</h2>
+            <button type="button" id="analyse-features" class="secondary tiny" disabled>Analyse features</button>
+          </div>
+          <p id="features-status" class="hint">
+            Upload a CAD file, then analyse it to see the holes,
+            pockets, cylinders and faces it contains.
+          </p>
+          <ul id="features-summary" class="feature-summary hidden"></ul>
+          <!-- The per-feature table is evidence, not a headline: identifiers,
+               axes and CAD face counts are what an engineer checks when a
+               suggestion looks wrong, and reading them first is what made this
+               page feel like a debugging dashboard. -->
+          <details class="detail-toggle" id="feature-detail-toggle">
+            <summary>View detailed feature analysis <span class="muted" id="feature-detail-count"></span></summary>
+            <div class="table-scroll">
+              <table id="features-table" class="features hidden">
+                <thead><tr>
+                  <th>ID</th><th>Feature</th><th>Dimensions</th><th>Axis</th><th>Confidence</th><th>CAD faces</th>
+                </tr></thead>
+                <tbody id="features-body"></tbody>
+              </table>
+            </div>
+            <p id="features-note" class="provenance hidden"></p>
+            <div id="selected-feature" class="selected-feature hidden"></div>
+          </details>
+        </div>
+
+      </div>
+
+      <!-- ============================================================
+           MANUFACTURING — how the system thinks this is made
+           ============================================================ -->
+      <div class="flow-pane hidden" data-pane="manufacturing">
+
+        <div class="card">
+          <div class="panel-head">
+            <h2>Manufacturing plan</h2>
+            <div class="viewer-tools">
+              <button type="button" id="add-setup" class="secondary tiny">+ Add setup</button>
+              <button type="button" id="use-all-estimates" class="secondary tiny hidden">Use all estimated times</button>
+            </div>
+          </div>
+          <details class="detail-toggle detail-toggle-lead" id="plan-rules-toggle">
+            <summary>How setups and times are charged</summary>
+            <p class="hint">What actually gets costed, grouped into <strong>setups</strong>. A setup is
+            one fixturing of the part: its setup time is charged <strong>once</strong>, however many
+            operations it holds, while each operation is charged for its own cycle time. Rates come
+            from the rate set; you enter only times, and operation quantity always matches the part
+            quantity. <strong>An estimated time is a proposal, not a commitment</strong> — a row is
+            costed only once you accept its estimate or type your own, and whatever you change, what
+            the system suggested is kept beside it.</p>
+          </details>
+          <!-- Which plan this table is editing. Blank for a standalone part;
+               named when an assembly component's plan has been opened here, so
+               an edit is never made to the wrong component's routing. -->
+          <div id="plan-scope" class="plan-scope hidden"></div>
+          <div id="plan-impact" class="plan-impact hidden"></div>
+          <div class="table-scroll">
+            <table id="ops-table" class="ops plan">
+              <thead><tr>
+                <th class="num">#</th><th>Operation</th><th>Feature</th>
+                <th class="num">Cycle</th><th>Setup</th>
+                <th>Source</th><th>Confidence</th><th></th>
+              </tr></thead>
+              <tbody id="ops-body"></tbody>
+            </table>
+          </div>
+          <button type="button" id="add-op" class="secondary">+ Add operation</button>
+          <p id="ops-note" class="hint"></p>
+          <p id="ops-uncosted" class="warning-inline hidden"></p>
+        </div>
+
+        <!-- ---------------- suggested operations (review) ---------------- -->
+        <div class="card" id="suggestions-card">
+          <div class="panel-head">
+            <h2>Operation suggestions <span class="muted">— why each line was proposed</span></h2>
+            <div class="viewer-tools">
+              <button type="button" id="suggest-operations" class="secondary tiny" disabled>Suggest operations</button>
+            </div>
+          </div>
+          <p id="suggestions-status" class="hint">
+            Analyse a CAD file, then suggest operations from the
+            features it contains. Suggestions and their estimated times are proposals only — nothing
+            is costed until you accept it in the manufacturing plan.
+          </p>
+          <details class="detail-toggle" id="suggestions-summary-toggle">
+            <summary>Which features produced which operation</summary>
+            <ul id="suggestions-summary" class="feature-summary hidden"></ul>
+          </details>
+          <details class="detail-toggle" id="declined-wrap-toggle">
+            <summary>Why some features were not given an operation</summary>
+            <div id="declined-wrap" class="hidden">
+              <p class="hint"><strong>Not suggested</strong> — recognized features the geometry does not
+                support an operation for. Listed rather than dropped.</p>
+              <ul id="declined-list" class="declined-list"></ul>
+            </div>
+            <p id="suggestions-note" class="provenance hidden"></p>
+          </details>
+        </div>
+
+        <div class="card">
+          <h2>Time profile</h2>
+          <div class="grid2">
+            <label>Time profile <select id="time_profile_id"></select></label>
+            <label>Version <select id="time_profile_version"></select></label>
+          </div>
+          <div id="time-profile-badges" class="badges"></div>
+          <p id="time-profile-desc" class="hint"></p>
+          <p class="hint">The machining assumptions the estimated times are worked out from — feeds,
+            speeds, approach allowances, depths of cut. <strong>No money here.</strong> Publish your
+            own in <em>Time profiles</em>; a published version is never edited, so an estimate always
+            keeps the assumptions that produced it.</p>
+        </div>
+
+        <div class="card">
+          <h2>Sequence</h2>
+          <p class="hint">The order these operations are carried out in. It is recorded on the
+            estimate and travels with it, but <strong>it changes no cost</strong>: there is no
+            sequence-dependent time, no setup consolidation and no routing optimisation here. No
+            precedence is enforced either — sequence them the way your shop actually works.</p>
+          <details class="detail-toggle" id="sequence-toggle">
+            <summary>Show the numbered sequence <span class="muted">— the same operations, in order</span></summary>
+            <ol id="sequence-list" class="sequence-list"><li class="muted">No operations yet.</li></ol>
+          </details>
+        </div>
+
+      </div>
+
+      <!-- ============================================================
+           COST — the number, and what drives it
+           ============================================================ -->
+      <div class="flow-pane hidden" data-pane="cost">
+
+        <!-- Which estimate this section is looking at. Written by
+             estimateflow.js, and empty for a single part, where the result
+             panel below is the estimate and needs no disambiguation. -->
+        <section id="cost-authority" class="card hidden"></section>
+
+        <!-- ---------------- result ---------------- -->
+        <section id="result" class="hidden">
+          <div id="illustrative-warning" class="warning hidden"></div>
+          <div class="headline">
+            <div class="headline-item">
+              <span class="label">Total cost</span>
+              <span id="r-total" class="big"></span>
+            </div>
+            <div class="headline-item">
+              <span class="label">Per unit</span>
+              <span id="r-unit" class="big"></span>
+            </div>
+          </div>
+          <div class="card">
+            <h2>Breakdown</h2>
+            <div class="result-columns">
+              <table class="breakdown">
+                <tbody>
+                  <tr><th>Material</th><td id="r-material"></td></tr>
+                  <tr><th>Operations</th><td id="r-ops"></td></tr>
+                  <tr class="subtotal"><th>Direct cost</th><td id="r-direct"></td></tr>
+                  <tr><th>Overhead</th><td id="r-overhead"></td></tr>
+                  <tr><th>Scrap allowance</th><td id="r-scrap"></td></tr>
+                  <tr><th>Tooling</th><td id="r-tooling"></td></tr>
+                  <tr class="total"><th>Total part cost</th><td id="r-total2"></td></tr>
+                </tbody>
+              </table>
+              <table class="mini">
+                <tr><th>Quantity</th><td id="r-qty"></td></tr>
+                <tr><th>Currency</th><td id="r-currency"></td></tr>
+                <tr><th>Rate set</th><td id="r-rateset"></td></tr>
+                <tr><th>Derived mass</th><td id="r-mass"></td></tr>
+                <tr><th>Geometry</th><td id="r-geometry"></td></tr>
+                <tr><th>Estimate ID</th><td id="r-id" class="mono"></td></tr>
+              </table>
+            </div>
+            <p id="r-provenance" class="provenance"></p>
+          </div>
+
+          <div class="card" id="assumptions-card">
+            <h2>Assumptions behind this estimate</h2>
+            <p class="hint">Read back from what this estimate stored, not recomputed — so it shows what
+              actually produced the number, including profile versions that may since have been
+              superseded.</p>
+            <div id="assumptions-body" class="assumption-groups"></div>
+          </div>
+
+          <div class="card hidden" id="impact-card">
+            <h2>Why did this change?</h2>
+            <div id="impact-body"></div>
+          </div>
+        </section>
+
+        <div class="card">
+          <h2>Rate set</h2>
+          <div class="grid2">
+            <label>Rate set <select id="rate_set_id"></select></label>
+            <label>Version <select id="rate_set_version"></select></label>
+          </div>
+          <div id="rate-badges" class="badges"></div>
+          <p id="rate-desc" class="hint"></p>
+          <p class="hint">Rates decide what an hour costs. How long the work takes comes from the
+            time profile in <em>Manufacturing</em> — a separate, separately versioned thing.</p>
+        </div>
+
+        <div class="card">
+          <h2>Additional costs <span class="muted">(optional)</span></h2>
+          <p class="hint">Leave blank to use the rate set's values. Entering any one of these replaces all three.</p>
+          <div class="grid3">
+            <label>Overhead % <input id="overhead_rate_percent" type="number" step="any" placeholder="from rate set"></label>
+            <label>Scrap % <input id="scrap_rate_percent" type="number" step="any" placeholder="from rate set"></label>
+            <label>Tooling / batch <input id="tooling_cost_per_batch" type="number" step="any" placeholder="from rate set"></label>
+          </div>
+        </div>
+
+        <div class="actions">
+          <button id="calculate" disabled>Calculate estimate</button>
+          <span id="calc-status" class="muted"></span>
+        </div>
+
+      </div>
+
+      <!-- ============================================================
+           ASSEMBLY — structure, classification, per-component plans
+           ============================================================ -->
+      <div class="flow-pane hidden" data-pane="assembly">
+
+        <!-- Assembly decomposition. Shown for every file, because "this is a
+             single part" is as much an answer as a component tree, and the point
+             is that nobody finds out afterwards that an assembly was costed as
+             one lump of material. -->
+        <div class="card hidden" id="assembly-card">
+          <h2>Assembly</h2>
+          <p class="hint" id="assembly-status"></p>
+          <div class="row">
+            <button type="button" id="decompose" class="secondary" disabled>
+              Decompose into components
+            </button>
+          </div>
+          <div id="assembly-tree"></div>
+          <div id="assembly-body"></div>
+        </div>
+
+        <!-- Component classification. An assembly is not a bag of identical
+             machined parts: a housing is made, a bearing is bought, a bolt is a
+             catalogue item and a shipping washer should not be in the cost at
+             all. Nothing in a CAD file says which, so this is where a person
+             says it. -->
+        <div class="card hidden" id="component-costing-card">
+          <h2>Component classification</h2>
+          <p class="hint">
+            <strong>No CAD format states make/buy.</strong> The system suggests
+            <em>manufactured</em> wherever the file carries measurable solid
+            geometry — that is evidence about what can be costed here, not
+            evidence that the part is made rather than bought. A purchased
+            bearing is modelled exactly like a machined housing. Confirm each
+            component or change it; both the suggestion and your answer are kept.
+          </p>
+          <div id="component-costing-body"></div>
+          <div id="component-detail" class="component-detail"></div>
+        </div>
+
+        <!-- Component manufacturing plans. A plan is a routing for one thing
+             clamped in a fixture, so each manufactured component gets its own —
+             its own features, its own setups, its own sequence. There is
+             deliberately no assembly-level plan: a housing and a shaft that use
+             the same machine still do not share a physical setup. -->
+        <div class="card hidden" id="component-plan-card">
+          <h2>Component manufacturing plans</h2>
+          <p class="hint">
+            Every <strong>manufactured</strong> component is planned on its own:
+            its own features, its own operations, its own setups. A setup is one
+            fixturing of <em>one part</em>, so two components never share one
+            however alike their processes look, and there is no assembly-level
+            routing here — nothing in this application knows what order components
+            are made or joined in. A purchased, standard or excluded component has
+            no machining plan, which is the answer rather than a gap.
+          </p>
+          <div class="row">
+            <button type="button" id="generate-component-plans" class="secondary">
+              Rebuild component plans
+            </button>
+            <span class="muted small" id="component-plan-status"></span>
+          </div>
+          <div id="component-plan-body"></div>
+          <div id="component-plan-detail" class="component-detail"></div>
+        </div>
+
+        <div class="card hidden" id="assembly-cost-card">
+          <h2>Component cost roll-up</h2>
+          <p class="hint">
+            A manufactured component is costed as a part by the same engine as
+            anything else. A purchased or standard one contributes the unit cost
+            you entered. An excluded one contributes nothing, on purpose. Each is
+            then multiplied by how many times this assembly uses it.
+          </p>
+          <div class="row">
+            <label for="assembly_quantity">Assemblies to build</label>
+            <input type="number" id="assembly_quantity" min="1" step="1" value="1"
+                   class="qty-input">
+            <button type="button" id="cost-assembly" class="secondary">
+              Cost every component
+            </button>
+          </div>
+          <p class="hint small">
+            How many assemblies you are building. This is <em>not</em> a
+            component's occurrence count: a bearing used 4 times in an assembly
+            built 10 times is 40 bearings, and the two numbers are multiplied
+            exactly once, on the server.
+          </p>
+          <div id="assembly-cost-body"></div>
+        </div>
+
+      </div>
+
+      <!-- ============================================================
+           QUOTE — the customer-facing end of the workflow
+           ============================================================ -->
+      <div class="flow-pane hidden" data-pane="quote">
+        <div class="card">
+          <h2>Quotation</h2>
+          <p class="hint">
+            A quotation presents a stored estimate as a printable document. It recalculates
+            nothing: the figures are read from the snapshot taken when the estimate was
+            created, so it keeps saying what that estimate said however the rates change
+            later.
+          </p>
+          <div id="quote-body"></div>
+        </div>
+      </div>
+
+    </div>
+  </div>
+</section>
+
+<!-- ===================== COSTING SETUP ===================== -->
+<section id="tab-setup" class="hidden">
+
+  <!-- ---------------- profile list ---------------- -->
+  <div id="setup-list">
+    <div class="section-head">
+      <div>
+        <h2>Costing profiles</h2>
+        <p class="hint">
+          A profile holds your material prices, machine and labour rates, and overhead, scrap and
+          tooling charges. An estimate takes its rates from the profile version you pick, and
+          records which one it used.
+        </p>
+      </div>
+      <button type="button" id="new-profile">+ New costing profile</button>
+    </div>
+    <div id="profile-cards" class="profile-cards"></div>
+    <p id="setup-status" class="muted"></p>
+  </div>
+
+  <!-- ---------------- create / new version wizard ---------------- -->
+  <div id="setup-editor" class="hidden">
+    <div class="section-head">
+      <div>
+        <h2 id="editor-title"></h2>
+        <p id="editor-subtitle" class="hint"></p>
+      </div>
+      <button type="button" id="cancel-edit" class="secondary">Cancel</button>
+    </div>
+
+    <div class="wizard-steps" id="wizard-steps">
+      <button type="button" class="wstep active" data-step="general">1 &middot; General</button>
+      <button type="button" class="wstep" data-step="materials">2 &middot; Materials</button>
+      <button type="button" class="wstep" data-step="operations">3 &middot; Processes</button>
+      <button type="button" class="wstep" data-step="additional">4 &middot; Additional costs</button>
+      <button type="button" class="wstep" data-step="review">5 &middot; Review &amp; publish</button>
+    </div>
+
+    <div class="card wpane" id="wpane-general">
+      <div class="grid2">
+        <label>Profile name <input id="p-name" placeholder="e.g. Pune Machine Shop"></label>
+        <label>Version <input id="p-version" placeholder="1.0.0"></label>
+        <label>Profile ID <input id="p-id" placeholder="pune-machine-shop">
+          <span class="sub">Lowercase, dashes only. Fixed once the profile exists.</span></label>
+        <label>Currency
+          <select id="p-currency">
+            <option value="INR" selected>INR — Indian Rupee</option>
+            <option value="USD">USD — US Dollar</option>
+            <option value="EUR">EUR — Euro</option>
+            <option value="GBP">GBP — Pound Sterling</option>
+            <option value="JPY">JPY — Japanese Yen</option>
+          </select>
+          <span class="sub">Currencies are never converted. An estimate is denominated in its profile's currency.</span>
+        </label>
+      </div>
+      <label class="stack">Description
+        <input id="p-description" placeholder="What these rates cover, and when they were agreed.">
+      </label>
+      <label class="stack">Rate status
+        <select id="p-illustrative">
+          <option value="false" selected>Real rates — safe to quote from</option>
+          <option value="true">Illustrative placeholder rates — not for quoting</option>
+        </select>
+        <span class="sub">Estimates made with an illustrative profile carry an unmissable warning.</span>
+      </label>
+    </div>
+
+    <div class="card wpane hidden" id="wpane-materials">
+      <p class="hint">Every material you might cost a part in. A part can only be estimated in a material this profile prices.</p>
+      <table class="editor-table">
+        <thead><tr>
+          <th>Material name</th><th>Density (kg/m³)</th><th>Cost per kg (<span class="cur-symbol">₹</span>)</th><th></th>
+        </tr></thead>
+        <tbody id="materials-body"></tbody>
+      </table>
+      <button type="button" id="add-material" class="secondary">+ Add material</button>
+    </div>
+
+    <div class="card wpane hidden" id="wpane-operations">
+      <p class="hint">
+        Machine and labour rates per hour for each process you run. Type any process name — the
+        list is only a suggestion, not a fixed set.
+      </p>
+      <datalist id="process-suggestions">
+        <option value="Milling"></option><option value="Turning"></option>
+        <option value="Drilling"></option><option value="Grinding"></option>
+        <option value="Broaching"></option><option value="Honing"></option>
+        <option value="Boring"></option><option value="Reaming"></option>
+        <option value="Tapping"></option><option value="Sawing"></option>
+        <option value="EDM"></option><option value="Deburring"></option>
+        <option value="Heat treatment"></option><option value="Surface treatment"></option>
+      </datalist>
+      <table class="editor-table">
+        <thead><tr>
+          <th>Process</th>
+          <th>Machine rate / hour (<span class="cur-symbol">₹</span>)</th>
+          <th>Labour rate / hour (<span class="cur-symbol">₹</span>)</th>
+          <th></th>
+        </tr></thead>
+        <tbody id="operations-body"></tbody>
+      </table>
+      <button type="button" id="add-process" class="secondary">+ Add process</button>
+    </div>
+
+    <div class="card wpane hidden" id="wpane-additional">
+      <p class="hint">
+        Applied on top of material and operation cost. Overhead and scrap are percentages of
+        material + operations only, so they never compound on each other or on tooling. Tooling is
+        a one-time charge for the whole batch.
+      </p>
+      <div class="grid3">
+        <label>Overhead % <input id="p-overhead" type="number" step="any" value="0">
+          <span class="sub">0 to 1000</span></label>
+        <label>Scrap % <input id="p-scrap" type="number" step="any" value="0">
+          <span class="sub">0 to just under 100</span></label>
+        <label>Tooling per batch (<span class="cur-symbol">₹</span>) <input id="p-tooling" type="number" step="any" value="0">
+          <span class="sub">One-time, not per part</span></label>
+      </div>
+    </div>
+
+    <div class="card wpane hidden" id="wpane-review">
+      <div id="review-body"></div>
+    </div>
+
+    <div id="wizard-errors" class="error hidden"></div>
+
+    <div class="actions">
+      <button type="button" id="wizard-back" class="secondary">Back</button>
+      <button type="button" id="wizard-next">Next</button>
+      <button type="button" id="publish-version" class="hidden">Publish this version</button>
+      <span id="publish-status" class="muted"></span>
+    </div>
+  </div>
+</section>
+
+
+<!-- ===================== TIME SETUP ===================== -->
+<section id="tab-timesetup" class="hidden">
+
+  <div id="timeset-list">
+    <div class="section-head">
+      <div>
+        <h2>Time-assumption profiles</h2>
+        <p class="hint">
+          A time profile holds the machining assumptions an estimated time is worked out from —
+          feeds, speeds, approach allowances, depths of cut. <strong>It holds no money.</strong>
+          Rates decide what an hour costs; these decide how long the work takes, and the two are
+          versioned separately because a shop revises them on different schedules. A published
+          version is never edited: changing an assumption means publishing a new version, and every
+          estimate already made keeps the version that produced it.
+        </p>
+      </div>
+      <button type="button" id="new-time-profile">+ New time profile</button>
+    </div>
+    <div id="time-profile-cards" class="profile-cards"></div>
+    <p id="timeset-status" class="muted"></p>
+  </div>
+
+  <div id="timeset-editor" class="hidden">
+    <div class="section-head">
+      <div>
+        <h2 id="time-editor-title"></h2>
+        <p id="time-editor-subtitle" class="hint"></p>
+      </div>
+      <button type="button" id="cancel-time-edit" class="secondary">Cancel</button>
+    </div>
+
+    <div class="card">
+      <div class="grid2">
+        <label>Profile name <input id="t-name" placeholder="e.g. Pune Shop Machining"></label>
+        <label>Version <input id="t-version" placeholder="1.0.0"></label>
+        <label>Profile ID <input id="t-id" placeholder="pune-shop-time">
+          <span class="sub">Lowercase, dashes only. Fixed once the profile exists.</span></label>
+        <label>Parameter status
+          <select id="t-illustrative">
+            <option value="false" selected>Real machining parameters — measured or agreed</option>
+            <option value="true">Illustrative placeholders — not for quoting</option>
+          </select>
+          <span class="sub">Times estimated with an illustrative profile carry a warning.</span>
+        </label>
+      </div>
+      <label class="stack">Description
+        <input id="t-description" placeholder="What these assumptions cover, and when they were agreed.">
+      </label>
+      <p class="hint">Every parameter below is used verbatim by the deterministic time model —
+        nothing is scaled or second-guessed. The spindle limits are the one exception, and they
+        clamp rather than reject, because a machine really does have a top and bottom speed.</p>
+    </div>
+
+      <div class="card">
+        <h3>Drilling</h3>
+        <div class="grid3">
+          <label>Cutting speed (m/min) <input id="t-drill-vc" data-param="drilling_cutting_speed_m_per_min" type="number" step="any"></label>
+          <label>Feed (mm/rev) <input id="t-drill-feed" data-param="drilling_feed_mm_per_rev" type="number" step="any"></label>
+          <label>Approach (mm) <input id="t-drill-approach" data-param="drilling_approach_mm" type="number" step="any"></label>
+          <label>Breakthrough (mm) <input id="t-drill-break" data-param="drilling_breakthrough_mm" type="number" step="any"></label>
+          <label>Setup (min) <input id="t-drill-setup" data-param="drilling_setup_minutes" type="number" step="any"></label>
+        </div>
+      </div>
+      <div class="card">
+        <h3>Milling — facing, pockets, slots, blends</h3>
+        <div class="grid3">
+          <label>Cutting speed (m/min) <input id="t-mill-vc" data-param="milling_cutting_speed_m_per_min" type="number" step="any"></label>
+          <label>Feed (mm/tooth) <input id="t-mill-feed" data-param="milling_feed_per_tooth_mm" type="number" step="any"></label>
+          <label>Cutter teeth <input id="t-mill-teeth" data-param="milling_teeth" type="number" step="any"></label>
+          <label>Cutter diameter (mm) <input id="t-mill-dia" data-param="milling_cutter_diameter_mm" type="number" step="any"></label>
+          <label>Stepover (× diameter) <input id="t-mill-stepover" data-param="milling_stepover_ratio" type="number" step="any"></label>
+          <label>Axial depth of cut (mm) <input id="t-mill-doc" data-param="milling_axial_depth_of_cut_mm" type="number" step="any"></label>
+          <label>Approach (mm) <input id="t-mill-approach" data-param="milling_approach_mm" type="number" step="any"></label>
+          <label>Setup (min) <input id="t-mill-setup" data-param="milling_setup_minutes" type="number" step="any"></label>
+        </div>
+      </div>
+      <div class="card">
+        <h3>Turning</h3>
+        <div class="grid3">
+          <label>Cutting speed (m/min) <input id="t-turn-vc" data-param="turning_cutting_speed_m_per_min" type="number" step="any"></label>
+          <label>Feed (mm/rev) <input id="t-turn-feed" data-param="turning_feed_mm_per_rev" type="number" step="any"></label>
+          <label>Depth of cut (mm) <input id="t-turn-doc" data-param="turning_depth_of_cut_mm" type="number" step="any"></label>
+          <label>Radial stock allowance (mm) <input id="t-turn-stock" data-param="turning_stock_allowance_mm" type="number" step="any"></label>
+          <label>Approach (mm) <input id="t-turn-approach" data-param="turning_approach_mm" type="number" step="any"></label>
+          <label>Setup (min) <input id="t-turn-setup" data-param="turning_setup_minutes" type="number" step="any"></label>
+        </div>
+      </div>
+      <div class="card">
+        <h3>Spindle limits — shared by every process</h3>
+        <div class="grid3">
+          <label>Minimum spindle (rpm) <input id="t-rpm-min" data-param="min_spindle_rpm" type="number" step="any"></label>
+          <label>Maximum spindle (rpm) <input id="t-rpm-max" data-param="max_spindle_rpm" type="number" step="any"></label>
+        </div>
+      </div>
+    <div id="timeset-errors" class="error hidden"></div>
+    <div id="timeset-review" class="card hidden"></div>
+
+    <div class="actions">
+      <button type="button" id="validate-time-profile" class="secondary">Validate</button>
+      <button type="button" id="publish-time-profile">Publish this version</button>
+      <span id="time-publish-status" class="muted"></span>
+    </div>
+  </div>
+</section>
+
+<!-- ===================== HISTORY ===================== -->
+<section id="tab-history" class="hidden">
+  <div class="card">
+    <h2>Estimate history</h2>
+    <div class="history-controls">
+      <button type="button" id="refresh-history" class="secondary">Refresh</button>
+      <button type="button" id="compare-btn" class="secondary" disabled>Compare selected (2)</button>
+      <span id="history-status" class="muted"></span>
+    </div>
+    <table class="history">
+      <thead><tr><th></th><th>When</th><th>Part</th><th>Qty</th><th>Rate set</th><th class="num">Total</th></tr></thead>
+      <tbody id="history-body"></tbody>
+    </table>
+  </div>
+  <div id="history-detail" class="card hidden"></div>
+  <div id="compare-result" class="card hidden"></div>
+</section>
+
+<!-- ---------------- feedback and learning (read-only) ---------------- -->
+<!-- Where engineers disagree with the system, read back out of the
+     corrections four earlier steps recorded. Nothing on this tab writes:
+     no rule is changed, no profile adjusted, no confidence recalibrated
+     and no estimate touched. It exists so recurring mistakes are visible
+     *before* anything is taught to improve itself. -->
+<section id="tab-feedback" class="hidden">
+  <div class="card" id="feedback-card">
+    <div class="panel-head">
+      <h2>Feedback &amp; learning <span class="muted">— where the system is wrong</span></h2>
+      <div class="viewer-tools" id="feedback-tabs"></div>
+    </div>
+    <p class="hint">
+      Every figure here is measured against what engineers actually chose, and
+      every rate carries the two counts it came from and the sample it rests on.
+      A pattern over four observations is noise wearing a percentage sign, so
+      one is labelled rather than shown as a number. <strong>Nothing on this
+      page changes anything</strong> — it is analysis only.
+    </p>
+    <div class="row feedback-filters">
+      <label for="f-component">Component
+        <input type="text" id="f-component" placeholder="name or definition id"></label>
+      <label for="f-operation">Process
+        <input type="text" id="f-operation" placeholder="e.g. drilling"></label>
+      <label for="f-material">Material
+        <input type="text" id="f-material" placeholder="e.g. Steel"></label>
+      <label for="f-profile">Time profile version
+        <input type="text" id="f-profile" placeholder="e.g. 1.0.0"></label>
+      <label for="f-source">Evidence
+        <select id="f-source">
+          <option value="">any</option>
+          <option value="brep">B-Rep</option>
+          <option value="faceted">faceted</option>
+          <option value="unknown">unknown</option>
+        </select></label>
+      <label for="f-confidence">Confidence
+        <select id="f-confidence">
+          <option value="">any</option>
+          <option value="high">high</option>
+          <option value="medium">medium</option>
+          <option value="low">low</option>
+        </select></label>
+      <label for="f-minimum">Minimum sample
+        <input type="number" id="f-minimum" min="1" step="1" placeholder="8"></label>
+      <label class="inline-check" for="f-corrected">
+        <input type="checkbox" id="f-corrected"> corrections only</label>
+      <button type="button" id="feedback-apply" class="secondary">Apply</button>
+      <button type="button" id="feedback-reset" class="secondary">Reset</button>
+    </div>
+    <div id="feedback-body"></div>
+  </div>
+</section>
+</main>
+
+<script src="app.js"></script>
+<script src="features.js"></script>
+<script src="suggestions.js"></script>
+<script src="plan.js"></script>
+<script src="setup.js"></script>
+<script src="timesetup.js"></script>
+<script src="impact.js"></script>
+<script src="assembly.js"></script>
+<script src="feedback.js"></script>
+<script src="estimateflow.js"></script>
+<script type="module" src="viewer.js"></script>
+</body>
+</html>

@@ -1,0 +1,49 @@
+# Windows
+Thumbs.db
+Desktop.ini
+
+# Editors
+.vscode/
+.idea/
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+*.egg-info/
+.pytest_cache/
+/.test-tmp/
+
+# Local databases (including the default CAD_COSTING_DATABASE_URL target and
+# the throwaway database created by the demo pre-flight).
+*.db
+*.sqlite
+*.sqlite3
+
+# Real/demo CAD models (Figure 3.stp alone is ~198 MB). Kept locally, never committed.
+cadmodels/
+*.stp
+*.step
+*.stl
+*.igs
+*.iges
+
+# Local environment and secret-bearing configuration
+.env
+.env.*
+!.env.example
+
+# Runtime, logs, temporary files, browser/automation output, and reports
+*.log
+*.tmp
+*.temp
+*.bak
+logs/
+tmp/
+temp/
+scratch/
+scratchpad/
+reports/
+artifacts/
+playwright-report/
+test-results/

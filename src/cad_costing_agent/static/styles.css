@@ -1,0 +1,747 @@
+:root {
+  --bg: #f5f6f8;
+  --card: #ffffff;
+  --ink: #1c1f24;
+  --muted: #6b7280;
+  --line: #dfe3e8;
+  --accent: #1f6feb;
+  --good: #0f7b3f;
+  --warn-bg: #fff6e0;
+  --warn-line: #e0a92a;
+  --err-bg: #fdecec;
+  --err-line: #c0392b;
+}
+* { box-sizing: border-box; }
+body {
+  margin: 0;
+  font: 15px/1.5 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  background: var(--bg);
+  color: var(--ink);
+}
+header {
+  background: var(--card);
+  border-bottom: 1px solid var(--line);
+  padding: 14px 24px;
+  display: flex;
+  align-items: center;
+  gap: 24px;
+}
+h1 { font-size: 18px; margin: 0; }
+h2 { font-size: 14px; margin: 0 0 12px; text-transform: uppercase; letter-spacing: .04em; color: var(--muted); }
+nav { display: flex; gap: 8px; align-items: center; }
+nav .nav-sep { width: 1px; height: 20px; background: var(--line); margin: 0 4px; }
+main { max-width: 1400px; margin: 24px auto; padding: 0 24px 64px; }
+
+.card { background: var(--card); border: 1px solid var(--line); border-radius: 8px; padding: 16px; }
+
+/* ------------------------------------------------- the estimate workflow */
+/* One estimate, six sections: Overview, CAD, Manufacturing, Cost, Assembly,
+   Quote. Everything used to be on one page at once, which read as an
+   engineering dashboard rather than a costing tool. The cards themselves are
+   unchanged and still owned by the same scripts; only where they appear moved. */
+
+.estimate-bar {
+  display: flex; align-items: center; gap: 24px; flex-wrap: wrap;
+  background: var(--card); border: 1px solid var(--line); border-radius: 8px;
+  padding: 14px 18px; margin-bottom: 12px;
+}
+.eb-identity { min-width: 0; display: flex; flex-direction: column; gap: 2px; }
+.eb-identity strong { font-size: 16px; }
+.eb-identity span { font-size: 12px; }
+.eb-figures { margin-left: auto; display: flex; gap: 28px; }
+.eb-figure { display: flex; flex-direction: column; align-items: flex-end; gap: 2px; }
+.eb-figure .label { font-size: 11px; text-transform: uppercase; letter-spacing: .04em; color: var(--muted); }
+.eb-figure strong { font-size: 19px; font-variant-numeric: tabular-nums; }
+
+.flow-nav {
+  display: flex; gap: 2px; overflow-x: auto;
+  border-bottom: 1px solid var(--line); margin-bottom: 16px;
+}
+button.flow-tab {
+  background: transparent; border: none; border-bottom: 2px solid transparent;
+  border-radius: 0; color: var(--muted); padding: 10px 16px; white-space: nowrap;
+}
+button.flow-tab:hover { color: var(--ink); }
+button.flow-tab.active { color: var(--accent); border-bottom-color: var(--accent); font-weight: 600; }
+button.flow-tab.dim { opacity: .45; }
+
+/* The viewer is shown for the sections that are about the model, and the pane
+   takes the full width for the ones that are about money. */
+.stage { display: grid; grid-template-columns: minmax(0, 1fr); gap: 16px; align-items: start; }
+[data-flow="overview"] .stage,
+[data-flow="cad"] .stage,
+[data-flow="assembly"] .stage { grid-template-columns: minmax(0, 1fr) minmax(0, 1.15fr); }
+.stage-viewer { display: none; position: sticky; top: 16px; min-width: 0; }
+[data-flow="overview"] .stage-viewer,
+[data-flow="cad"] .stage-viewer,
+[data-flow="assembly"] .stage-viewer { display: block; }
+.stage-panes { min-width: 0; }
+.flow-pane { display: flex; flex-direction: column; gap: 16px; min-width: 0; }
+.flow-pane.hidden { display: none; }
+
+/* Overview: the figures a reviewer needs first, and nothing else. */
+.stat-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(148px, 1fr)); gap: 10px; }
+.stat {
+  border: 1px solid var(--line); border-radius: 6px; padding: 10px 12px;
+  background: #fbfcfd; display: flex; flex-direction: column; gap: 3px; min-width: 0;
+}
+.stat .label { font-size: 11px; text-transform: uppercase; letter-spacing: .04em; color: var(--muted); }
+.stat strong { font-size: 15px; font-variant-numeric: tabular-nums; overflow-wrap: anywhere; }
+.stat-note { font-size: 11px; color: var(--muted); }
+
+.overview-warnings { display: flex; flex-direction: column; gap: 8px; margin-top: 14px; }
+.overview-warnings:empty { display: none; }
+
+.next-action {
+  display: flex; align-items: center; gap: 12px; flex-wrap: wrap; margin-top: 14px;
+  padding: 12px 14px; border: 1px solid #cfe0ff; background: #f2f7ff; border-radius: 6px;
+}
+.next-action .label { font-size: 11px; text-transform: uppercase; letter-spacing: .04em; color: var(--accent); font-weight: 600; }
+.next-action .next-text { flex: 1 1 240px; font-size: 14px; }
+
+/* Evidence stays reachable, behind one click rather than in front of it. */
+.detail-toggle { margin-top: 14px; border-top: 1px solid var(--line); padding-top: 12px; }
+.detail-toggle > summary { cursor: pointer; font-size: 13px; color: var(--accent); }
+.detail-toggle > summary:hover { text-decoration: underline; }
+.detail-toggle[open] > summary { margin-bottom: 12px; }
+/* A disclosure that leads a card rather than closing one: no rule above it. */
+.detail-toggle-lead { margin-top: 0; border-top: none; padding-top: 0; margin-bottom: 10px; }
+
+/* A wide table scrolls inside its own card rather than pushing the page
+   sideways. The operations table was 600px wide in a 487px column, and the
+   assembly's bill of materials 618px in a 579px one. These panels are filled
+   by `assembly.js`, so the container carries the rule rather than the markup. */
+.table-scroll { overflow-x: auto; max-width: 100%; }
+#assembly-body,
+#component-costing-body,
+#component-plan-body,
+#assembly-cost-body,
+#component-detail,
+#component-plan-detail { overflow-x: auto; max-width: 100%; }
+
+.quote-actions { margin-top: 14px; }
+
+@media (max-width: 1080px) {
+  [data-flow="overview"] .stage,
+  [data-flow="cad"] .stage,
+  [data-flow="assembly"] .stage { grid-template-columns: minmax(0, 1fr); }
+  .stage-viewer { position: static; }
+  .eb-figures { margin-left: 0; }
+}
+
+label { display: flex; flex-direction: column; gap: 4px; font-size: 13px; color: var(--muted); }
+input, select { font: inherit; padding: 7px 9px; border: 1px solid var(--line); border-radius: 6px; background: #fff; color: var(--ink); }
+input:focus, select:focus { outline: 2px solid var(--accent); outline-offset: -1px; }
+.grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+.grid3 { display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; }
+.unit-row { margin-top: 10px; max-width: 220px; }
+
+button {
+  font: inherit; padding: 9px 16px; border-radius: 6px; border: 1px solid var(--accent);
+  background: var(--accent); color: #fff; cursor: pointer;
+}
+button:disabled { opacity: .5; cursor: not-allowed; }
+button.secondary { background: #fff; color: var(--ink); border-color: var(--line); }
+button.tab { background: transparent; color: var(--muted); border-color: transparent; padding: 6px 12px; }
+button.tab.active { background: #eef4ff; color: var(--accent); }
+button.link { background: none; border: none; color: var(--accent); padding: 0; text-decoration: underline; }
+button.tiny { padding: 3px 8px; font-size: 12px; }
+
+/* ---------------------------------------------------------------- viewer */
+.viewer-panel {
+  background: var(--card); border: 1px solid var(--line); border-radius: 8px; padding: 16px;
+}
+.viewer-panel.over { border-color: var(--accent); box-shadow: 0 0 0 3px #dbe8ff inset; }
+.panel-head { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; }
+.panel-head h2 { margin-bottom: 12px; }
+.viewer-tools { display: flex; gap: 6px; }
+
+.viewer-stage { position: relative; height: clamp(340px, 50vh, 600px); border-radius: 6px; overflow: hidden; background: #11161d; }
+#viewer-canvas { position: absolute; inset: 0; }
+#viewer-canvas canvas { display: block; width: 100%; height: 100%; cursor: grab; }
+#viewer-canvas canvas:active { cursor: grabbing; }
+#viewer-canvas canvas:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+
+.viewer-overlay {
+  position: absolute; inset: 0; display: flex; align-items: center; justify-content: center;
+  gap: 10px; text-align: center; padding: 24px; font-size: 13.5px; line-height: 1.5;
+  background: rgba(17, 22, 29, .88); color: #c6d2e0;
+}
+.viewer-overlay[hidden] { display: none; }
+.viewer-overlay.is-error { color: #ffc9c2; }
+.spinner {
+  width: 16px; height: 16px; border-radius: 50%; flex: none;
+  border: 2px solid #3a4756; border-top-color: #8fb6ec; animation: spin .8s linear infinite;
+}
+@keyframes spin { to { transform: rotate(360deg); } }
+@media (prefers-reduced-motion: reduce) { .spinner { animation-duration: 3s; } }
+
+.viewer-help { color: var(--muted); font-size: 12px; margin: 8px 0 0; }
+kbd { font-family: ui-monospace, Menlo, Consolas, monospace; font-size: 11px; border: 1px solid var(--line); border-bottom-width: 2px; border-radius: 4px; padding: 0 4px; background: #f3f5f7; }
+.model-info { margin-top: 12px; border-top: 1px solid var(--line); padding-top: 4px; }
+
+.result-columns { display: grid; grid-template-columns: 1.3fr 1fr; gap: 24px; align-items: start; }
+
+.hint { color: var(--muted); font-size: 12.5px; margin: 6px 0 0; }
+.muted { color: var(--muted); }
+.mono { font-family: ui-monospace, Menlo, Consolas, monospace; font-size: 12px; }
+.label { color: var(--muted); font-size: 12px; text-transform: uppercase; letter-spacing: .04em; }
+code { background: #eef1f4; padding: 1px 5px; border-radius: 4px; font-size: 12.5px; }
+
+.file-info { margin-top: 10px; border-top: 1px solid var(--line); padding-top: 10px; font-size: 13px; }
+table.mini { width: 100%; border-collapse: collapse; margin-top: 8px; }
+table.mini th { text-align: left; font-weight: 500; color: var(--muted); padding: 3px 0; width: 40%; font-size: 13px; }
+table.mini td { padding: 3px 0; font-size: 13px; }
+
+.badges { display: flex; gap: 6px; flex-wrap: wrap; margin-top: 10px; }
+.badge { font-size: 12px; padding: 2px 9px; border-radius: 999px; border: 1px solid var(--line); background: #f3f5f7; }
+.badge.currency { background: #e8f3ec; border-color: #b6ddc4; color: var(--good); font-weight: 600; }
+.badge.illustrative { background: var(--warn-bg); border-color: var(--warn-line); color: #8a6100; }
+.badge.real { background: #e8f3ec; border-color: #b6ddc4; color: var(--good); }
+
+table.ops { width: 100%; border-collapse: collapse; margin-bottom: 10px; }
+table.ops th { text-align: left; font-size: 12px; color: var(--muted); font-weight: 500; padding: 4px; }
+table.ops td { padding: 3px 4px; }
+table.ops input, table.ops select { width: 100%; padding: 5px 7px; font-size: 13px; }
+/* Wide enough that a process name is never clipped to something ambiguous. */
+table.ops th:first-child, table.ops td:first-child { min-width: 110px; }
+
+.actions { display: flex; align-items: center; gap: 14px; margin: 20px 0; }
+.actions button { padding: 11px 26px; font-size: 15px; }
+
+.error { background: var(--err-bg); border: 1px solid var(--err-line); color: #8c2b21; padding: 12px 14px; border-radius: 8px; margin-bottom: 16px; white-space: pre-wrap; }
+.warning { background: var(--warn-bg); border: 1px solid var(--warn-line); color: #7a5600; padding: 12px 14px; border-radius: 8px; margin-bottom: 16px; }
+
+.headline { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; margin-bottom: 16px; }
+.headline-item { background: var(--card); border: 1px solid var(--line); border-radius: 8px; padding: 18px 20px; }
+.big { display: block; font-size: 32px; font-weight: 650; letter-spacing: -.02em; margin-top: 4px; font-variant-numeric: tabular-nums; }
+
+table.breakdown { width: 100%; border-collapse: collapse; margin-bottom: 14px; }
+table.breakdown th { text-align: left; font-weight: 400; padding: 7px 0; border-bottom: 1px solid var(--line); }
+table.breakdown td { text-align: right; padding: 7px 0; border-bottom: 1px solid var(--line); font-variant-numeric: tabular-nums; }
+table.breakdown tr.subtotal th, table.breakdown tr.subtotal td { font-weight: 600; background: #fafbfc; }
+table.breakdown tr.total th, table.breakdown tr.total td { font-weight: 700; font-size: 16px; border-bottom: none; border-top: 2px solid var(--ink); }
+
+.provenance { font-size: 12.5px; color: var(--muted); border-left: 3px solid var(--line); padding-left: 10px; margin-top: 14px; }
+
+table.history { width: 100%; border-collapse: collapse; margin-top: 12px; }
+table.history th { text-align: left; font-size: 12px; color: var(--muted); font-weight: 500; padding: 6px 8px; border-bottom: 1px solid var(--line); }
+table.history td { padding: 7px 8px; border-bottom: 1px solid var(--line); font-size: 13.5px; }
+table.history td.num, table.history th.num { text-align: right; font-variant-numeric: tabular-nums; }
+table.history tr.row:hover { background: #f7f9fc; cursor: pointer; }
+.history-controls { display: flex; align-items: center; gap: 10px; }
+
+/* ------------------------------------------------- incomplete geometry */
+.gap-card { border-color: var(--warn-line); background: #fffdf6; }
+.gap-card h2 { color: #8a6100; }
+#gap-summary { margin: 0 0 8px; font-size: 13.5px; }
+.gap-choices { display: flex; flex-direction: column; gap: 6px; margin: 12px 0; }
+.gap-choices .choice { flex-direction: row; align-items: center; gap: 8px; color: var(--ink); font-size: 13.5px; }
+.gap-choices input[type="radio"] { width: auto; margin: 0; }
+.gap-entry { display: flex; align-items: flex-end; gap: 10px; flex-wrap: wrap; }
+.gap-entry label { flex: 1 1 180px; }
+#gap-applied { margin-top: 12px; font-size: 13.5px; line-height: 1.6; }
+
+/* ------------------------------------------------------------ features */
+.feature-summary { margin: 10px 0 0; padding-left: 18px; font-size: 13.5px; }
+.feature-summary li { margin: 2px 0; }
+
+table.features { width: 100%; border-collapse: collapse; margin-top: 12px; font-size: 13px; }
+table.features th { text-align: left; font-size: 12px; color: var(--muted); font-weight: 500; padding: 5px 6px; border-bottom: 1px solid var(--line); }
+table.features td { padding: 6px; border-bottom: 1px solid var(--line); vertical-align: top; }
+table.features tr.feature-row:hover { background: #f7f9fc; cursor: pointer; }
+table.features tr.solid-row td { background: #eef2f7; font-weight: 600; font-size: 12px; color: var(--muted); }
+table.features tr.evidence-row td { background: #fbfcfd; font-size: 12.5px; color: var(--muted); }
+table.features tr.evidence-row ul { margin: 6px 0 0; padding-left: 18px; }
+
+.conf { font-size: 11px; padding: 1px 8px; border-radius: 999px; border: 1px solid var(--line); }
+.conf-high { background: #e8f3ec; border-color: #b6ddc4; color: var(--good); font-weight: 600; }
+.conf-medium { background: var(--warn-bg); border-color: var(--warn-line); color: #8a6100; }
+.conf-low { background: #f3f5f7; color: var(--muted); }
+
+/* ------------------------------------------------- selected feature (Step 19) */
+/* The readout for the feature currently marked on the 3D model. */
+.selected-feature {
+  margin-top: 12px;
+  padding: 10px 12px;
+  border: 1px solid var(--warn-line);
+  border-left-width: 3px;
+  background: var(--warn-bg);
+  border-radius: 6px;
+  font-size: 12.5px;
+  line-height: 1.55;
+}
+table.features tr.feature-row.is-selected { background: var(--warn-bg); }
+table.features tr.feature-row.is-selected td:first-child { box-shadow: inset 3px 0 0 var(--warn-line); }
+
+/* --------------------------------------------- suggested operations (Step 19) */
+/* Where a suggestion came from, and whether the user has acted on it. */
+.src { font-size: 11px; padding: 1px 7px; border-radius: 999px; border: 1px solid var(--line); }
+.src-brep { background: #eef4ff; border-color: #c3d6f7; color: #17458f; }
+.src-faceted { background: #f3f5f7; color: var(--muted); }
+
+.suggestion-actions { white-space: nowrap; }
+.suggestion-actions > * { margin-right: 4px; }
+.suggestion-actions select.tiny { font-size: 11px; padding: 2px 4px; max-width: 96px; }
+
+.pill { font-size: 10.5px; padding: 1px 7px; border-radius: 999px; border: 1px solid var(--line); }
+.pill-ok { background: #e8f3ec; border-color: #b6ddc4; color: var(--good); font-weight: 600; }
+.pill-off { background: #f3f5f7; color: var(--muted); }
+
+/* An edited suggestion shows the user's choice and what was suggested, because
+   discarding the original would discard the correction. */
+.op-changed { font-weight: 600; }
+.was { font-size: 11px; color: var(--muted); text-decoration: line-through; }
+
+table.features tr.suggestion-row.action-rejected { opacity: 0.5; }
+table.features tr.suggestion-row.action-accepted td,
+table.features tr.suggestion-row.action-edited td { background: #f6fbf7; }
+
+.declined-list { margin: 6px 0 0; padding-left: 18px; font-size: 12.5px; color: var(--muted); }
+.declined-list li { margin: 3px 0; }
+
+.from-cell { font-size: 11.5px; color: var(--muted); }
+
+/* Says plainly that a plan row carries no time and is therefore not costed. */
+.warning-inline {
+  margin-top: 10px;
+  padding: 9px 11px;
+  background: var(--warn-bg);
+  border: 1px solid var(--warn-line);
+  border-radius: 6px;
+  font-size: 12.5px;
+  color: #7a5600;
+}
+
+/* ------------------------------------------------------------ costing setup */
+.section-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 24px; margin-bottom: 16px; }
+.section-head h2 { margin-bottom: 4px; }
+.section-head .hint { max-width: 62ch; margin: 0; }
+
+.profile-cards { display: grid; grid-template-columns: repeat(auto-fill, minmax(330px, 1fr)); gap: 16px; }
+.profile-card { background: var(--card); border: 1px solid var(--line); border-radius: 8px; padding: 16px; display: flex; flex-direction: column; gap: 10px; }
+.profile-card header { display: flex; flex-direction: column; gap: 8px; }
+.profile-card h3 { margin: 0; font-size: 16px; }
+.profile-figures { margin: 0; font-size: 13.5px; }
+.profile-card .hint { margin: 0; }
+.version-list { list-style: none; margin: 0; padding: 8px 0 0; border-top: 1px solid var(--line); display: flex; flex-direction: column; gap: 5px; font-size: 12.5px; }
+.version-list li { display: flex; align-items: center; gap: 8px; }
+.version-list .ver { font-family: ui-monospace, Menlo, Consolas, monospace; }
+.ver-tag { font-size: 11px; padding: 1px 7px; border-radius: 999px; border: 1px solid var(--line); }
+.ver-tag.current { background: #e8f3ec; border-color: #b6ddc4; color: var(--good); font-weight: 600; }
+.ver-tag.superseded { background: #f3f5f7; color: var(--muted); }
+.card-actions { display: flex; gap: 8px; margin-top: auto; padding-top: 4px; }
+.card-actions button { padding: 7px 12px; font-size: 13px; }
+
+.wizard-steps { display: flex; gap: 4px; flex-wrap: wrap; margin-bottom: 12px; }
+.wstep { background: var(--card); color: var(--muted); border: 1px solid var(--line); padding: 8px 14px; font-size: 13px; }
+.wstep.active { background: #eef4ff; border-color: var(--accent); color: var(--accent); font-weight: 600; }
+
+label.stack { margin-top: 12px; }
+.sub { color: var(--muted); font-size: 11.5px; font-weight: 400; }
+
+table.editor-table { width: 100%; border-collapse: collapse; margin: 10px 0 12px; }
+table.editor-table th { text-align: left; font-size: 12px; color: var(--muted); font-weight: 500; padding: 4px 6px; border-bottom: 1px solid var(--line); }
+table.editor-table td { padding: 4px 6px; }
+table.editor-table input { width: 100%; padding: 6px 8px; font-size: 13px; }
+/* The remove-button column, squeezed to its content. Review tables have no
+   such column, so they keep evenly distributed widths. */
+table.editor-table:not(.review-table) td:last-child,
+table.editor-table:not(.review-table) th:last-child { width: 1%; white-space: nowrap; }
+
+table.review-table td { border-bottom: 1px solid var(--line); font-size: 13px; font-variant-numeric: tabular-nums; }
+table.review-table td:not(:first-child), table.review-table th:not(:first-child) { text-align: right; }
+table.review-table th:first-child, table.review-table td:first-child { width: 45%; }
+.review-summary { display: grid; grid-template-columns: repeat(auto-fit, minmax(130px, 1fr)); gap: 12px; margin-bottom: 16px; padding-bottom: 14px; border-bottom: 1px solid var(--line); }
+.review-summary div { display: flex; flex-direction: column; gap: 2px; }
+.review-summary strong { font-size: 15px; }
+.verdict-ok { background: #e8f3ec; border: 1px solid #b6ddc4; color: #14603a; padding: 12px 14px; border-radius: 8px; }
+
+.hidden { display: none !important; }
+@media (max-width: 1080px) {
+  .workspace, .headline, .result-columns { grid-template-columns: 1fr; }
+
+}
+
+/* ------------------------------------------- manufacturing plan (Step 20) */
+/* The plan table is denser than the old operations table: eight columns, two
+   of them editable numbers, so inputs are sized to their content. */
+table.ops.plan { width: 100%; table-layout: auto; font-size: 12.5px; }
+table.ops.plan th.num, table.ops.plan td.num { text-align: right; }
+table.ops.plan td { vertical-align: middle; padding: 4px 5px; }
+/* The 110px first-column minimum was sized for stacked move buttons. */
+table.ops.plan th:first-child, table.ops.plan td:first-child { min-width: 0; }
+table.ops.plan input, table.ops.plan select { padding: 3px 6px; }
+table.ops.plan input.op-setup,
+table.ops.plan input.op-cycle { width: 74px; text-align: right; }
+table.ops.plan input.op-name { font-size: 12px; }
+table.ops.plan select.op-process { font-size: 12.5px; padding: 2px 4px; }
+table.ops.plan tr.plan-row:hover { background: #f7f9fc; cursor: pointer; }
+table.ops.plan tr.evidence-row td {
+  background: #fbfcfd;
+  font-size: 12px;
+  color: var(--muted);
+  padding: 8px 10px;
+}
+table.ops.plan tr.evidence-row ul { margin: 4px 0 8px; padding-left: 18px; }
+
+/* A time box with nothing committed in it must not look like a filled field:
+   its placeholder shows the estimate, which is deliberately not the value. */
+input.needs-input { border-color: var(--warn-line); background: var(--warn-bg); }
+
+/* Beside the number, not under it: stacking these made every row in the
+   routing 67px tall and the `#` column 126px wide. */
+.seq-cell { white-space: nowrap; font-weight: 600; }
+.seq-buttons { display: inline-flex; gap: 2px; margin-left: 4px; vertical-align: middle; }
+.seq-buttons button { padding: 0 5px; line-height: 1.4; }
+
+/* Process and name on one line. The name flexes and the select does not, so a
+   long description shortens rather than pushing the table sideways. */
+.op-cell { display: flex; align-items: center; gap: 6px; min-width: 0; }
+.op-cell select.op-process { flex: 0 0 auto; max-width: 130px; }
+table.ops.plan .op-cell input.op-name { flex: 1 1 auto; min-width: 0; width: auto; margin-top: 0; }
+.op-cell .was { flex: 0 0 auto; }
+
+/* Give the width back to the columns that carry the answer. */
+table.ops.plan th:nth-child(1), table.ops.plan td:nth-child(1) { width: 1%; }
+table.ops.plan th:nth-child(2) { width: 34%; }
+/* Wide enough for "Needs input" and its "Use estimate" button side by side:
+   wrapping them was the only reason an uncommitted row was taller than a
+   committed one. */
+table.ops.plan th:nth-child(6) { width: 16%; }
+table.ops.plan td:nth-child(6) { white-space: nowrap; }
+table.ops.plan th:nth-child(7) { width: 1%; }
+table.ops.plan td.row-actions { white-space: nowrap; }
+/* A feature id is one token. Breaking "FIL-001" at the hyphen made the fillet
+   rows taller than the drilling rows for no reason. */
+table.ops.plan .feature-link { white-space: nowrap; }
+table.ops.plan th:nth-child(3), table.ops.plan td:nth-child(3) { white-space: nowrap; }
+.setup-meta { display: block; margin-top: 2px; }
+
+/* The setup band. `nowrap` on the timing group is the point: "Use estimate"
+   beside its "Needs input" pill was breaking onto a second line and making the
+   row ragged. The band itself may wrap at narrow widths, between groups. */
+.setup-band { display: flex; align-items: center; gap: 14px; flex-wrap: wrap; }
+.setup-band .seq-cell { flex: 0 0 auto; }
+.setup-identity { flex: 1 1 220px; min-width: 0; }
+.setup-identity input.setup-name { width: 100%; font-weight: 600; }
+.setup-timing { flex: 0 0 auto; display: flex; align-items: center; gap: 8px; white-space: nowrap; }
+.setup-timing input.setup-time { width: 82px; text-align: right; }
+.setup-grouping { flex: 0 1 auto; white-space: nowrap; }
+.setup-band > button.setup-remove { flex: 0 0 auto; margin-left: auto; }
+
+.pill-sys { background: #eef4ff; border-color: #c3d6f7; color: #17458f; font-weight: 600; }
+
+.feature-link { cursor: pointer; text-decoration: underline dotted; }
+.feature-link:hover { color: var(--accent); }
+
+/* The sequence read-out: the routing order, and nothing that implies it costs
+   anything. */
+.sequence-list { margin: 8px 0 0; padding-left: 22px; font-size: 13px; }
+.sequence-list li { margin: 3px 0; }
+
+/* ------------------------------------------------- setup-aware plan (Step 21b) */
+/* A setup header is visually a band across the table, because the grouping it
+   marks is what decides how often setup time is charged. */
+table.ops.plan tr.setup-row td {
+  background: #eef2f7;
+  border-top: 2px solid var(--line);
+  vertical-align: middle;
+  padding: 8px 6px;
+}
+table.ops.plan tr.setup-row:hover { cursor: pointer; }
+table.ops.plan input.setup-name {
+  font-weight: 600;
+  font-size: 13px;
+  width: 100%;
+  background: #fff;
+}
+table.ops.plan input.setup-time { width: 78px; text-align: right; }
+.setup-time-label { font-size: 11px; color: var(--muted); display: inline-flex; flex-direction: row; align-items: center; gap: 6px; }
+table.ops.plan tr.setup-empty td {
+  background: #fbfcfd;
+  font-size: 12px;
+  color: var(--muted);
+  padding: 8px 10px;
+}
+table.ops.plan select.op-setup-choice { font-size: 11.5px; padding: 2px 4px; max-width: 120px; }
+
+/* The live cost impact of a regrouping. Every figure comes from the backend. */
+.plan-impact {
+  margin: 10px 0 4px;
+  padding: 10px 12px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #f7f9fc;
+  font-size: 12.5px;
+}
+.impact-figures { display: flex; flex-wrap: wrap; gap: 6px 20px; }
+.impact-figures strong { font-size: 13.5px; }
+.impact-delta {
+  margin-top: 8px;
+  padding-top: 7px;
+  border-top: 1px dashed var(--line);
+  font-weight: 600;
+  color: var(--accent);
+}
+.impact-warning { margin-top: 7px; color: #8a6100; }
+
+.sequence-ops { margin: 4px 0 8px; padding-left: 20px; font-size: 12.5px; color: var(--muted); }
+.sequence-ops li { margin: 2px 0; }
+
+/* -------------------------------------------- assumptions & impact (Step 22) */
+.assumption-groups {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+  gap: 14px 24px;
+}
+.assumption-group h3 {
+  margin: 0 0 6px;
+  font-size: 12px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--muted);
+}
+.assumption-group table.mini th { width: 44%; }
+
+.impact-headline { font-size: 20px; margin: 4px 0 10px; }
+.impact-change { font-weight: 700; }
+.up { color: var(--err-line); }
+.down { color: var(--good); }
+
+/* The attribution line is the honesty of this screen, so it is styled to be
+   read rather than skipped: amber when several inputs moved at once. */
+.attribution {
+  padding: 9px 12px;
+  border-radius: 6px;
+  font-size: 12.5px;
+  border: 1px solid var(--line);
+  background: #f7f9fc;
+}
+.attribution-multiple_inputs { background: var(--warn-bg); border-color: var(--warn-line); }
+.attribution-single_input { background: #eef4ff; border-color: #c3d6f7; }
+
+table.impacts th { font-weight: 600; white-space: nowrap; }
+table.impacts td.num { white-space: nowrap; font-variant-numeric: tabular-nums; font-weight: 600; }
+/* Rounding and unexplained remainders are deliberately quiet but present. */
+tr.impact-rounding, tr.impact-combined { color: var(--muted); }
+tr.impact-unexplained { background: var(--err-bg); }
+
+table.compare-cols th:first-child { width: 34%; }
+table.compare-cols tr.row-changed { background: var(--warn-bg); }
+table.compare-cols tr.row-changed th { font-weight: 700; }
+
+.compare-ids { display: flex; gap: 24px; font-size: 12.5px; color: var(--muted); margin-bottom: 10px; }
+.small { font-size: 11.5px; }
+
+/* ------------------------------------------------- CAD format capabilities */
+/* Rendered from /cad/formats. A capability that is anything less than fully
+   supported is coloured and carries the backend's reason as its tooltip, so
+   "accepted" can never be mistaken for "works". */
+.formats { display: flex; flex-direction: column; gap: 8px; margin-top: 10px; }
+.format { border: 1px solid var(--line); border-radius: 6px; padding: 8px 10px; background: #fbfcfd; }
+.format-unavailable { background: #f7f7f8; color: var(--muted); }
+.format-head { font-size: 13px; display: flex; gap: 8px; align-items: baseline; flex-wrap: wrap; }
+.format-headline { font-size: 12px; color: var(--muted); margin-top: 2px; }
+.caps { display: flex; flex-wrap: wrap; gap: 5px; margin-top: 6px; }
+.cap {
+  font-size: 11px; padding: 1px 7px; border-radius: 999px;
+  border: 1px solid var(--line); background: #f3f5f7; white-space: nowrap; cursor: help;
+}
+.cap.supported { background: #e8f6ed; border-color: #a7d8bb; color: var(--good); }
+.cap.partially_supported { background: var(--warn-bg); border-color: var(--warn-line); }
+.cap.requires_user_input { background: #eef4ff; border-color: #c3d6f7; color: var(--accent); }
+.cap.unsupported { background: #f1f2f4; border-color: var(--line); color: var(--muted); }
+
+.import-report { margin-top: 10px; border-top: 1px solid var(--line); padding-top: 10px; font-size: 12.5px; }
+.import-head { display: flex; gap: 10px; flex-wrap: wrap; align-items: baseline; }
+.import-warnings, .import-caveats { margin: 6px 0 0; padding-left: 18px; }
+.import-warnings li, .import-caveats li { margin-bottom: 5px; color: var(--muted); }
+.import-warnings li.warn {
+  color: var(--ink); background: var(--warn-bg); border: 1px solid var(--warn-line);
+  border-radius: 6px; padding: 6px 9px; list-style: none; margin-left: -18px;
+}
+
+
+/* ------------------------------------------------------- assembly / BOM */
+table.bom { width: 100%; border-collapse: collapse; margin-top: 8px; }
+table.bom th { text-align: left; font-weight: 600; color: var(--muted); font-size: 12px;
+  border-bottom: 1px solid var(--line); padding: 4px 6px; }
+table.bom td { padding: 4px 6px; font-size: 12.5px; border-bottom: 1px solid #f0f2f4; }
+table.bom td.num { text-align: right; font-variant-numeric: tabular-nums; white-space: nowrap; }
+tr.row-subassembly { color: var(--muted); font-style: italic; }
+tr.row-uncosted { background: #fbfbfc; color: var(--muted); }
+
+/* A component's geometry status is coloured because "no geometry in file" is
+   the difference between a costed part and one that only exists as a name. */
+.geo-measured { color: var(--good); }
+.geo-no_geometry_in_file { color: var(--err-line); }
+.geo-not_measured, .geo-failed { color: var(--muted); }
+
+button.component-pick { text-align: left; }
+button.component-pick.picked { font-weight: 700; color: var(--accent); text-decoration: none; }
+
+.assembly-warning {
+  background: var(--warn-bg); border: 1px solid var(--warn-line); border-radius: 6px;
+  padding: 7px 10px; font-size: 12.5px; margin: 8px 0 0;
+}
+
+
+/* ------------------------------------------------------- exploded view */
+.explode {
+  display: grid; grid-template-columns: auto 1fr auto auto; gap: 8px; align-items: center;
+  margin-top: 10px; padding-top: 10px; border-top: 1px solid var(--line);
+}
+.explode-label { flex-direction: row; font-size: 12px; text-transform: uppercase; letter-spacing: .04em; }
+.explode input[type="range"] { width: 100%; }
+.explode output { font-variant-numeric: tabular-nums; font-size: 12.5px; min-width: 40px; text-align: right; }
+/* The disclaimer spans the whole control, because it is the point of it. */
+.explode-note { grid-column: 1 / -1; margin: 0; font-size: 11.5px; color: var(--muted); }
+
+/* ------------------------------------------------------- assembly tree */
+.tree { list-style: none; margin: 8px 0 0; padding-left: 0; font-size: 12.5px; }
+.tree ul { list-style: none; margin: 0; padding-left: 14px; border-left: 1px solid var(--line); }
+.tree li { padding: 1px 0; }
+.tree .node { display: flex; gap: 6px; align-items: baseline; }
+.tree .kind {
+  font-size: 10.5px; text-transform: uppercase; letter-spacing: .04em; color: var(--muted);
+  border: 1px solid var(--line); border-radius: 3px; padding: 0 4px; background: #f3f5f7;
+}
+.tree .kind.subassembly { background: #eef4ff; border-color: #c3d6f7; color: var(--accent); }
+/* "×2" is a property of the definition; "#1 of 2" is which placement this is.
+   Showing both is what keeps a definition and an occurrence distinguishable. */
+.tree .qty { color: var(--muted); font-size: 11.5px; }
+.tree .instance-of { color: var(--muted); font-size: 11px; }
+.tree button.node-pick { text-align: left; padding: 0; }
+.tree button.node-pick.picked { font-weight: 700; color: var(--accent); text-decoration: none; }
+.tree .no-geometry { color: var(--err-line); font-size: 11px; }
+
+/* ------------------------------------------ component classification */
+/* The classification chip is deliberately loud. A total made of manufactured,
+   purchased and standard parts reads completely differently from one made of
+   machined parts alone, and the difference must be visible in the row rather
+   than discoverable in a detail panel. */
+.chip {
+  display: inline-block; font-size: 10.5px; text-transform: uppercase;
+  letter-spacing: .04em; border: 1px solid var(--line); border-radius: 3px;
+  padding: 0 5px; background: #f3f5f7; color: var(--muted); white-space: nowrap;
+}
+.chip.class-manufactured { background: #eef4ff; border-color: #c3d6f7; color: var(--accent); }
+.chip.class-purchased    { background: #fff4e6; border-color: #f3d19b; color: #8a5b00; }
+.chip.class-standard     { background: #f0f7ee; border-color: #c6e0bd; color: #3d6b33; }
+.chip.class-excluded     { background: #f4f4f6; border-color: #d9d9de; color: #6c6c78; }
+.chip.class-unresolved   { background: var(--warn-bg); border-color: var(--warn-line); color: #8a5b00; }
+.chip.excluded-chip      { background: #f4f4f6; border-color: #d9d9de; color: #6c6c78; }
+
+.tiny { font-size: 11px; }
+.tiny.muted, span.tiny.muted { color: var(--muted); }
+/* A changed classification is called out: the pair "system said / you said" is
+   the record this step exists to keep, so it must not read as decoration. */
+.tiny.changed { color: var(--accent); font-weight: 600; }
+.tiny.warn { color: #8a5b00; }
+
+/* The assembly panel is a narrow column, so anything long — a costing input
+   group, the reason a component was not costed — gets its own full-width row
+   under the component rather than a squeezed cell beside it. Six columns of
+   prose in 480px produced twenty-line rows and a horizontally scrolling page. */
+tr.inputs-row > td { padding-top: 0; border-bottom: 1px solid #e6e9ec; }
+tr.reason-row > td { padding-top: 0; border-bottom: 1px solid #e6e9ec; }
+tr.decision-row > td { border-bottom: none; }
+table.bom tr:not(.reason-row) + tr.reason-row td { padding-left: 6px; }
+
+.inline-fields { display: flex; flex-wrap: wrap; gap: 8px; align-items: flex-end; }
+.inline-fields label { display: flex; flex-direction: column; gap: 2px; color: var(--muted); }
+.inline-fields input { font-size: 12px; padding: 3px 5px; min-width: 80px; max-width: 140px; }
+.inline-fields input.currency-input { min-width: 56px; text-transform: uppercase; }
+select.classification-select { font-size: 12px; padding: 2px 4px; }
+button.classification-pick { text-align: left; padding: 0; }
+input.qty-input { width: 80px; }
+
+tr.row-excluded { background: #fafafb; color: var(--muted); text-decoration: line-through; }
+tr.row-excluded td:last-child { text-decoration: none; }
+
+.component-detail:empty { display: none; }
+.component-detail {
+  margin-top: 12px; padding-top: 10px; border-top: 1px solid var(--line);
+}
+.component-detail h3 { margin: 0 0 6px; font-size: 14px; }
+.component-detail th { text-align: left; font-weight: 600; color: var(--muted); width: 170px; }
+
+/* ------------------------------------------------------ quotation action */
+/* The link out to the report page. Styled as a button because it is an
+   action, but it is a real anchor so the report opens in its own tab — a
+   document to be printed should not replace the estimate it came from. */
+a.button {
+  display: inline-block; font: inherit; padding: 6px 12px; border-radius: 5px;
+  border: 1px solid var(--accent); background: var(--accent); color: #fff;
+  text-decoration: none; cursor: pointer;
+}
+a.button.secondary { background: #fff; color: var(--ink); border-color: var(--line); }
+
+
+/* ------------------------------------------------ component plan status */
+/* A plan's status is not a cost, and the difference between "not generated"
+   and "no manufacturing plan" is the whole point of showing it: the first is
+   work nobody has planned yet, the second is a component that is bought. They
+   must never look alike. */
+.plan-status {
+  display: inline-block; font-size: 10.5px; text-transform: uppercase;
+  letter-spacing: .04em; border: 1px solid var(--line); border-radius: 3px;
+  padding: 0 5px; white-space: nowrap; background: #f3f5f7; color: var(--muted);
+}
+.plan-status.generated { background: #f0f7ee; border-color: #c6e0bd; color: #3d6b33; }
+.plan-status.needs_user_input { background: var(--warn-bg); border-color: var(--warn-line); color: #8a5b00; }
+.plan-status.not_generated { background: #eef4ff; border-color: #c3d6f7; color: var(--accent); }
+.plan-status.not_applicable { background: #f4f4f6; border-color: #d9d9de; color: #6c6c78; }
+.plan-status.blocked { background: #fdeeee; border-color: #dda0a0; color: #8a2020; }
+
+/* The banner naming which component's plan the operations table is editing.
+   Prominent because editing the wrong component's routing is silent otherwise. */
+.plan-scope {
+  background: #eef4ff; border: 1px solid #c3d6f7; border-left-width: 4px;
+  border-radius: 5px; padding: 7px 10px; margin: 0 0 8px; font-size: 12.5px;
+}
+.plan-scope strong { color: var(--accent); }
+.plan-scope button { margin-left: 8px; }
+
+table.mini.plans td { vertical-align: top; }
+.missing-list { margin: 2px 0 0; padding-left: 16px; }
+.missing-list li { font-size: 11px; color: #8a5b00; }
+
+
+/* ------------------------------------------------------ feedback analytics */
+/* The disclaimer is the most important sentence on the page: a screen full of
+   correction rates is exactly where a reader starts to assume something is
+   adapting. It is styled to be read, not skipped. */
+.notice-learning {
+  background: #eef4ff; border: 1px solid #c3d6f7; border-left-width: 4px;
+  border-radius: 5px; padding: 8px 11px; margin: 0 0 12px; font-size: 12px;
+  color: #1c4fa1;
+}
+
+/* A figure resting on too little evidence is dimmed rather than hidden. Hiding
+   it would leave the reader unable to tell "no data" from "nothing to report",
+   and showing it plainly would let it be read as solid. */
+tr.thin-evidence { background: #fcfbf6; }
+tr.thin-evidence td.num { color: #8a5b00; }
+
+/* `display: flex` is the one that matters. `.row` is not a flex container, so
+   `flex-wrap` alone had nothing to wrap: the labels are `display: flex`
+   themselves and, as block-level children of a block, each took a whole line —
+   a 377px-tall filter column instead of a bar. `flex: 0 0 auto` then stops them
+   stretching to fill it. */
+.feedback-filters { display: flex; flex-wrap: wrap; gap: 8px 12px; align-items: flex-end; }
+.feedback-filters > * { flex: 0 0 auto; }
+.feedback-filters label { display: flex; flex-direction: column; gap: 2px;
+  font-size: 11.5px; color: var(--muted); }
+.feedback-filters input[type="text"], .feedback-filters select { font-size: 12px; padding: 3px 5px; }
+.feedback-filters input[type="text"] { min-width: 120px; }
+.feedback-filters input[type="number"] { width: 80px; }
+.feedback-filters label.inline-check { flex-direction: row; align-items: center; gap: 5px; }
+button.feedback-tab.picked { background: var(--accent); color: #fff; border-color: var(--accent); }
+
+#feedback-body h3 {
+  font-size: 12px; text-transform: uppercase; letter-spacing: .05em;
+  color: var(--muted); margin: 16px 0 5px;
+}
+#feedback-body table.mini { margin-bottom: 4px; }

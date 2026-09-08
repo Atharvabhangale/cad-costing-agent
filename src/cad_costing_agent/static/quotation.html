@@ -1,0 +1,66 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Quotation — CAD Costing Agent</title>
+  <link rel="stylesheet" href="quotation.css">
+</head>
+<body>
+  <!--
+    A standalone report page, deliberately sharing nothing with the application
+    shell: no navigation, no viewer, no interactive panels. What is on this page
+    is what comes out of the printer.
+
+    Everything below is rendered from GET /estimates/{id}/quotation, which reads
+    the estimate's own immutable snapshots. The browser formats and lays out;
+    it computes no cost, and a test greps this file's script to keep it so.
+  -->
+  <div class="no-print" id="controls">
+    <button type="button" id="print" class="primary">Print / Save as PDF</button>
+    <label for="view">View</label>
+    <select id="view">
+      <option value="customer">Customer</option>
+      <option value="engineering">Engineering detail</option>
+    </select>
+    <button type="button" id="edit-details">Customer / project details</button>
+    <button type="button" id="issue">Issue quotation</button>
+    <span class="spacer"></span>
+    <span class="hint" id="status"></span>
+  </div>
+
+  <!-- The metadata form. Not part of the document, and hidden in print. -->
+  <div class="no-print" id="details" hidden>
+    <div class="sheet" style="min-height:0;padding:12mm">
+      <h2>Customer / project details</h2>
+      <div class="fields">
+        <label class="field"><span class="label">Customer</span>
+          <input id="m-customer" class="value" type="text" placeholder="Customer name"></label>
+        <label class="field"><span class="label">Project</span>
+          <input id="m-project" class="value" type="text" placeholder="Project or programme"></label>
+        <label class="field"><span class="label">Quote ref.</span>
+          <input id="m-reference" class="value" type="text" placeholder="left blank: the estimate id is used"></label>
+        <label class="field"><span class="label">Prepared by</span>
+          <input id="m-prepared" class="value" type="text" placeholder="Name"></label>
+        <label class="field"><span class="label">Validity</span>
+          <input id="m-validity" class="value" type="text" placeholder="e.g. 30 days from the date above"></label>
+        <label class="field"><span class="label">Notes</span>
+          <input id="m-notes" class="value" type="text" placeholder="Anything to appear on the quotation"></label>
+      </div>
+      <p class="hint small">
+        These fields are printed on the document and nothing is inferred from
+        them. There is no customer record and no address book here.
+      </p>
+      <div class="fields" style="margin-top:8px">
+        <button type="button" id="apply-details" class="primary">Apply</button>
+      </div>
+    </div>
+  </div>
+
+  <div class="sheet" id="report">
+    <p class="muted">Loading…</p>
+  </div>
+
+  <script src="quotation.js"></script>
+</body>
+</html>

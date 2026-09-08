@@ -1,0 +1,276 @@
+/* The quotation report.
+ *
+ * A standalone document, not a panel in the application. It carries none of
+ * the app's chrome and shares none of its stylesheet, because the thing being
+ * produced here is a page that gets printed and sent — and the surest way to
+ * make that print badly is to inherit an interactive layout.
+ *
+ * Print is the primary target, not an afterthought: the screen rules below are
+ * a preview of what the paper will look like.
+ */
+
+:root {
+  --ink: #1a1c1f;
+  --muted: #626873;
+  --line: #d8dce1;
+  --rule: #9aa2ad;
+  --warn-bg: #fdf6e3;
+  --warn-line: #e0c169;
+  --warn-ink: #6b4e00;
+  --stop-bg: #fdeeee;
+  --stop-line: #dda0a0;
+  --stop-ink: #8a2020;
+  --page: #ffffff;
+}
+
+* { box-sizing: border-box; }
+
+/* `hidden` has to beat the layout rules below. A `display: flex` on an element
+   carrying the attribute defeats it silently, which is how the metadata form
+   came to be showing on an already-issued quotation. */
+[hidden] { display: none !important; }
+
+body {
+  margin: 0;
+  background: #eef0f3;
+  color: var(--ink);
+  font: 13px/1.45 "Segoe UI", -apple-system, BlinkMacSystemFont, Arial, sans-serif;
+  -webkit-print-color-adjust: exact;
+  print-color-adjust: exact;
+}
+
+/* One A4 sheet's worth of width on screen, so what is previewed is what is
+   printed rather than a wider layout that reflows at print time. */
+.sheet {
+  width: 210mm;
+  min-height: 297mm;
+  margin: 16px auto;
+  padding: 16mm 16mm 18mm;
+  background: var(--page);
+  box-shadow: 0 1px 6px rgba(0, 0, 0, .12);
+}
+
+/* ------------------------------------------------------------- the controls */
+/* Not part of the document. Hidden in print, and a test asserts it. */
+.no-print {
+  width: 210mm;
+  margin: 16px auto 0;
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  flex-wrap: wrap;
+  font-size: 12.5px;
+}
+.no-print button,
+.no-print a.button {
+  font: inherit;
+  padding: 6px 12px;
+  border: 1px solid var(--rule);
+  border-radius: 5px;
+  background: #fff;
+  color: var(--ink);
+  cursor: pointer;
+  text-decoration: none;
+}
+.no-print button.primary { background: var(--ink); color: #fff; border-color: var(--ink); }
+.no-print .spacer { flex: 1; }
+.no-print .hint { color: var(--muted); }
+
+/* ------------------------------------------------------------- the letterhead */
+.head {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 16px;
+  border-bottom: 2px solid var(--ink);
+  padding-bottom: 8px;
+}
+.head h1 { margin: 0; font-size: 19px; letter-spacing: .01em; }
+.head .subtitle { color: var(--muted); font-size: 12px; margin-top: 2px; }
+.head .ref { text-align: right; font-size: 12px; }
+.head .ref .number { font-size: 15px; font-weight: 700; }
+.head .ref div { white-space: nowrap; }
+
+/* ------------------------------------------------------------- field blocks */
+.fields {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 4px 24px;
+  margin: 12px 0 0;
+}
+.fields.three { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+.field { display: flex; gap: 6px; font-size: 12px; align-items: baseline; }
+.field .label { color: var(--muted); min-width: 88px; }
+.field .value { font-weight: 600; }
+.field .value.plain { font-weight: 400; }
+
+h2 {
+  font-size: 12px;
+  text-transform: uppercase;
+  letter-spacing: .06em;
+  color: var(--muted);
+  margin: 18px 0 6px;
+  padding-bottom: 3px;
+  border-bottom: 1px solid var(--line);
+}
+
+/* ------------------------------------------------------------- tables */
+table { width: 100%; border-collapse: collapse; font-size: 12px; }
+th { text-align: left; font-weight: 600; }
+thead th {
+  border-bottom: 1px solid var(--rule);
+  padding: 4px 6px;
+  color: var(--muted);
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: .04em;
+}
+tbody td, tbody th { padding: 4px 6px; border-bottom: 1px solid #eceef1; vertical-align: top; }
+td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; white-space: nowrap; }
+tr.reason td { padding-top: 0; color: var(--muted); font-size: 11px; }
+tr.excluded td:not(.reason) { color: var(--muted); }
+tr.uncosted { color: var(--muted); }
+
+/* The cost summary: the figures a reader checks first, so they are the most
+   legible thing on the page. */
+table.summary td.num { font-size: 13px; }
+table.summary tr.total th,
+table.summary tr.total td {
+  border-top: 2px solid var(--ink);
+  border-bottom: none;
+  padding-top: 6px;
+  font-size: 15px;
+  font-weight: 700;
+}
+table.summary tr.subtle th, table.summary tr.subtle td { color: var(--muted); }
+
+.chip {
+  display: inline-block;
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: .04em;
+  border: 1px solid var(--line);
+  border-radius: 3px;
+  padding: 0 5px;
+  white-space: nowrap;
+}
+.chip.manufactured { background: #eef4ff; border-color: #c3d6f7; color: #1c4fa1; }
+.chip.purchased { background: #fff4e6; border-color: #f3d19b; color: #8a5b00; }
+.chip.standard { background: #f0f7ee; border-color: #c6e0bd; color: #3d6b33; }
+.chip.excluded { background: #f4f4f6; border-color: #d9d9de; color: #6c6c78; }
+.chip.unresolved { background: var(--warn-bg); border-color: var(--warn-line); color: var(--warn-ink); }
+
+/* ------------------------------------------------------------- warnings */
+/* Prominent, and professional rather than alarming. Never suppressed. */
+.notice {
+  border: 1px solid var(--warn-line);
+  background: var(--warn-bg);
+  color: var(--warn-ink);
+  border-left-width: 4px;
+  border-radius: 3px;
+  padding: 7px 10px;
+  margin: 8px 0 0;
+  font-size: 11.5px;
+}
+.notice strong { display: block; font-size: 12px; margin-bottom: 2px; }
+.notice.advisory {
+  border-color: var(--line);
+  border-left-color: var(--rule);
+  background: #f7f8fa;
+  color: var(--ink);
+}
+.notice.stop {
+  border-color: var(--stop-line);
+  border-left-color: var(--stop-ink);
+  background: var(--stop-bg);
+  color: var(--stop-ink);
+}
+
+.unavailable { text-align: center; padding: 40mm 0; }
+.unavailable h2 {
+  border: none;
+  font-size: 20px;
+  text-transform: none;
+  letter-spacing: 0;
+  color: var(--stop-ink);
+  margin: 0 0 10px;
+}
+
+.provenance-note, .basis {
+  font-size: 10.5px;
+  color: var(--muted);
+  margin: 6px 0 0;
+  border-left: 3px solid var(--line);
+  padding-left: 8px;
+}
+.assumption {
+  border: 1px solid var(--warn-line);
+  background: var(--warn-bg);
+  color: var(--warn-ink);
+  padding: 7px 10px;
+  border-radius: 3px;
+  font-size: 11.5px;
+  margin: 6px 0 0;
+}
+.assumption .headline { font-weight: 700; }
+
+.foot {
+  margin-top: 18px;
+  padding-top: 6px;
+  border-top: 1px solid var(--line);
+  font-size: 10.5px;
+  color: var(--muted);
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.setup { margin: 0 0 8px; }
+.setup .setup-head { font-weight: 600; font-size: 12px; }
+.setup .setup-meta { color: var(--muted); font-size: 11px; }
+.setup ul { margin: 2px 0 0; padding-left: 18px; }
+.setup li { font-size: 11.5px; }
+
+.muted { color: var(--muted); }
+.small { font-size: 11px; }
+dl.pairs { display: grid; grid-template-columns: max-content 1fr; gap: 2px 12px; margin: 0; font-size: 11.5px; }
+dl.pairs dt { color: var(--muted); }
+dl.pairs dd { margin: 0; }
+
+/* ------------------------------------------------------------- print */
+/* Margins only, deliberately no `size`.
+ *
+ * Forcing `size: A4` would override whatever paper the reader chose in the
+ * print dialog, and a Letter printer would then scale or clip the page. The
+ * layout is set in millimetres inside generous margins and nothing is
+ * positioned against a page edge, so the same document prints cleanly on A4
+ * (210 x 297) and Letter (216 x 279) without reflowing — verified as 2 pages
+ * on A4 for a one-part quotation. */
+@page {
+  margin: 14mm 14mm 16mm;
+}
+
+@media print {
+  body { background: #fff; }
+  /* The browser supplies the page margin, so the sheet must not add its own
+     or every page inherits a 16 mm indent on top of it. */
+  .sheet {
+    width: auto;
+    min-height: 0;
+    margin: 0;
+    padding: 0;
+    box-shadow: none;
+  }
+  .no-print { display: none !important; }
+
+  /* Repeating headers, so a table that spans a page break stays readable. */
+  thead { display: table-header-group; }
+  tfoot { display: table-footer-group; }
+  tr, .notice, .setup, .assumption { break-inside: avoid; page-break-inside: avoid; }
+  table.summary { break-inside: avoid; page-break-inside: avoid; }
+  h2 { break-after: avoid; page-break-after: avoid; }
+  .page-break { break-before: page; page-break-before: always; }
+
+  /* Nothing scrolls on paper. */
+  * { overflow: visible !important; }
+}
