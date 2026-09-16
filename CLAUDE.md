@@ -29,9 +29,23 @@ pytest -k "faceted and not viewer"                                  # by express
 alembic current
 alembic upgrade head
 alembic revision --autogenerate -m "..."   # after changing db_models.py
+
+# Demo. `DEMO.md` is the runbook (PowerShell — this is a Windows machine, and a
+# bash-syntax command line in it is a parse error, not a portability nit). The
+# pre-flight publishes a rate set through the ordinary API and warms
+# OpenCASCADE; it adds no demo mode and fakes nothing.
+python scripts\demo_preflight.py --base-url http://127.0.0.1:8000
 ```
 
 There is no linter or formatter configured, and no build step for the frontend.
+
+**Two rate sets and one time profile are seeded at startup, and they are not interchangeable.**
+`poc-default` prices milling, drilling **and turning**; both versions of `poc-machine-shop` price
+milling and drilling only. Any plan containing a turning operation — which the `pump_assembly`
+fixture's components and most real parts do — fails against `poc-machine-shop` with *"has no rate
+for process type 'turning'"*, a 400 that reads like a bug in whatever you just wrote. It has cost
+two debugging detours: once in the demo pre-flight, once in a test. The time profile is
+`poc-baseline-time`. All are flagged illustrative and the UI says so unmissably.
 
 Real CAD test models live in `cadmodels/` which is **git-ignored** — `Figure 3.stp` alone is
 ~198 MB. Never add them to the repository. `tests/step_fixtures.py`,
@@ -643,6 +657,16 @@ name matches the paragraph promising the name is absent. Where even stripped mod
 match — `component_classification.py` names bolts and bearings in a user-facing string constant —
 unparse the one function under test rather than the module.
 
+**A quotable assembly in a test is a *reviewed* one.** Since manufacturing completeness joined the
+roll-up, an assembly whose manufactured components have committed no time is refused as a customer
+document however exact its arithmetic — so a test about the *document* has to accept the estimates
+first. `tests/assembly_fixtures.committed_plans(client, rate_set_id=...)` builds every manufactured
+component's plan through the real endpoint and accepts every system estimate (`commit_every_time`
+does the accepting, and is the single implementation of what the operations table's "use all
+estimates" does). Pass the same classification decisions to it that the cost call will use, or the
+plans endpoint refuses the contradiction — planning a component another call excludes. And use
+`poc-default`, per the rate-set note above.
+
 And **write a structural pattern out literally rather than interpolating it**. Three assertions in
 this suite carried a literal backspace byte where a `\b` escape was meant, so their patterns could
 never match and they had been passing on anything; they were only found when one of them was
@@ -651,7 +675,8 @@ extended. A structural test that cannot fail is worse than no test, because it i
 ## Documentation discipline
 
 `README.md`, `ARCHITECTURE.md` and `PROJECT_STATUS.md` are maintained to describe **only what has
-actually been built** — `PROJECT_STATUS.md` records each numbered step with its real test counts
+actually been built** — as are `DEMO.md`, whose every number was measured against the running
+application, and `CHECKPOINT.md`, a point-in-time handoff that is *not* updated in place — — `PROJECT_STATUS.md` records each numbered step with its real test counts
 and live-verification numbers, and keeps an explicit "What has NOT been done" list. Do not add
 aspirational claims, and do not describe this proof-of-concept as production-grade. When a step
 changes behaviour, correct any statement the change made stale rather than only appending.
