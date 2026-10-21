@@ -1,6 +1,6 @@
 # Project Status
 
-Last updated: 2026-09-07 (UI restructuring; no roadmap step started)
+Last updated: 2026-10-21 (Iteration 2 — manufacturing family and route classification)
 
 **Paused after Step 30.** `CHECKPOINT.md` is the short way back in: the current
 architecture, database and migration state, test baseline, the exact remaining
@@ -8,6 +8,17 @@ evidence limitations and what the next session should do first. This file remain
 the full step-by-step record.
 
 ## Current stage
+
+**Iteration 2: a part's manufacturing family and process route are recommended from
+its recognized features, and an engineer confirms, overrides or marks them unknown.**
+The recommendation is never more than `medium` confidence, names the features and
+signals it stood on, lists the families it is equally consistent with, and says what
+information would settle it. Casting, forging, moulding, welding, additive and
+purchased are never proposed from geometry, because nothing here can detect evidence
+for them; they can be chosen. A route containing a stage the existing costing cannot
+price (anything but milling, drilling and turning) is refused by `/cost/cad-part` with
+a 422 rather than priced as machining, and so is a route marked unknown. Sending no
+classification changes nothing. Details in *Iteration 2* below.
 
 **UI restructuring, ahead of a live demo — not a roadmap step.** The estimate page
 was one scrolling page of eighteen cards; it is now six sections in the order the
@@ -823,6 +834,117 @@ all. One test added. Suite: **1,760 passing**, 1 skipped.
   (1,722 collected, 1 skipped). One file added, `static/estimateflow.js`. **No
   Python file changed, no endpoint, no schema, no migration.**
 
+### Iteration 2 — manufacturing family and process route, recommended and confirmed
+
+**Audit first.** No family or route classification existed. `operation_suggestions`
+proposes `milling`/`drilling`/`turning` per feature; `component_classification` is
+make/buy for assembly components only; nothing checked whether a part is machined at
+all before machining rates were applied to it. Signals the pipeline genuinely carries:
+feature axes and on-axis locations, plane normals, centres and areas, per-solid volume,
+solid count, unclassified-face count and the representation. Nothing detects draft,
+parting lines, weld preparations or lattices.
+
+**What was built.**
+- `process_classification.py` — a pure module importing only `features.model` and
+  `operation_suggestions`. `classify_process(recognition, suggestions)` reads three
+  signals from the existing features (no second parse): *features cut into a solid*
+  (pockets, slots, blind and counterbored holes), *rotational form* (every external
+  cylinder on one axis and every planar face square to it) and *constant wall
+  thickness* (one opposite-plane separation holding at least 75% of the planar area,
+  thin against that area, and agreeing with the measured volume to 10%). Each signal is
+  reported observed, not observed or not assessable, with the reason and the constant
+  that decided it. Rules, in order: no features → `unknown`; a constant wall with
+  nothing cut into it → `sheet_metal` (cut, or cut + bend when the wall runs in more
+  than one direction) at **low**; faces and blends only → `unknown`; otherwise
+  `machining`, with the route built from the suggested processes. On a rotational part
+  the faces the per-feature rules proposed milling for are faced in the turning stage;
+  on a prismatic part a turning suggestion for a boss is treated as milling at route
+  level (the per-feature suggestion itself is unchanged). Family confidence is capped
+  at `medium`, and lowered to `low` for non-B-Rep evidence, several solids, or
+  unrecognized faces.
+- A catalog of 19 routes across the nine families; each stage states whether a cost
+  model exists for it. Only milling, drilling and turning stages do.
+- `record_route_decision` writes `user_action` / `user_route` / `user_note` beside the
+  untouched `system_*` fields; choosing the recommended route is recorded as an
+  acceptance; `unknown` marks the route as needing information; accepting when nothing
+  was recommended is refused. `family`, `route`, `decision_status`, `costing_status`,
+  `unsupported_stages`, `blocks_costing` and `costing_note` are computed, so a payload
+  round-tripped through the browser cannot declare itself costable.
+- API: `/cad/operations/suggest` now also returns `process_classification` (same
+  request, same parse); `GET /process-routes`; `POST /cad/process/decide` (persists
+  nothing). `/cost/cad-part` takes an optional `process_classification` form field: a
+  blocking route is refused with `422 process_route_not_costable` before anything is
+  priced and nothing is stored; otherwise the classification and any plan-vs-route
+  disagreement (`process_route_differences`, reported, never corrected) are stored in
+  the request snapshot. Those keys are absent when no classification is sent.
+- UI: a *Manufacturing process* card at the top of the Manufacturing section
+  (`static/process.js`, loaded after `plan.js`) showing the recommendation, stage
+  basis, cost-model badges, the costing note, and the evidence behind a disclosure;
+  route list from `/process-routes`; confirm / use selected route / mark unknown /
+  withdraw. `app.js` sends the classification with the cost request and now shows the
+  `message` of a structured refusal instead of "The request failed (HTTP 422)".
+
+**Not blocking, by design.** An unreviewed `unknown` does not block costing: the
+engineer's own operations are priced as before and the snapshot records that the
+route was not established. An unreviewed *sheet* recommendation does block, with a
+note asking for a confirmation or an override.
+
+**Tests.** New `tests/test_process_classification.py` (84 tests) and six STEP
+builders in `tests/step_fixtures.py` (`PROCESS_FIXTURES`, kept out of `ALL_FIXTURES`):
+a stepped shaft, the shaft with an axial blind hole, the shaft with a cross hole, a
+2 mm L-bracket with two holes, a flat 2 mm blank, and the blank with a milled pocket.
+No existing test was changed. Full run of exactly this commit's tree, exported from
+the index into a separate directory: **1844 passed, 1 skipped** (1845
+collected, 210 s). It was developed in a working tree that also held a separate,
+uncommitted iteration recording actual costs, which this change does not touch; with
+that work present the suite was 1802 passed, 1 skipped before this change and 1886
+passed, 1 skipped after it.
+
+**Live verification** (scratch database, port 8711; run in the working tree described
+above, and nothing below depends on the actual-cost work).
+- Classification of the real models: `model1_1.stp` and `model1_1_solid.igs` agree —
+  machining, milling + drilling, low (no feature cut into the solid; 4 unrecognized
+  faces; an 8 mm wall holds 72% of the planar area, below 75%). `model2.stp`:
+  machining, milling + drilling, low (two solids; its two external cylinders are not
+  coaxial, so not rotational; fabrication offered as a candidate).
+  `model1_1_surfaces.igs`: `unknown` — only planar milling suggestions survive from a
+  surface-mode export. Each took 0.5–3.9 s including recognition.
+- Costing `model1_1.stp`, 10 off, `poc-default`, every suggested operation at 2.0 min:
+  **₹19,613.86** with no classification, with the unreviewed recommendation, and
+  confirmed — identical. Overridden to casting + machining: 422
+  `cost_model_not_available`; marked unknown: 422 `route_unknown`; estimate count
+  unchanged after each. Overridden to milling + drilling: ₹19,613.86.
+- The bent bracket: sheet cutting + bending recommended at low; 422 with "has not been
+  reviewed" until overridden to milling + drilling, then costed (₹3,933.82 with the
+  same 2.0 min times).
+- Browser (headless Chrome over DevTools, screenshots inspected): uploaded the bracket,
+  analysed, suggested — the card showed the recommendation, both stages with *no cost
+  model* badges and the refusal note; *Calculate estimate* showed the 422 message in
+  the page and no result panel; after *Use selected route* (milling + drilling, with a
+  note) the card showed the recommendation unchanged beside the engineer's route, and
+  the estimate was produced (₹0.49, material only, because no operation time had been
+  committed in the browser — the existing omit-don't-default rule); its stored snapshot
+  held both routes, the note, and the plan-vs-route differences. Defects found and
+  fixed during this: a doubled full stop after the sheet reason, and the surface-mode
+  IGES signal wrongly describing its features as fitted to polygons.
+
+**Limitations.**
+- Shape does not determine process, and this layer says so rather than solving it.
+  The thresholds behind the two geometric signals are stated constants, not measured
+  against a population of real parts. `model1_1.stp` (an 8 mm bracket) is classified
+  machining because its wall holds 72% of the planar area against the 75% threshold;
+  if it is in fact a bent plate, the engineer has to say so.
+- No cost model exists for any stage but milling, drilling and turning. This iteration
+  refuses those routes; it does not price them.
+- Assembly components are not classified. `/cad/assembly/plans` and `/cost/assembly`
+  are unchanged.
+- The plan's operations are not adjusted to match a confirmed route; disagreements are
+  recorded only.
+- A hole the suggestions decline (for example a cross hole opening onto a cylinder,
+  which the recognizer reports as ambiguous) is named in the evidence but not added to
+  the route.
+- STL is refused here as it is for feature recognition (400).
+
 ### Step 30 — closing the feedback data gaps, and measuring which could not be closed
 
 - **Inspected before changing anything.** Each of Step 29's three reported gaps was
@@ -1578,7 +1700,10 @@ all. One test added. Suite: **1,760 passing**, 1 skipped.
 - AI/agent components
 - Creo integration
 - Windchill integration
-- Manufacturing route generation/optimization (choosing or sequencing alternative operations)
+- Manufacturing route *optimisation*. Iteration 2 recommends one family and route for review from feature evidence; it does not compare alternative routes, choose between them on cost, or sequence stages
+- A cost model for any non-machining stage: sheet cutting, bending, casting, forging, welding, additive, moulding, finishing or purchase. Such routes are refused, not priced
+- Any process inferred from material, tolerance, finish, quantity or a part name. None of these is read; the family comes from geometry signals alone and is capped at medium confidence
+- Classification of assembly components into a manufacturing family
 - Multi-part assemblies / BOM handling
 - Engineering and inspection cost (overhead, scrap allowance, and tooling now exist; these do not)
 - Yield-based scrap modelling (`1 / (1 - scrap_rate)`) — scrap is currently a linear allowance, which understates cost at high scrap rates
@@ -1621,3 +1746,7 @@ Recommendation: **(1)**, with **(2)** alongside it. Learning remains explicitly
 out of scope: Step 30 improved the evidence's *quality*, not its *quantity*, and
 the sample-size safeguards exist precisely so that better evidence is not mistaken
 for enough of it.
+
+Iteration 2 (manufacturing family and route classification) has since been built at
+the user's request. The user has said the next iteration addresses costing-model
+improvements based on client inputs and confirmed routes.

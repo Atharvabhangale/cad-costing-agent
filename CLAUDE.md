@@ -18,7 +18,7 @@ uvicorn cad_costing_agent.main:app --reload
 # whatever it is pointed at.
 CAD_COSTING_DATABASE_URL=sqlite:///./scratch.db uvicorn cad_costing_agent.main:app --port 8710
 
-# Tests (1761 collected: 1760 pass, 1 skip; full run about 7 min)
+# Tests (1845 collected: 1844 pass, 1 skip; full run about 5-10 min)
 pytest
 pytest tests/test_operation_suggestions.py                          # one file
 pytest tests/test_features.py::test_a_through_hole_is_found_with_its_diameter_depth_and_axis
@@ -82,6 +82,7 @@ CAD file ──→ cad_import                                    format detectio
           ├─→ cad_geometry → cad_mesh → mesh_simplify      viewer; display only
           ├─→ features/                                    recognition; analysis only
           └─→ features/ → operation_suggestions            proposals only
+                        → process_classification           family + route; recommendation only
                         → operation_time                   times only, never money
                           (parameters from time_profiles — versioned, immutable)
                         → manufacturing_plan               where a person commits a proposal
@@ -225,6 +226,31 @@ it cannot do.
   reader starts assuming something adapts.
 - **Nothing may learn.** No rule update, no profile update, no confidence change, no
   model. If a future step trains something, it does not live in this module.
+
+### A manufacturing route is recommended, never concluded
+
+`process_classification.py` recommends a family and a route of stages from the features
+recognition already produced. Shape does not determine process, and the module is built
+around saying so.
+
+- **Confidence is capped at `medium`.** No rule may raise it; a test checks every fixture.
+  Non-B-Rep evidence, several solids or unrecognized faces make it `low`.
+- **Never propose a family nothing can detect.** Casting, forging, moulding, welding,
+  additive and purchased are listed in `not_assessed` and can only be chosen by a person.
+  Do not add a rule for one without a recognizer that produces evidence for it.
+- **Thin evidence is `unknown`**, with `needs_information`. Accepting it is refused.
+- **Costability is a computed field**, recomputed from the route's stages on the server. Only
+  stages whose process type is `milling`, `drilling` or `turning` have a cost model.
+  `/cost/cad-part` refuses a blocking route with `422 process_route_not_costable` *before*
+  pricing, and stores nothing. Never price the machined stages of a mixed route as the whole.
+- **An unreviewed `unknown` does not block costing**; an engineer's `unknown` does. Sending no
+  classification must stay byte-for-byte the old behaviour — the snapshot keys are absent, not
+  null.
+- **It imports `features.model` and `operation_suggestions`; only `main.py` imports it.** A
+  route stage never becomes an operation: the plan is not edited to match a route, and
+  disagreements are recorded in `process_route_differences` only.
+- **The UI decides nothing.** `process.js` renders the server's object, takes the route list
+  from `/process-routes`, and sends every decision through `/cad/process/decide`.
 
 ### A manufacturing plan belongs to a component, never to an assembly
 
@@ -535,6 +561,7 @@ app.js        upload, the cost request, the result panel, the history table
 features.js   the feature list and selection  (selectFeature / selectFeatures)
 suggestions.js  suggested operations and their explanations
 plan.js       the setup-grouped operations table and `+ Add operation`
+process.js    the recommended manufacturing family and route, and the engineer's answer
 setup.js      rate-set authoring (money)
 timesetup.js  time-profile authoring (duration)
 impact.js     the assumptions panel and "Why did this change?"

@@ -30,6 +30,7 @@ function resetSuggestionsPanel() {
   $("declined-wrap").classList.add("hidden");
   $("declined-list").innerHTML = "";
   if (typeof resetPlan === "function") resetPlan();
+  if (typeof resetProcessPanel === "function") resetProcessPanel();
 
   const file = state.file;
   if (!file) {
@@ -77,6 +78,10 @@ $("suggest-operations").addEventListener("click", async () => {
 
   state.suggestions = result;
   renderSuggestions(result);
+  // The family and route these suggestions add up to, for the engineer to review.
+  if (typeof renderProcessClassification === "function") {
+    await renderProcessClassification(result.process_classification);
+  }
   // The plan is what gets costed; suggestions only explain where it came from.
   await buildPlanFromSuggestions(result);
   $("suggest-operations").disabled = false;

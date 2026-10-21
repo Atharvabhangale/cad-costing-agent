@@ -243,3 +243,76 @@ ALL_FIXTURES = {
     "two_solids": two_solids,
     "rotated_block_with_pocket": rotated_block_with_pocket,
 }
+
+
+# --- shapes for manufacturing-process classification -----------------------
+# Kept out of ALL_FIXTURES: they exist to exercise the family and route rules in
+# `process_classification`, not the recognizers' per-fixture expectations.
+
+
+# A stepped shaft: Ø30 × 40 then Ø20 × 30, one axis (+Z), ends and the shoulder
+# square to it. Expected: two coaxial external cylinders and three planes, all
+# perpendicular to the axis — a body of revolution.
+def stepped_shaft() -> bytes:
+    return to_step(
+        _fuse(_cylinder(15.0, 40.0, (0.0, 0.0, 0.0)), _cylinder(10.0, 30.0, (0.0, 0.0, 40.0)))
+    )
+
+
+# The same shaft with a Ø8 blind hole 15 mm deep drilled on the axis from the
+# small end. Expected: still rotational — the hole is on the axis and its end
+# face stays square to it — with a drilling stage after turning.
+def stepped_shaft_with_axial_hole() -> bytes:
+    shaft = _fuse(
+        _cylinder(15.0, 40.0, (0.0, 0.0, 0.0)), _cylinder(10.0, 30.0, (0.0, 0.0, 40.0))
+    )
+    return to_step(_cut(shaft, _cylinder(4.0, 20.0, (0.0, 0.0, 55.0))))
+
+
+# The same shaft with a Ø6 cross hole through the large diameter, along X. The
+# recognizer cannot classify the ends of a hole that opens onto curved faces, so
+# it reports the hole as ambiguous and no drilling is suggested for it.
+def stepped_shaft_with_cross_hole() -> bytes:
+    shaft = _fuse(
+        _cylinder(15.0, 40.0, (0.0, 0.0, 0.0)), _cylinder(10.0, 30.0, (0.0, 0.0, 40.0))
+    )
+    return to_step(_cut(shaft, _cylinder(3.0, 60.0, (-30.0, 0.0, 20.0), direction=(1.0, 0.0, 0.0))))
+
+
+# A 2 mm L-bracket: a 60 × 40 base and a 40 mm upstand, both 2 mm thick, with
+# two Ø6 through holes in the base. Expected: one constant 2 mm wall running in
+# two directions, nothing cut into it — the shape cutting and bending produce.
+def bent_sheet_bracket() -> bytes:
+    shape = _fuse(_box(60.0, 40.0, 2.0), _box(2.0, 40.0, 40.0))
+    for x, y in ((30.0, 12.0), (30.0, 28.0)):
+        shape = _cut(shape, _cylinder(3.0, 10.0, (x, y, -5.0)))
+    return to_step(shape)
+
+
+# A flat 100 × 80 × 2 blank with four Ø8 through holes. Expected: a constant
+# wall in one direction only, so a flat cut blank — no bending stage.
+def flat_sheet_blank() -> bytes:
+    shape = _box(100.0, 80.0, 2.0)
+    for x, y in ((15.0, 15.0), (85.0, 15.0), (15.0, 65.0), (85.0, 65.0)):
+        shape = _cut(shape, _cylinder(4.0, 10.0, (x, y, -5.0)))
+    return to_step(shape)
+
+
+# The flat blank with a 40 × 20 × 1 pocket milled into it. Expected: the wall is
+# still constant over most of the area, but a pocket cannot be produced by
+# cutting sheet, so machining leads and sheet metal stays a candidate.
+def thin_plate_with_pocket() -> bytes:
+    shape = _box(100.0, 80.0, 2.0)
+    for x, y in ((15.0, 15.0), (85.0, 15.0), (15.0, 65.0), (85.0, 65.0)):
+        shape = _cut(shape, _cylinder(4.0, 10.0, (x, y, -5.0)))
+    return to_step(_cut(shape, _box(40.0, 20.0, 5.0, at=(30.0, 30.0, 1.0))))
+
+
+PROCESS_FIXTURES = {
+    "stepped_shaft": stepped_shaft,
+    "stepped_shaft_with_axial_hole": stepped_shaft_with_axial_hole,
+    "stepped_shaft_with_cross_hole": stepped_shaft_with_cross_hole,
+    "bent_sheet_bracket": bent_sheet_bracket,
+    "flat_sheet_blank": flat_sheet_blank,
+    "thin_plate_with_pocket": thin_plate_with_pocket,
+}

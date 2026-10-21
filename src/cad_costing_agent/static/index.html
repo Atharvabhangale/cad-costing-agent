@@ -246,6 +246,31 @@
            ============================================================ -->
       <div class="flow-pane hidden" data-pane="manufacturing">
 
+        <!-- The family and route the part is made by: a recommendation from
+             the same features as the suggestions, and the engineer's answer
+             beside it. Filled by process.js from /cad/operations/suggest. -->
+        <div class="card hidden" id="process-card">
+          <div class="panel-head">
+            <h2>Manufacturing process <span class="muted">— recommended family and route</span></h2>
+          </div>
+          <div id="process-summary"></div>
+          <div id="process-costing"></div>
+          <div class="grid2">
+            <label>Route <select id="process-route"></select></label>
+            <label>Note <input id="process-note" type="text" placeholder="Optional — why, or what is missing"></label>
+          </div>
+          <div class="viewer-tools">
+            <button type="button" id="process-accept" class="secondary tiny">Confirm recommendation</button>
+            <button type="button" id="process-override" class="secondary tiny">Use selected route</button>
+            <button type="button" id="process-unknown" class="secondary tiny">Mark unknown — needs information</button>
+            <button type="button" id="process-reset" class="secondary tiny">Withdraw decision</button>
+          </div>
+          <details class="detail-toggle" id="process-evidence-toggle">
+            <summary>Evidence, uncertainty and what is not assessed</summary>
+            <div id="process-evidence"></div>
+          </details>
+        </div>
+
         <div class="card">
           <div class="panel-head">
             <h2>Manufacturing plan</h2>
@@ -862,6 +887,7 @@
 <script src="features.js"></script>
 <script src="suggestions.js"></script>
 <script src="plan.js"></script>
+<script src="process.js"></script>
 <script src="setup.js"></script>
 <script src="timesetup.js"></script>
 <script src="impact.js"></script>

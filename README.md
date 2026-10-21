@@ -254,6 +254,40 @@ shape.
 Nothing here is a cost. A suggestion carries an operation's identity and its feature link — the
 time comes next, and money only after that.
 
+## Manufacturing family and route
+
+The same **Suggest operations** request also returns a `process_classification`: the
+manufacturing family (machining, sheet metal, casting, forging, fabrication/welding, additive,
+moulding, purchased, or unknown) and the route of stages the evidence points to, shown in the
+*Manufacturing process* card at the top of the Manufacturing section.
+
+It is a **recommendation for review, never a finding.** Shape does not determine process — a
+2 mm bracket may be laser-cut and bent or milled from plate — so:
+
+- confidence is never above `medium`, and is `low` for anything but exact B-Rep evidence, for
+  several solids, or when some faces were not recognized;
+- every recommendation lists the signals it read (features cut into the solid, rotational form,
+  constant wall thickness, one solid, every face recognized), the families it is equally
+  consistent with, and what information would settle it;
+- casting, forging, moulding, welding, additive and purchased are **never proposed** — nothing
+  here detects evidence for them — but an engineer can choose them;
+- thin evidence (only flat faces and blends, or no features) is an explicit `unknown`.
+
+The engineer can **confirm** it, choose **another route**, or **mark it unknown**; the
+recommendation is kept unchanged beside the answer and both are stored on the estimate.
+
+Only **milling, drilling and turning** stages have a cost model. When the effective route contains
+any other stage — sheet cutting, bending, casting, forging, welding, additive, moulding, finishing,
+purchase — `/cost/cad-part` refuses with `422 process_route_not_costable` instead of pricing the
+machined part of it as the whole. A route marked unknown is refused the same way. A cost request
+that sends no classification behaves exactly as before.
+
+| Endpoint | Purpose |
+|---|---|
+| `GET /process-routes` | the families, the 19 choosable routes, and which stages carry a cost model |
+| `POST /cad/process/decide` | apply `accepted`, `edited` (with a `route_id`; `unknown` marks it unknown) or `pending` to a classification; persists nothing |
+| `POST /cost/cad-part` `process_classification` | optional JSON form field; stored in the request snapshot with any plan-vs-route differences |
+
 ## Processing-time estimation
 
 Each suggested operation gets a deterministic, parameter-based time estimate. A time is a much

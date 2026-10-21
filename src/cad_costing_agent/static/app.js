@@ -33,6 +33,7 @@ const state = {
   timeProfiles: [],  // flat list from /time-profiles
   timeProfile: null, // the full selected time profile — machining assumptions, no money
   plan: null,        // the manufacturing plan, owned by plan.js
+  processClassification: null,// recommended family and route + the engineer's answer, owned by process.js
   result: null,
   assumptions: null,        // what the current estimate rested on
   previousEstimateId: null, // so a new estimate can be explained against it
@@ -95,6 +96,9 @@ async function api(path, options) {
 // something a person can act on rather than showing raw API internals.
 function readableError(detail, status) {
   if (typeof detail === "string" && detail) return detail;
+  // A structured refusal (needs_geometry_input, process_route_not_costable)
+  // carries its own sentence.
+  if (detail && typeof detail.message === "string" && detail.message) return detail.message;
   if (Array.isArray(detail)) {
     return detail
       .map((item) => {
@@ -761,6 +765,13 @@ $("calculate").addEventListener("click", async () => {
   // audit record of what was suggested versus what was chosen.
   const plan = collectManufacturingPlan();
   if (plan) body.append("manufacturing_plan", JSON.stringify(plan));
+
+  // The recommended route and any decision on it, sent as they stand. The
+  // backend recomputes whether the route can be priced and refuses it if not;
+  // nothing about that is decided here.
+  if (state.processClassification) {
+    body.append("process_classification", JSON.stringify(state.processClassification));
+  }
 
   // Blank additional-cost fields are OMITTED, never sent as 0. Sending a zero
   // would override the rate set's own overhead/scrap/tooling rather than

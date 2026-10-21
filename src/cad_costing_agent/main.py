@@ -109,7 +109,19 @@ from cad_costing_agent.features import (
 from cad_costing_agent.features.model import FeatureRecognitionResult
 from cad_costing_agent.operation_suggestions import (
     OperationSuggestionResult,
+    UserAction,
     suggest_operations,
+)
+from cad_costing_agent.process_classification import (
+    FAMILY_LABELS,
+    NOT_ASSESSED,
+    ManufacturingFamily,
+    ProcessClassification,
+    ProcessRoute,
+    classify_process,
+    plan_route_differences,
+    record_route_decision,
+    route_catalog,
 )
 from cad_costing_agent.operation_time import (
     OperationTimeRequest,
@@ -2266,7 +2278,17 @@ async def cad_features(file: UploadFile = File(...)) -> FeatureRecognitionResult
         ) from exc
 
 
-@app.post("/cad/operations/suggest", response_model=OperationSuggestionResult)
+class OperationSuggestionResponse(OperationSuggestionResult):
+    """The suggestions, plus the manufacturing family and route they add up to.
+
+    Classified from the same recognition in the same request, so the route can
+    never be read from a different parse than the operations it summarises.
+    """
+
+    process_classification: ProcessClassification
+
+
+@app.post("/cad/operations/suggest", response_model=OperationSuggestionResponse)
 async def cad_suggest_operations(
     file: UploadFile = File(...),
     rate_set_id: str | None = Form(
@@ -2280,7 +2302,7 @@ async def cad_suggest_operations(
         None, description="Exact rate set version to compare against. Omit for the latest."
     ),
     session: Session = Depends(get_session),
-) -> OperationSuggestionResult:
+) -> OperationSuggestionResponse:
     """Suggest manufacturing operations for the features recognized in a STEP file.
 
     Runs the same recognition `/cad/features` does — one upload, one parse, no
@@ -2296,6 +2318,10 @@ async def cad_suggest_operations(
 
     Features the geometry cannot support an operation for are returned in
     `declined` with the reason, rather than being guessed at or dropped.
+
+    `process_classification` recommends a manufacturing family and route from
+    the same features. It is a recommendation awaiting review, with its
+    evidence; it changes no suggestion and prices nothing.
     """
     data = await file.read()
     if len(data) > MAX_UPLOAD_BYTES:
@@ -2334,12 +2360,79 @@ async def cad_suggest_operations(
             ),
         ) from exc
 
-    return suggest_operations(
+    suggestions = suggest_operations(
         recognition,
         priced_processes=priced_processes,
         rate_set_id=rate_set_id,
         rate_set_version=resolved_version,
     )
+    return OperationSuggestionResponse(
+        **suggestions.model_dump(),
+        process_classification=classify_process(recognition, suggestions),
+    )
+
+
+# ------------------------------------------------------- manufacturing process
+#
+# The family and route a part is made by. The system recommends one alongside
+# the operation suggestions; these endpoints let an engineer review it. Neither
+# prices anything: `/cost/cad-part` reads the decision only to refuse a route
+# the existing costing cannot price.
+
+
+class ProcessFamilyOption(BaseModel):
+    family: ManufacturingFamily
+    label: str
+
+
+class ProcessRouteCatalog(BaseModel):
+    families: list[ProcessFamilyOption]
+    routes: list[ProcessRoute]
+    not_assessed: list[str]
+
+
+@app.get("/process-routes", response_model=ProcessRouteCatalog)
+def process_routes() -> ProcessRouteCatalog:
+    """Every manufacturing route an engineer can choose, and whether each stage is costable.
+
+    Only milling, drilling and turning stages carry a cost model. The rest are
+    here so a route can be recorded truthfully, not so it can be priced.
+    """
+    return ProcessRouteCatalog(
+        families=[
+            ProcessFamilyOption(family=family, label=label)
+            for family, label in FAMILY_LABELS.items()
+        ],
+        routes=route_catalog(),
+        not_assessed=list(NOT_ASSESSED),
+    )
+
+
+class ProcessDecisionRequest(BaseModel):
+    classification: ProcessClassification
+    action: UserAction = Field(
+        description="'accepted', 'edited' (with route_id; 'unknown' marks it unknown) or 'pending'."
+    )
+    route_id: str | None = None
+    note: str | None = None
+
+
+@app.post("/cad/process/decide", response_model=ProcessClassification)
+def decide_process(request: ProcessDecisionRequest) -> ProcessClassification:
+    """Record the engineer's answer beside the recommendation, which stays unchanged.
+
+    Persists nothing on its own: the decision travels with the cost request and
+    is stored on the estimate it produced.
+    """
+    try:
+        return record_route_decision(
+            request.classification,
+            request.action,
+            route_id=request.route_id,
+            note=request.note,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
 # --------------------------------------------------------------- time profiles
@@ -2719,6 +2812,15 @@ async def cost_cad_part(
             "'operation_requirements'."
         ),
     ),
+    process_classification: str | None = Form(
+        None,
+        description=(
+            "Optional JSON-encoded ProcessClassification from /cad/operations/suggest, carrying "
+            "any decision from /cad/process/decide. Recorded on the estimate. A route the "
+            "existing costing cannot price, or one marked unknown, is refused with 422 rather "
+            "than priced as machining."
+        ),
+    ),
     session: Session = Depends(get_session),
 ) -> CadPartCostEstimateResult:
     """CAD-driven part cost estimate: geometry -> mass -> existing part costing.
@@ -2773,6 +2875,35 @@ async def cost_cad_part(
             # rest are left out rather than defaulted, and are recorded below so
             # the omission is visible in the stored estimate.
             requirement_models = plan.to_operation_requirements(quantity)
+
+        # The route is checked before anything is priced. Every costing path
+        # here is machining arithmetic, so a route with a stage it cannot price
+        # is refused whole: pricing only its machined stages would present part
+        # of the cost as all of it.
+        classification: ProcessClassification | None = None
+        route_differences: list[str] = []
+        if process_classification is not None:
+            try:
+                classification = ProcessClassification.model_validate_json(process_classification)
+            except ValidationError as exc:
+                raise ValueError(f"'process_classification' is not valid: {exc}") from exc
+            if classification.blocks_costing:
+                route = classification.route
+                raise HTTPException(
+                    status_code=422,
+                    detail={
+                        "error": "process_route_not_costable",
+                        "message": classification.costing_note,
+                        "costing_status": classification.costing_status,
+                        "decision_status": classification.decision_status,
+                        "family": classification.family.value,
+                        "route": route.label if route is not None else None,
+                        "unsupported_stages": classification.unsupported_stages,
+                    },
+                )
+            route_differences = plan_route_differences(
+                classification, [requirement.process_type for requirement in requirement_models]
+            )
 
         # Supplying any additional-cost field replaces the rate set's additional
         # costs wholesale; supplying none leaves them to the rate set.
@@ -2849,6 +2980,17 @@ async def cost_cad_part(
                 else None
             ),
             "mass": result.mass.model_dump(mode="json"),
+            # The recommendation and the engineer's answer side by side, with
+            # the costing status they implied when this estimate was made. Only
+            # present when one was sent, so a snapshot without it is unchanged.
+            **(
+                {
+                    "process_classification": classification.model_dump(mode="json"),
+                    "process_route_differences": route_differences,
+                }
+                if classification is not None
+                else {}
+            ),
         },
         result_snapshot=result.model_dump(mode="json"),
         # The manufacturing plan is recorded whole, alongside one feedback row

@@ -1159,6 +1159,50 @@ decision — but the fields a feedback loop would need are in place.
 `rate_set_id` is accepted only so the response can *report* whether the user's rate set prices a
 suggested process. It never changes what is suggested, and no rate is read from it.
 
+### Manufacturing family and route
+
+`process_classification.py` sits beside the suggestions, not after costing:
+
+```
+features + suggestions → classify_process → family + route (recommended)
+                                         → record_route_decision (engineer)
+                                         → /cost/cad-part reads blocks_costing only
+```
+
+**It imports `features.model` and `operation_suggestions`, and only `main.py` imports it.** A
+test parses both directions. It computes no time, no rate and no cost.
+
+**It reads what recognition already established.** No second parse: the same request that
+suggests operations classifies them. Three signals are derived from `Feature` objects —
+features cut into a solid (pockets, slots, blind and counterbored holes); a rotational form
+(every external cylinder on one axis, every planar face square to it); and a constant wall
+(one opposite-plane separation holding at least 75% of the planar area, thin against it, and
+agreeing with the measured volume to 10%). Each is reported as observed, not observed or not
+assessable, with the constant that decided it.
+
+**Its confidence is capped at `medium`.** Geometry cannot exclude a near-net-shape blank that
+is then machined, and it does not record the material, tolerance, finish, quantity or machines
+that usually decide a process. Families with no detectable evidence — casting, forging,
+moulding, welding, additive, purchased — are listed as not assessed and never proposed.
+
+**The route is a summary of the suggestions, and may disagree with one of them.** A turning
+suggestion for a boss on a prismatic part stays a turning suggestion; at route level the boss
+is milled, and the stage's basis says so. On a rotational part, the faces proposed for milling
+are faced in the turning stage. The per-feature suggestions are unchanged by any of this.
+
+**Recommendation and decision sit side by side**, as everywhere else: `system_*` fields are
+never overwritten, `user_route`/`user_action`/`user_note` sit beside them, and choosing the
+recommended route records an acceptance. Costability (`costing_status`, `blocks_costing`) is a
+computed field, so a classification round-tripped through the browser cannot declare itself
+costable; the server recomputes it from the stages.
+
+**The costing boundary is a refusal, not a model.** Only stages whose process type is one the
+existing costing prices (milling, drilling, turning) report `cost_model_available`. A route with
+any other stage is refused before anything is priced, because pricing its machined stages alone
+would present part of a cost as all of it. An *unreviewed* `unknown` does not block — the
+engineer's own operations are priced as before and the snapshot says the route was not
+established — but a route the engineer *marked* unknown does.
+
 ### Processing time, the plan, and the feedback record
 
 Step 20 added the first module that produces a *time*, which is a much stronger claim than an
@@ -1641,6 +1685,8 @@ costing-agent/
 │       ├── cad_mesh.py           # CAD -> renderable triangle mesh (visualization only)
 │       ├── operation_suggestions.py  # features -> suggested operations (suggestions only:
 │       │                         #   no time, no rate, no cost; never imported by costing)
+│       ├── process_classification.py # manufacturing family + route, recommended and
+│       │                         #   confirmed; refuses routes it cannot price, prices nothing
 │       ├── operation_time.py     # deterministic machining-time formulas (times only,
 │       │                         #   never money; needs_user_input rather than a default)
 │       ├── time_profiles.py     # versioned, immutable machining assumptions (no currency)
