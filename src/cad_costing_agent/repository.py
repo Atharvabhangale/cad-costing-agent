@@ -16,11 +16,13 @@ from sqlalchemy.orm import Session
 from cad_costing_agent.cost_actuals import ActualCostInput, ActualCostRecord
 from cad_costing_agent.db_models import (
     CostActualRow,
+    DfmProfileRow,
     EstimateRow,
     QuotationRow,
     RateSetRow,
     TimeProfileRow,
 )
+from cad_costing_agent.dfm import DfmProfile, DfmProfileSummary
 from cad_costing_agent.estimates import EstimateListPage, EstimateSummary
 from cad_costing_agent.money import Money, round_money
 from cad_costing_agent.rate_sets import RateSet, RateSetSummary, version_key
@@ -318,6 +320,102 @@ class TimeProfileRepository:
         inserted = 0
         for profile in profiles:
             if not self.exists(profile.time_profile_id, profile.version):
+                self.add(profile)
+                inserted += 1
+        return inserted
+
+
+class DfmProfileRepository:
+    """Reads and inserts DFM threshold profiles. There is no update method."""
+
+    def __init__(self, session: Session) -> None:
+        self.session = session
+
+    @staticmethod
+    def _to_profile(row: DfmProfileRow) -> DfmProfile:
+        return DfmProfile(
+            dfm_profile_id=row.dfm_profile_id,
+            name=row.name,
+            version=row.version,
+            description=row.description,
+            is_illustrative=row.is_illustrative,
+            rules=row.rules or [],
+        )
+
+    def list(self) -> list[DfmProfileSummary]:
+        rows = self.session.execute(select(DfmProfileRow)).scalars().all()
+        ordered = sorted(rows, key=lambda row: (row.dfm_profile_id, version_key(row.version)))
+        return [
+            DfmProfileSummary(
+                dfm_profile_id=row.dfm_profile_id,
+                name=row.name,
+                version=row.version,
+                description=row.description,
+                is_illustrative=row.is_illustrative,
+            )
+            for row in ordered
+        ]
+
+    def get(self, dfm_profile_id: str, version: str | None = None) -> DfmProfile:
+        rows = (
+            self.session.execute(
+                select(DfmProfileRow).where(DfmProfileRow.dfm_profile_id == dfm_profile_id)
+            )
+            .scalars()
+            .all()
+        )
+        if not rows:
+            known = self.session.execute(select(DfmProfileRow.dfm_profile_id).distinct()).scalars().all()
+            raise ValueError(
+                f"Unknown DFM profile '{dfm_profile_id}'. Known profiles: "
+                f"{', '.join(sorted(known)) or 'none'}"
+            )
+        if version is None:
+            resolved = max(rows, key=lambda row: version_key(row.version))
+        else:
+            matches = [row for row in rows if row.version == version]
+            if not matches:
+                known_versions = ", ".join(sorted((row.version for row in rows), key=version_key))
+                raise ValueError(
+                    f"DFM profile '{dfm_profile_id}' has no version '{version}'. "
+                    f"Known versions: {known_versions}"
+                )
+            resolved = matches[0]
+        return self._to_profile(resolved)
+
+    def exists(self, dfm_profile_id: str, version: str) -> bool:
+        return (
+            self.session.execute(
+                select(DfmProfileRow).where(
+                    DfmProfileRow.dfm_profile_id == dfm_profile_id,
+                    DfmProfileRow.version == version,
+                )
+            ).scalar_one_or_none()
+            is not None
+        )
+
+    def add(self, profile: DfmProfile) -> None:
+        if self.exists(profile.dfm_profile_id, profile.version):
+            raise ValueError(
+                f"DFM profile '{profile.dfm_profile_id}' version '{profile.version}' already "
+                "exists. DFM profile versions are immutable — publish a new version instead."
+            )
+        self.session.add(
+            DfmProfileRow(
+                dfm_profile_id=profile.dfm_profile_id,
+                version=profile.version,
+                name=profile.name,
+                description=profile.description,
+                is_illustrative=profile.is_illustrative,
+                rules=[rule.model_dump(mode="json") for rule in profile.rules],
+            )
+        )
+        self.session.flush()
+
+    def seed(self, profiles: tuple[DfmProfile, ...]) -> int:
+        inserted = 0
+        for profile in profiles:
+            if not self.exists(profile.dfm_profile_id, profile.version):
                 self.add(profile)
                 inserted += 1
         return inserted

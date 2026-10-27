@@ -240,6 +240,20 @@
           </details>
         </div>
 
+        <!-- ---------------- advisory DFM flags ---------------- -->
+        <div class="card" id="dfm-card">
+          <div class="panel-head">
+            <h2>Design-for-manufacturing flags</h2>
+            <button type="button" id="dfm-run" class="secondary tiny" disabled>Check design</button>
+          </div>
+          <p id="dfm-status" class="hint"></p>
+          <div id="dfm-body" class="hidden">
+            <p id="dfm-profile-line" class="muted"></p>
+            <p id="dfm-disclaimer" class="provenance"></p>
+            <ul id="dfm-flags" class="dfm-flags"></ul>
+          </div>
+        </div>
+
       </div>
 
       <!-- ============================================================
@@ -985,6 +999,7 @@
 <script src="actuals.js"></script>
 <script src="routecompare.js"></script>
 <script src="bulk.js"></script>
+<script src="dfm.js"></script>
 <script src="estimateflow.js"></script>
 <script type="module" src="viewer.js"></script>
 </body>

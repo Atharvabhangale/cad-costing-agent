@@ -13,6 +13,14 @@ from fastapi.responses import RedirectResponse
 from fastapi.staticfiles import StaticFiles
 
 from cad_costing_agent.db import get_session, init_db
+from cad_costing_agent.dfm import (
+    DEFAULT_DFM_PROFILE_ID,
+    DfmProfile,
+    DfmProfileSummary,
+    DfmProfileVersionCreate,
+    DfmReport,
+    evaluate_dfm,
+)
 from cad_costing_agent.estimates import (
     EstimateAssumptions,
     EstimateComparison,
@@ -30,6 +38,7 @@ from cad_costing_agent.cost_actuals import (
     figures_from_estimate,
 )
 from cad_costing_agent.repository import (
+    DfmProfileRepository,
     CostActualRepository,
     EstimateRepository,
     IssuedQuotation,
@@ -3954,3 +3963,93 @@ def bulk_preview_run(
         summary=_bulk_summary(results, sorted(uploaded)),
         csv=csv_text,
     )
+
+
+# ---------------------------------------------------------------------------
+# Advisory design-for-manufacturing flags and their threshold profiles.
+#
+# Kept as a separate endpoint rather than folded into /cad/operations/suggest:
+# the suggest response is the proposal the plan builder consumes, and DFM advice
+# must not be able to reach it. Recognition is re-run (as /cad/features does),
+# not duplicated. Nothing here is persisted against an estimate.
+# ---------------------------------------------------------------------------
+
+
+@app.get("/dfm-profiles", response_model=list[DfmProfileSummary])
+def dfm_profiles(session: Session = Depends(get_session)) -> list[DfmProfileSummary]:
+    """List every stored DFM threshold profile version (illustrative, cited defaults)."""
+    return DfmProfileRepository(session).list()
+
+
+@app.get("/dfm-profiles/{dfm_profile_id}", response_model=DfmProfile)
+def dfm_profile(
+    dfm_profile_id: str, version: str | None = None, session: Session = Depends(get_session)
+) -> DfmProfile:
+    """Fetch one DFM profile with each threshold's source. Omit `version` for the latest."""
+    try:
+        return DfmProfileRepository(session).get(dfm_profile_id, version)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@app.post("/dfm-profiles/{dfm_profile_id}/versions", response_model=DfmProfile, status_code=201)
+def create_dfm_profile_version(
+    dfm_profile_id: str,
+    version: DfmProfileVersionCreate,
+    session: Session = Depends(get_session),
+) -> DfmProfile:
+    """Publish a new version of a DFM profile. An existing version is immutable (409)."""
+    try:
+        profile = DfmProfile(dfm_profile_id=dfm_profile_id, **version.model_dump())
+    except ValidationError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    repository = DfmProfileRepository(session)
+    try:
+        repository.add(profile)
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    session.commit()
+    return repository.get(profile.dfm_profile_id, profile.version)
+
+
+@app.post("/cad/dfm", response_model=DfmReport)
+async def cad_dfm(
+    file: UploadFile = File(...),
+    dfm_profile_id: str = Form(DEFAULT_DFM_PROFILE_ID),
+    dfm_profile_version: str | None = Form(None, description="Omit for the latest version."),
+    session: Session = Depends(get_session),
+) -> DfmReport:
+    """Advisory DFM flags for the features recognized in an uploaded CAD file.
+
+    Same recognition as `/cad/features`. Changes no cost, time, suggestion or
+    classification and persists nothing.
+    """
+    data = await file.read()
+    if len(data) > MAX_UPLOAD_BYTES:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"CAD file is {len(data) / 1024 / 1024:.1f} MB, above the "
+                f"{MAX_UPLOAD_BYTES // 1024 // 1024} MB limit for this POC."
+            ),
+        )
+    try:
+        profile = DfmProfileRepository(session).get(dfm_profile_id, dfm_profile_version)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    _import(data, file.filename or "", CAPABILITY_FEATURES, with_geometry=False)
+    try:
+        recognition = recognize_features_from_bytes(data, file.filename or "")
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:  # noqa: BLE001 - a bad model must not take the app down
+        raise HTTPException(
+            status_code=500,
+            detail=(
+                "Feature recognition failed unexpectedly on this model "
+                f"({type(exc).__name__}). DFM flags are unavailable; costing is unaffected."
+            ),
+        ) from exc
+    report = evaluate_dfm(recognition.features, profile, file.filename or "")
+    report.warnings.extend(recognition.warnings)
+    return report

@@ -8,6 +8,7 @@ from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
 
 from cad_costing_agent.db import init_db
+from cad_costing_agent.dfm import SEED_DFM_PROFILES
 from cad_costing_agent.time_profiles import SEED_TIME_PROFILES
 from cad_costing_agent.db_models import EstimateRow, RateSetRow
 from cad_costing_agent.main import app
@@ -65,7 +66,7 @@ def test_init_db_seeds_every_illustrative_rate_set():
     inserted = init_db(engine)
 
     # Both catalogs are seeded: rate sets for money, time profiles for duration.
-    assert inserted == len(SEED_RATE_SETS) + len(SEED_TIME_PROFILES)
+    assert inserted == len(SEED_RATE_SETS) + len(SEED_TIME_PROFILES) + len(SEED_DFM_PROFILES)
 
     with sessionmaker(bind=engine)() as session:
         stored = session.execute(select(RateSetRow)).scalars().all()
@@ -83,7 +84,7 @@ def test_seeding_is_idempotent():
     second = init_db(engine)
     third = init_db(engine)
 
-    assert first == len(SEED_RATE_SETS) + len(SEED_TIME_PROFILES)
+    assert first == len(SEED_RATE_SETS) + len(SEED_TIME_PROFILES) + len(SEED_DFM_PROFILES)
     assert second == 0
     assert third == 0
 

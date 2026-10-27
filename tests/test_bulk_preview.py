@@ -374,7 +374,11 @@ def test_only_main_imports_bulk_preview():
 
 def test_the_bulk_section_stores_nothing_and_prices_only_through_price_cad_part():
     source = (SRC / "main.py").read_text(encoding="utf-8")
-    section = source[source.index("# ---------------------------------------------------------------- bulk preview") :]
+    start = source.index("# ---------------------------------------------------------------- bulk preview")
+    # The section ends at the next section banner, not at the end of the file:
+    # other features' sections may follow it (the DFM section publishes profiles).
+    following = source.find("\n# ---", start + 1)
+    section = source[start : following if following != -1 else len(source)]
     tree = ast.parse(section.replace("from fastapi import Response  # noqa: E402", ""))
     code = ast.unparse(tree)
     assert "price_cad_part(" in code

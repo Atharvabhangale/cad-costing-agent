@@ -499,7 +499,7 @@ def test_upgrading_a_0005_database_keeps_its_estimates_and_adds_the_table():
 
     assert "cost_actuals" in inspect(engine).get_table_names()
     with engine.connect() as connection:
-        assert connection.execute(text("select version_num from alembic_version")).scalar_one() == "0006"
+        assert connection.execute(text("select version_num from alembic_version")).scalar_one() == "0007"
     with sessionmaker(bind=engine)() as session:
         kept = EstimateRepository(session).get(estimate_id)
         assert kept.request_snapshot == {"before": "0006"}

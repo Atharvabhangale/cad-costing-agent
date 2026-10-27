@@ -138,7 +138,12 @@ def init_db(engine: Engine | None = None) -> int:
     one decides money, the other duration.
     """
     from cad_costing_agent.rate_sets import SEED_RATE_SETS
-    from cad_costing_agent.repository import RateSetRepository, TimeProfileRepository
+    from cad_costing_agent.repository import (
+        DfmProfileRepository,
+        RateSetRepository,
+        TimeProfileRepository,
+    )
+    from cad_costing_agent.dfm import SEED_DFM_PROFILES
     from cad_costing_agent.time_profiles import SEED_TIME_PROFILES
 
     resolved_engine = engine or get_engine()
@@ -147,5 +152,6 @@ def init_db(engine: Engine | None = None) -> int:
     with sessionmaker(bind=resolved_engine, expire_on_commit=False)() as session:
         inserted = RateSetRepository(session).seed(SEED_RATE_SETS)
         inserted += TimeProfileRepository(session).seed(SEED_TIME_PROFILES)
+        inserted += DfmProfileRepository(session).seed(SEED_DFM_PROFILES)
         session.commit()
     return inserted
