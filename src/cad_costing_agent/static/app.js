@@ -123,7 +123,7 @@ function clearError() {
 
 // ------------------------------------------------------------------ tabs
 
-const TABS = ["estimate", "setup", "timesetup", "history", "feedback"];
+const TABS = ["estimate", "setup", "timesetup", "history", "feedback", "bulk"];
 
 function showTab(name) {
   document.querySelectorAll(".tab").forEach((tab) =>
@@ -136,6 +136,8 @@ function showTab(name) {
   // Guarded forward: feedback.js is loaded after this file, and the history is
   // read only when the tab is actually opened rather than on every page load.
   if (name === "feedback" && typeof openFeedback === "function") openFeedback();
+  // bulk.js is loaded after this file, so it is guarded forward as well.
+  if (name === "bulk" && typeof openBulk === "function") openBulk();
 }
 
 document.querySelectorAll(".tab").forEach((tab) =>

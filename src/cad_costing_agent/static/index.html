@@ -12,6 +12,7 @@
   <nav>
     <button class="tab active" data-tab="estimate">Estimate</button>
     <button class="tab" data-tab="history">History</button>
+    <button class="tab" data-tab="bulk">Bulk preview</button>
     <span class="nav-sep" aria-hidden="true"></span>
     <button class="tab" data-tab="setup">Rate sets</button>
     <button class="tab" data-tab="timesetup">Time profiles</button>
@@ -934,6 +935,37 @@
     <div id="feedback-body"></div>
   </div>
 </section>
+
+<!-- ===================== BULK PREVIEW ===================== -->
+<!-- Prices many parts from a CSV and nothing is stored. Every figure comes
+     from the server; this page adds nothing up. -->
+<section id="tab-bulk" class="hidden">
+  <div class="card">
+    <h2>Bulk preview <span class="muted">— not saved</span></h2>
+    <p class="warning-inline" id="bulk-label"><strong>Unreviewed system estimates — not an estimate, not quotable.</strong>
+      Every time here is the system's own prediction, nobody has accepted it, and nothing is stored.
+      Review a part in the Estimate tab to produce a real estimate.</p>
+    <p class="hint">
+      Upload a CSV and the CAD files it names. Required columns: <code>file</code>, <code>part_id</code>,
+      <code>part_name</code>, <code>material</code>, <code>quantity</code>. Optional:
+      <code>rate_set_id</code>, <code>rate_set_version</code>, <code>route_id</code>, <code>source_unit</code>.
+      Rows that cannot be priced are listed with the reason and no cost.
+    </p>
+    <div class="row">
+      <label for="bulk-csv">Batch CSV <input type="file" id="bulk-csv"></label>
+      <label for="bulk-files">CAD files <input type="file" id="bulk-files" multiple></label>
+      <label for="bulk-rate-set">Default rate set <select id="bulk-rate-set"></select></label>
+      <label for="bulk-profile">Time profile <select id="bulk-profile"></select></label>
+    </div>
+    <div class="actions">
+      <button type="button" id="bulk-run">Preview prices</button>
+      <button type="button" id="bulk-export" class="secondary" disabled>Export CSV</button>
+      <span id="bulk-status" class="muted"></span>
+    </div>
+    <div id="bulk-error" class="error hidden"></div>
+  </div>
+  <div id="bulk-result" class="card hidden"></div>
+</section>
 </main>
 
 <script src="app.js"></script>
@@ -948,6 +980,7 @@
 <script src="assembly.js"></script>
 <script src="feedback.js"></script>
 <script src="actuals.js"></script>
+<script src="bulk.js"></script>
 <script src="estimateflow.js"></script>
 <script type="module" src="viewer.js"></script>
 </body>
