@@ -44,10 +44,17 @@
     $("dfm-disclaimer").textContent = report.disclaimer;
     list.innerHTML = report.flags.map(dfmFlagMarkup).join("");
     list.classList.toggle("hidden", !report.flags.length);
-    const evaluated = report.rules.filter((rule) => rule.evaluated);
-    $("dfm-status").textContent = report.flags.length
-      ? `${report.flags.length} flag(s) from ${evaluated.length} rule(s).`
-      : `No flags: ${evaluated.length} rule(s) checked ${evaluated.reduce((sum, rule) => sum + rule.features_checked, 0)} measurement(s) and none passed its threshold.`;
+    // The sentence and every count come from the server; nothing is added up here.
+    $("dfm-status").innerHTML =
+      `${escapeHtml(report.summary)}<ul class="dfm-rules">` +
+      report.rules
+        .map((rule) =>
+          rule.evaluated
+            ? `<li>${escapeHtml(rule.label)}: ${rule.features_checked} checked, ${rule.flags} flagged</li>`
+            : `<li>${escapeHtml(rule.label)}: not checked — ${escapeHtml(rule.skipped_reason || "not in this profile")}</li>`
+        )
+        .join("") +
+      "</ul>";
     $("dfm-body").classList.remove("hidden");
   }
 

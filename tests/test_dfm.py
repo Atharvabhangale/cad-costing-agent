@@ -182,6 +182,33 @@ def test_a_plain_block_and_a_shallow_hole_raise_no_flags():
     assert _dfm(step_fixtures.block_with_through_hole()).json()["flags"] == []
 
 
+def test_the_summary_says_exceeded_and_never_calls_an_unmeasured_part_clean():
+    flagged = _dfm(_deep_hole_plate()).json()
+    assert flagged["summary"].startswith("1 flag(s)")
+
+    clean = _dfm(step_fixtures.block_with_through_hole()).json()
+    assert clean["measurements_checked"] > 0
+    assert "none exceeded its threshold" in clean["summary"]
+    assert "passed" not in clean["summary"]
+
+    nothing = _dfm(step_fixtures.plain_block()).json()
+    assert nothing["measurements_checked"] == 0
+    assert "not a clean bill of health" in nothing["summary"]
+    assert {rule["label"] for rule in nothing["rules"]} == {
+        "Deep holes",
+        "Deep, narrow pockets or slots",
+        "Small internal radii",
+        "Many different hole sizes",
+    }
+
+
+def test_the_dfm_panel_adds_nothing_up():
+    source = (SRC / "static" / "dfm.js").read_text(encoding="utf-8")
+    code = "\n".join(line.split("//")[0] for line in source.splitlines())
+    for fragment in ("reduce(", "sum +", " * ", "Math.", "toFixed"):
+        assert fragment not in code, fragment
+
+
 def test_stl_is_refused_like_the_feature_endpoint():
     assert _dfm(b"solid x\nendsolid x\n", name="x.stl").status_code == 400
 

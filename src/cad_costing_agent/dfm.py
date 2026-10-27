@@ -28,7 +28,7 @@ from __future__ import annotations
 
 from enum import Enum
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, computed_field, model_validator
 
 from cad_costing_agent.features.model import Feature, FeatureType
 
@@ -55,6 +55,14 @@ class RuleId(str, Enum):
     DEEP_NARROW_RECESS = "dfm_deep_narrow_pocket_or_slot"
     SMALL_INTERNAL_RADIUS = "dfm_small_internal_radius"
     MANY_HOLE_DIAMETERS = "dfm_many_distinct_hole_diameters"
+
+
+RULE_NAMES = {
+    RuleId.DEEP_HOLE: "Deep holes",
+    RuleId.DEEP_NARROW_RECESS: "Deep, narrow pockets or slots",
+    RuleId.SMALL_INTERNAL_RADIUS: "Small internal radii",
+    RuleId.MANY_HOLE_DIAMETERS: "Many different hole sizes",
+}
 
 
 class DfmRuleSetting(BaseModel):
@@ -151,6 +159,11 @@ class DfmRuleReport(BaseModel):
     flags: int
     skipped_reason: str | None = None
 
+    @computed_field
+    @property
+    def label(self) -> str:
+        return RULE_NAMES.get(self.rule_id, str(self.rule_id))
+
 
 class DfmReport(BaseModel):
     filename: str
@@ -161,6 +174,29 @@ class DfmReport(BaseModel):
     flags: list[DfmFlag]
     rules: list[DfmRuleReport]
     warnings: list[str] = Field(default_factory=list)
+
+    @computed_field
+    @property
+    def measurements_checked(self) -> int:
+        """Features compared with a threshold, over the rules that were evaluated."""
+        return sum(rule.features_checked for rule in self.rules if rule.evaluated)
+
+    @computed_field
+    @property
+    def summary(self) -> str:
+        """One plain sentence for the panel, so the browser works nothing out."""
+        evaluated = [rule for rule in self.rules if rule.evaluated]
+        if self.flags:
+            return f"{len(self.flags)} flag(s) from {len(evaluated)} rule(s) checked."
+        if not self.measurements_checked:
+            return (
+                f"No flags — but nothing on this part could be measured by the {len(evaluated)} "
+                "rule(s), so this is not a clean bill of health."
+            )
+        return (
+            f"No flags: {self.measurements_checked} measurement(s) were checked by "
+            f"{len(evaluated)} rule(s), and none exceeded its threshold."
+        )
 
 
 def _distinct(values: list[float]) -> int:
