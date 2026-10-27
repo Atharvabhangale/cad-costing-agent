@@ -18,7 +18,9 @@ uvicorn cad_costing_agent.main:app --reload
 # whatever it is pointed at.
 CAD_COSTING_DATABASE_URL=sqlite:///./scratch.db uvicorn cad_costing_agent.main:app --port 8710
 
-# Tests (2021 collected: 2020 pass, 1 skip; full run about 5-12 min)
+# Tests (2095 collected: 2094 pass, 1 skip; full run about 4-12 min)
+# A git worktree has no cadmodels/ (git-ignored), so tests needing real models
+# skip there (8 skips instead of 1). Judge a branch by a run in the main tree.
 pytest
 pytest tests/test_operation_suggestions.py                          # one file
 pytest tests/test_features.py::test_a_through_hole_is_found_with_its_diameter_depth_and_axis
@@ -366,6 +368,46 @@ with **no operations and no setups of its own** — keep it that way.
   status goes stale on the first edit — and a fourth copy of the three-branch rule
   would drift from `manufacturing_plan`, `plan.js` and `quotation.py`.
 
+### Previews price through `price_cad_part`, and store nothing
+
+`main.price_cad_part(session, ...)` is the one pricing path for a CAD part: `/cost/cad-part`
+stores what it returns; route comparison and bulk preview only show it. Never add a second
+path — a preview must give the figure the estimate would.
+
+- **Route comparison** (`route_comparison.py`, imports `money` only; `POST
+  /cost/route-comparison`) prices the recommended route plus the candidate families'
+  catalog routes as if each were decided. It never sorts, ranks, recommends, stores or
+  chooses: `kind: preview`, `stored: false`, `chosen: null`, recommended first then catalog
+  order. A route that cannot be priced is listed with the pricing path's reason and null
+  figures. The engineer chooses through `/cad/process/decide`. Response figures are `Money`
+  (exact in memory, rounded on output) or they will not equal the estimate's.
+- **Bulk preview** (`bulk_preview.py`, imports nothing from the package; `POST
+  /cad/bulk/preview`) prices a CSV of parts with the system's estimated times accepted on an
+  **in-memory plan copy only** — `system_time_accepted` is set in exactly one place in that
+  section, and a test counts it. Every row, the response and every exported CSV row carry
+  "Unreviewed system estimates — not an estimate, not quotable". A failed row carries no
+  figure (a validator forbids it); totals are summed only within one currency. Its section
+  in `main.py` is checked from its banner to the *next* banner, not to the end of the file.
+
+### DFM flags are advice, with a cited or admittedly uncited threshold
+
+`dfm.py` (imports `features.model` only; imported by `main.py`, `repository.py`, `db.py`)
+checks recognized features against a versioned, immutable `DfmProfile` (table
+`dfm_profiles`, migration `0007`, seeded `dfm-general-guidelines` 1.0.0, illustrative).
+`POST /cad/dfm` is separate from `/cad/operations/suggest` on purpose, so advice can never
+reach a plan, a time or a cost.
+
+- **A rule needs a measured input.** Never add one for a quantity no recognizer measures
+  (wall thickness, pocket corner radius). A feature missing the dimension is not checked; a
+  rule absent from a profile is reported as not evaluated.
+- **A threshold cites a source or says none was found** (`no_published_source_found_illustrative`).
+  Publishing one marked published without a title and URL is refused (422). Never present
+  a vendor rule of thumb as a standard.
+- **No severity, no confidence.** A flag states the rule, the measured value, the threshold,
+  the profile version and the source; faceted evidence is labelled weaker.
+- Adding a seeded catalog changes `init_db`'s return count and the head revision: update
+  `test_persistence`, `test_migrations`, `test_cost_actuals` and `test_money`'s helper.
+
 ### An actual cost is a recorded fact, never an input
 
 `cost_actuals.py` compares a client's stated cost with an estimate, per unit.
@@ -662,6 +704,10 @@ timesetup.js  time-profile authoring (duration)
 impact.js     the assumptions panel and "Why did this change?"
 feedback.js   the feedback and correction analytics panel
 actuals.js    actual costs and their variance, in the History detail
+routecompare.js  route comparison table in the route card; "Use this route"
+              goes through /cad/process/decide
+bulk.js       the Bulk preview tab; shows the server's rows and CSV
+dfm.js        the advisory DFM panel in the CAD section
 assembly.js   the component tree, the bill of materials, the classification
               panel, the component manufacturing plans, their detail views,
               and the roll-up

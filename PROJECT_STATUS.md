@@ -7,6 +7,12 @@ updated in place; this file is the step-by-step record.
 
 ## Current stage
 
+**Iteration 4: three features built in parallel by separate agents and merged** — route
+comparison, advisory DFM flags, and a bulk costing preview. Route comparison and bulk
+preview store nothing and price only through the one pricing path, `price_cad_part`, so a
+preview cannot disagree with the estimate it previews; DFM flags never touch a cost. On
+branch `iterations-1-3`; `main` is unchanged. Details in *Iteration 4* below.
+
 **Iteration 3: a decided route's casting, forging, sheet, finishing or purchase stages are
 priced from rates a person publishes in the rate set**, instead of the whole route being
 refused. A stage rate is per kg or per piece, plus an optional one-off batch charge; a per-kg
@@ -849,6 +855,97 @@ all. One test added. Suite: **1,760 passing**, 1 skipped.
   assertions that pinned the old numbering. Suite: 1,716 to **1,721 passing**
   (1,722 collected, 1 skipped). One file added, `static/estimateflow.js`. **No
   Python file changed, no endpoint, no schema, no migration.**
+
+### Iteration 4 — route comparison, DFM flags and bulk preview (built in parallel)
+
+The user asked for the three candidates from the aPriori comparison to be built at once by
+separate agents, and decided: compare the recommended route plus the candidates; DFM
+thresholds as cited, editable defaults; bulk costing as an unsaved preview; and commit the
+current work to a new branch so the agents' worktrees could start from it.
+
+**Preparation.** Iterations 1–3 and the turned-part work were committed to a new branch,
+`iterations-1-3` (2a65b41). The `/cost/cad-part` pricing body was then extracted, unchanged,
+into `main.price_cad_part` returning `PricedCadPart` (c6a0d1b; full suite unchanged at 2020
+passed, 1 skipped), so that two agents would not each extract it differently. Three agents
+then worked in separate git worktrees from c6a0d1b, each verifying live on its own scratch
+database and port and committing to its own branch; none edited the shared docs.
+
+**Route comparison** (`feature/route-compare`, e73fcde). `POST /cost/route-comparison`
+prices the recommended route and every catalog route of each candidate family, each as if
+decided, through `price_cad_part`. `route_comparison.py` (imports `money` only) selects and
+orders them: recommended first, then catalog order — never by cost. A route that cannot be
+priced is listed with the pricing path's code and message and null figures. The response is
+`kind: preview`, `stored: false`, `chosen: null`; "Use this route" in the route card calls
+`/cad/process/decide`. 17 tests. Live (agent, `model1_1.stp`, 5 off, every operation 2 min, a
+test rate set with casting at ₹120/kg + ₹15,000): milling + drilling ₹9,806.93; casting and
+casting + machining refused for want of a blank mass, then ₹16,800 and ₹23,300 with 3 kg;
+estimate count 0 throughout.
+
+**DFM flags** (`feature/dfm-flags`, 963fe4c). `dfm.py` (imports `features.model` only)
+evaluates four rules against a versioned, immutable `DfmProfile` — table `dfm_profiles`,
+**migration `0007`** (additive), seeded `dfm-general-guidelines` 1.0.0, illustrative:
+
+| Rule | Threshold | Source |
+|---|---|---|
+| `dfm_deep_hole` | depth / diameter > 4 | "A Practical Design Guide for CNC Machining", Yijin Solution (vendor guide) |
+| `dfm_deep_narrow_pocket_or_slot` | depth / width > 4 | same |
+| `dfm_small_internal_radius` | concave fillet radius < 0.5 mm | same |
+| `dfm_many_distinct_hole_diameters` | > 6 distinct diameters | **no published source found — illustrative** |
+
+Other vendor pages give different ratios, which is why the profile is editable
+(`POST /dfm-profiles/{id}/versions`; an uncited "published" threshold is refused). Wall
+thickness and pocket corner radii are not measured, so no rule uses them. `POST /cad/dfm` is
+separate from `/cad/operations/suggest` so advice cannot reach a plan. 28 tests. Live
+(agent): `model1_1.stp` gives three deep-hole flags — H-002 80 mm deep at Ø16, H-004 and H-005
+40 mm at Ø8, each ratio 5.0; a published 1.1.0 at ratio 6 gives none, and pinning 1.0.0
+brings them back. Migration `0007` on a read-only copy of the real database: 0006 → 0007,
+estimates 137, quotations 3, rate sets 8, time profiles 7 unchanged, `dfm_profiles` 1.
+
+**Bulk preview** (`feature/bulk-preview`, 8682b64). `POST /cad/bulk/preview` takes a CSV
+(`file, part_id, part_name, material, quantity` required; `rate_set_id, rate_set_version,
+route_id, source_unit` optional; an unknown or missing column refuses the batch) plus the
+CAD files. Each row is imported, recognized, suggested, planned and timed, and priced through
+`price_cad_part` with the system's times accepted on an in-memory copy only — nothing is
+stored. Every row, the response and every exported CSV row say "Unreviewed system estimates
+— not an estimate, not quotable". Statuses `priced` / `refused` / `error`; a failed row
+carries no figure; totals are summed per currency only. Limits in `limits.py`:
+`MAX_BULK_ROWS` 100, `MAX_BULK_FILES` 50, `MAX_BULK_TOTAL_MB` 300, `MAX_BULK_CSV_BYTES` 1 MB.
+27 tests. Live (agent): 7 rows — `model1_1.stp` ₹2,257.84 (5 off), `model2.stp` ₹1,488.91,
+`model1_1_solid.igs` ₹691.57, a turned bush ₹1,260.84; an unknown material and a missing file
+as errors; a casting route refused; estimate count 0 before and after.
+
+**Merging.** Each branch appended a section to `main.py` and a script tag to `index.html`;
+both conflicts were resolved by keeping every side. Two problems surfaced only on merge and
+were fixed: git folded the route-comparison section's closing parenthesis into the shared
+context (`main.py` would not compile until it was restored), and two structural tests had
+assumed their section was last — the route-comparison load-order test (now "after
+`actuals.js`, before `estimateflow.js`") and the bulk section test, which read to the end
+of `main.py` and so saw the DFM section's `session.commit()` (it now stops at the next
+section banner and still asserts one `price_cad_part` and one in-memory time acceptance).
+
+**Tests.** Full suite on the merged code, main tree: **2094 passed, 1 skipped** (2095
+collected), up from 2020. The agents' own full runs showed 8 skips because a worktree has no
+git-ignored `cadmodels/`; the main-tree run is the one recorded.
+
+**Combined live check** (scratch database, port 8730): DFM gave the same three deep-hole
+flags; route comparison priced milling + drilling and refused both casting routes for want
+of stage rates in `poc-default` (no plan was sent, so the priced figure is material only, as
+the response says); bulk priced both rows at ₹3,746.75 together, exactly the agent's two
+figures summed; estimates stored 0. In headless Chrome every tab opened with **no JavaScript
+exceptions**, and the rate-set editor still draws its processes table and stage-rate table.
+
+**Limitations.**
+- Route comparison re-parses the upload once per route, and only offers candidate families
+  the classifier listed; with no recommendation and no candidates it compares nothing.
+- DFM: no profile selector or authoring in the UI (API publishing only); flags are not
+  stored on estimates; *Show feature* needs *Analyse features* first; faceted files yield
+  only hole flags; `dfm.js` reassigns the global `resetFeaturesPanel`.
+- Bulk preview: synchronous and sequential, no progress feedback; the omitted-operation path
+  never occurred live (covered by a test); a single assumed setup, the suggested drilling
+  sequences and no confirmed bars, unlike a reviewed estimate; assemblies are costed as one
+  part; per-kg stage masses cannot be supplied in the CSV.
+- All three agents verified against the illustrative seeded or test rate sets, not client
+  rates.
 
 ### Iteration 3 — non-machining route stages priced from stage rates
 
@@ -2096,6 +2193,15 @@ sheet parts (plate/block stock, sheet blank and nesting); (3) bulk import of a c
 rates; (5) the cost-model assumptions; (6) the multi-part validation report; (7)
 housekeeping, now also the *Assumptions* panel's material line on a stage-supplied
 route and the quotation's ₹0.02 per-operation rounding remainder.
+
+Iteration 4 added route comparison, DFM flags and a bulk preview. They open three
+natural follow-ups: profile authoring for DFM in the UI; a hand-off from a bulk preview
+row into the normal review flow; and pricing a route comparison with the plan the
+engineer is editing (it already accepts one).
+
+The work is on branch `iterations-1-3`, not on `main`; merging it into `main` is the
+user's decision. The three agent worktrees under `.claude/worktrees/` can be removed with
+`git worktree remove` once their branches are no longer wanted.
 
 Each needs the user's go-ahead. Prismatic stock needs the client's convention for
 stock size and allowance before anything is built.

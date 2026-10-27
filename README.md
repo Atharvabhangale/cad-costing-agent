@@ -1164,6 +1164,15 @@ unattributed actual: 30.00 per unit
 
 An assembly estimate is compared on its total only, because its material/operation/additional figures cover manufactured components alone. An incomplete or mixed-currency assembly has no total to compare, and its variance is `unavailable` with the reason. A batch size different from the estimate's, or one not stated, is reported as a warning and not adjusted for.
 
+### Previews and advice (nothing here is stored)
+
+| Endpoint | What it does |
+|---|---|
+| `POST /cost/route-comparison` | The recommended route and the candidate families' routes, each priced as if decided, through the same path as `/cost/cad-part`. Unpriceable routes are listed with their reason. Never ranked or chosen; "Use this route" in the route card records the engineer's decision. |
+| `POST /cad/bulk/preview` | A CSV (`file, part_id, part_name, material, quantity`, optional `rate_set_id, rate_set_version, route_id, source_unit`) plus the CAD files. Each part priced with the system's estimated times, every figure labelled **"Unreviewed system estimates — not an estimate, not quotable"**. `?format=csv` returns the export. Up to 100 rows / 50 files / 300 MB. In the UI: the **Bulk preview** tab. |
+| `POST /cad/dfm` | Advisory design-for-manufacturing flags from the recognized features (deep holes, deep narrow pockets or slots, small internal fillet radii, many distinct hole sizes), each with the measured value, the threshold, the profile version and its source. Never changes a cost. In the UI: the DFM panel in the CAD section. |
+| `GET /dfm-profiles`, `GET /dfm-profiles/{id}`, `POST /dfm-profiles/{id}/versions` | The DFM threshold profiles: versioned and immutable like time profiles. The seeded `dfm-general-guidelines` 1.0.0 is illustrative and cites a vendor CNC design guide; one threshold has no published source and says so. |
+
 ### `GET /estimates/{estimate_id}/actuals`
 
 Every actual recorded against the estimate, oldest first, each with `is_current`, `superseded_by` and its variance.

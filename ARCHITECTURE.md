@@ -1252,6 +1252,30 @@ or an unreviewed recommendation that would need stage rates, is still refused be
 is priced. An *unreviewed* `unknown` does not block — the engineer's own operations are priced
 as before and the snapshot says the route was not established.
 
+### One pricing path, and two previews that store nothing
+
+`main.price_cad_part(session, ...)` computes everything `/cost/cad-part` needs — geometry,
+the parsed plan and route, the stock, the stage inputs, the resolved rate set and the
+result — and raises the endpoint's own `HTTPException`s. The endpoint stores what it
+returns. **Route comparison** (`POST /cost/route-comparison`) calls it once per route —
+the recommended route and the candidate families' catalog routes, each decided for the
+preview — and lists priced and refused routes in a fixed order, never by cost, with
+nothing chosen or stored. **Bulk preview** (`POST /cad/bulk/preview`) calls it once per CSV
+row with the system's estimated times accepted on an in-memory plan copy, labels every
+figure an unreviewed system estimate, and stores nothing. Because both go through the
+same function, neither can price a part differently from the estimate the same inputs
+would produce; tests assert equal totals.
+
+### DFM flags are advice
+
+`dfm.py` checks recognized features against a `DfmProfile` — versioned, immutable, seeded
+(`dfm-general-guidelines` 1.0.0, illustrative), stored in `dfm_profiles` (migration
+`0007`) exactly as time profiles are. Each threshold names its source or says none was
+found. A rule only exists where a recognizer measures its input (hole depth and diameter,
+pocket depth and width, fillet radius); there is no wall-thickness or corner-radius rule.
+`POST /cad/dfm` is a separate endpoint from the suggestions, so a flag cannot reach a
+plan, a time or a cost, and flags carry no severity or confidence.
+
 ### Route stages are priced from rates someone published
 
 `stage_costing.py` prices a decided route's non-machining stages — casting, forging, sheet
@@ -1798,6 +1822,12 @@ costing-agent/
 │       │                         #   only the planner and the classification vocabulary
 │       ├── quotation.py         # a stored estimate as a printable document; imports only
 │       │                         #   `estimates` and `money`, and calculates nothing
+│       ├── route_comparison.py  # route comparison preview models + selection order; imports
+│       │                         #   only `money`; prices nothing itself (main → price_cad_part)
+│       ├── bulk_preview.py      # bulk preview CSV parsing, row models, CSV export; imports
+│       │                         #   nothing from the package; nothing it handles is stored
+│       ├── dfm.py               # advisory DFM flags against a versioned, cited DfmProfile;
+│       │                         #   imports only `features.model`; never reaches a cost
 │       ├── cost_actuals.py      # a client's actual cost vs the estimate, per unit; imports
 │       │                         #   only `money`, and no costing module reads it
 │       ├── component_classification.py
