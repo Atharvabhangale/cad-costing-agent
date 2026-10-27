@@ -1,4 +1,5 @@
 import json
+from dataclasses import dataclass
 import time
 import mimetypes
 from contextlib import asynccontextmanager
@@ -2950,95 +2951,61 @@ async def cad_mass(
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
-@app.post("/cost/cad-part", response_model=CadPartCostEstimateResult)
-async def cost_cad_part(
-    file: UploadFile = File(...),
-    material: str = Form(..., description="Material name, e.g. 'Steel' or 'Aluminium'."),
-    source_unit: str = Form(
-        ...,
-        description=(
-            "Length unit the geometry is in: mm, cm, m, or inch. STEP files are "
-            "normalized to mm by the reader, so STEP uploads must pass 'mm'."
-        ),
-    ),
-    part_id: str = Form(...),
-    part_name: str = Form(...),
-    quantity: int = Form(1),
-    operations: str = Form("[]", description="JSON-encoded list of ManufacturingOperation objects."),
-    operation_requirements: str = Form(
-        "[]",
-        description=(
-            "JSON-encoded list of OperationRequirement objects, whose rates are resolved "
-            "from the selected rate set. Requires rate_set_id."
-        ),
-    ),
-    rate_set_id: str | None = Form(None, description="Rate set to resolve rates from."),
-    rate_set_version: str | None = Form(
-        None, description="Exact rate set version to pin. Omit to use the latest."
-    ),
-    overhead_rate_percent: float | None = Form(
-        None, description="Overhead as a percent of direct cost. Overrides the rate set."
-    ),
-    scrap_rate_percent: float | None = Form(
-        None, description="Scrap allowance as a percent of direct cost. Overrides the rate set."
-    ),
-    tooling_cost_per_batch: float | None = Form(
-        None, description="One-time tooling cost for the batch. Overrides the rate set."
-    ),
-    geometry_completion_method: str | None = Form(
-        None,
-        description=(
-            f"Only for a file whose geometry cannot be measured: '{TOTAL_VOLUME}' supplies the "
-            f"whole part's volume, '{MISSING_VOLUME}' adds to the watertight part that was "
-            "measured. Recorded on the estimate as a stated assumption."
-        ),
-    ),
-    geometry_completion_volume_mm3: float | None = Form(
-        None, description="The volume the user is supplying, in mm³."
-    ),
-    manufacturing_plan: str | None = Form(
-        None,
-        description=(
-            "JSON-encoded ManufacturingPlan. When given, the operations to cost are derived "
-            "from it — only those with a committed time — and the whole plan plus its operation "
-            "feedback is persisted on the estimate. Mutually exclusive with "
-            "'operation_requirements'."
-        ),
-    ),
-    raw_stock: str | None = Form(
-        None,
-        description=(
-            "Optional JSON-encoded BarStock from /cad/operations/suggest, carrying any decision "
-            "from /cad/stock/decide. When confirmed, material is costed from the bar's volume "
-            "instead of the finished part's; unconfirmed, it is recorded and changes nothing."
-        ),
-    ),
-    process_classification: str | None = Form(
-        None,
-        description=(
-            "Optional JSON-encoded ProcessClassification from /cad/operations/suggest, carrying "
-            "any decision from /cad/process/decide. Recorded on the estimate. A decided route's "
-            "non-machining stages are priced from the rate set's stage rates; a route marked "
-            "unknown, or an unreviewed recommendation needing stage rates, is refused with 422."
-        ),
-    ),
-    stage_inputs: str | None = Form(
-        None,
-        description=(
-            "Optional JSON object keyed by route stage id, e.g. {\"casting\": {\"mass_kg\": "
-            "2.4}}: the mass, per part, that a per-kg stage rate is charged on. Entered by a "
-            "person and recorded on the estimate; never derived from the CAD mass."
-        ),
-    ),
-    session: Session = Depends(get_session),
-) -> CadPartCostEstimateResult:
-    """CAD-driven part cost estimate: geometry -> mass -> existing part costing.
+@dataclass
+class PricedCadPart:
+    """Everything `/cost/cad-part` works out before it stores an estimate.
 
-    This is the CAD-driven counterpart to `/cost/part`, which still accepts a
-    manually supplied `mass_kg`. `/cost/part` is unchanged.
+    `price_cad_part` is the one pricing path for a CAD part. The endpoint stores
+    what it returns; a preview (comparing routes, a bulk run) shows it and
+    stores nothing — so a preview can never price a part differently from the
+    estimate the same inputs would produce.
     """
-    data = await file.read()
-    geometry = _geometry_of(_import(data, file.filename or "", CAPABILITY_GEOMETRY))
+
+    geometry: GeometryProperties
+    operations_data: list
+    requirement_models: list
+    classification: "ProcessClassification | None"
+    route_differences: list
+    plan: "ManufacturingPlan | None"
+    time_profile_snapshot: dict | None
+    stock: "BarStock | None"
+    stage_input_values: dict
+    additional_costs: "AdditionalCostInputs | None"
+    resolved_rate_set: "RateSet | None"
+    result: CadPartCostEstimateResult
+
+
+def price_cad_part(
+    session: Session,
+    *,
+    data: bytes,
+    filename: str,
+    material: str,
+    source_unit: str,
+    part_id: str,
+    part_name: str,
+    quantity: int = 1,
+    operations: str = "[]",
+    operation_requirements: str = "[]",
+    rate_set_id: str | None = None,
+    rate_set_version: str | None = None,
+    overhead_rate_percent: float | None = None,
+    scrap_rate_percent: float | None = None,
+    tooling_cost_per_batch: float | None = None,
+    geometry_completion_method: str | None = None,
+    geometry_completion_volume_mm3: float | None = None,
+    manufacturing_plan: str | None = None,
+    raw_stock: str | None = None,
+    process_classification: str | None = None,
+    stage_inputs: str | None = None,
+) -> PricedCadPart:
+    """Price one CAD part exactly as `/cost/cad-part` does, without storing it.
+
+    Takes the endpoint's own form values. Raises the same `HTTPException`s the
+    endpoint answers with (400, 415, 422), so a caller reports a refusal in the
+    endpoint's words.
+    """
+    geometry = _geometry_of(_import(data, filename, CAPABILITY_GEOMETRY))
 
     # A model whose geometry cannot be measured stops here with a structured
     # request for the missing figure, rather than an opaque failure.
@@ -3236,6 +3203,145 @@ async def cost_cad_part(
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    return PricedCadPart(
+        geometry=geometry,
+        operations_data=operations_data,
+        requirement_models=requirement_models,
+        classification=classification,
+        route_differences=route_differences,
+        plan=plan,
+        time_profile_snapshot=time_profile_snapshot,
+        stock=stock,
+        stage_input_values=stage_input_values,
+        additional_costs=additional_costs,
+        resolved_rate_set=resolved_rate_set,
+        result=result,
+    )
+
+
+@app.post("/cost/cad-part", response_model=CadPartCostEstimateResult)
+async def cost_cad_part(
+    file: UploadFile = File(...),
+    material: str = Form(..., description="Material name, e.g. 'Steel' or 'Aluminium'."),
+    source_unit: str = Form(
+        ...,
+        description=(
+            "Length unit the geometry is in: mm, cm, m, or inch. STEP files are "
+            "normalized to mm by the reader, so STEP uploads must pass 'mm'."
+        ),
+    ),
+    part_id: str = Form(...),
+    part_name: str = Form(...),
+    quantity: int = Form(1),
+    operations: str = Form("[]", description="JSON-encoded list of ManufacturingOperation objects."),
+    operation_requirements: str = Form(
+        "[]",
+        description=(
+            "JSON-encoded list of OperationRequirement objects, whose rates are resolved "
+            "from the selected rate set. Requires rate_set_id."
+        ),
+    ),
+    rate_set_id: str | None = Form(None, description="Rate set to resolve rates from."),
+    rate_set_version: str | None = Form(
+        None, description="Exact rate set version to pin. Omit to use the latest."
+    ),
+    overhead_rate_percent: float | None = Form(
+        None, description="Overhead as a percent of direct cost. Overrides the rate set."
+    ),
+    scrap_rate_percent: float | None = Form(
+        None, description="Scrap allowance as a percent of direct cost. Overrides the rate set."
+    ),
+    tooling_cost_per_batch: float | None = Form(
+        None, description="One-time tooling cost for the batch. Overrides the rate set."
+    ),
+    geometry_completion_method: str | None = Form(
+        None,
+        description=(
+            f"Only for a file whose geometry cannot be measured: '{TOTAL_VOLUME}' supplies the "
+            f"whole part's volume, '{MISSING_VOLUME}' adds to the watertight part that was "
+            "measured. Recorded on the estimate as a stated assumption."
+        ),
+    ),
+    geometry_completion_volume_mm3: float | None = Form(
+        None, description="The volume the user is supplying, in mm³."
+    ),
+    manufacturing_plan: str | None = Form(
+        None,
+        description=(
+            "JSON-encoded ManufacturingPlan. When given, the operations to cost are derived "
+            "from it — only those with a committed time — and the whole plan plus its operation "
+            "feedback is persisted on the estimate. Mutually exclusive with "
+            "'operation_requirements'."
+        ),
+    ),
+    raw_stock: str | None = Form(
+        None,
+        description=(
+            "Optional JSON-encoded BarStock from /cad/operations/suggest, carrying any decision "
+            "from /cad/stock/decide. When confirmed, material is costed from the bar's volume "
+            "instead of the finished part's; unconfirmed, it is recorded and changes nothing."
+        ),
+    ),
+    process_classification: str | None = Form(
+        None,
+        description=(
+            "Optional JSON-encoded ProcessClassification from /cad/operations/suggest, carrying "
+            "any decision from /cad/process/decide. Recorded on the estimate. A decided route's "
+            "non-machining stages are priced from the rate set's stage rates; a route marked "
+            "unknown, or an unreviewed recommendation needing stage rates, is refused with 422."
+        ),
+    ),
+    stage_inputs: str | None = Form(
+        None,
+        description=(
+            "Optional JSON object keyed by route stage id, e.g. {\"casting\": {\"mass_kg\": "
+            "2.4}}: the mass, per part, that a per-kg stage rate is charged on. Entered by a "
+            "person and recorded on the estimate; never derived from the CAD mass."
+        ),
+    ),
+    session: Session = Depends(get_session),
+) -> CadPartCostEstimateResult:
+    """CAD-driven part cost estimate: geometry -> mass -> existing part costing.
+
+    This is the CAD-driven counterpart to `/cost/part`, which still accepts a
+    manually supplied `mass_kg`. `/cost/part` is unchanged.
+    """
+    priced = price_cad_part(
+        session,
+        data=await file.read(),
+        filename=file.filename or "",
+        material=material,
+        source_unit=source_unit,
+        part_id=part_id,
+        part_name=part_name,
+        quantity=quantity,
+        operations=operations,
+        operation_requirements=operation_requirements,
+        rate_set_id=rate_set_id,
+        rate_set_version=rate_set_version,
+        overhead_rate_percent=overhead_rate_percent,
+        scrap_rate_percent=scrap_rate_percent,
+        tooling_cost_per_batch=tooling_cost_per_batch,
+        geometry_completion_method=geometry_completion_method,
+        geometry_completion_volume_mm3=geometry_completion_volume_mm3,
+        manufacturing_plan=manufacturing_plan,
+        raw_stock=raw_stock,
+        process_classification=process_classification,
+        stage_inputs=stage_inputs,
+    )
+    geometry = priced.geometry
+    operations_data = priced.operations_data
+    requirement_models = priced.requirement_models
+    classification = priced.classification
+    route_differences = priced.route_differences
+    plan = priced.plan
+    time_profile_snapshot = priced.time_profile_snapshot
+    stock = priced.stock
+    stage_input_values = priced.stage_input_values
+    additional_costs = priced.additional_costs
+    resolved_rate_set = priced.resolved_rate_set
+    result = priced.result
 
     part_cost = result.part_cost
     estimate_id = EstimateRepository(session).save(
