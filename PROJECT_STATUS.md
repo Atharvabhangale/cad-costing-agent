@@ -874,6 +874,14 @@ scratch database only. On `model2.stp`, 10 off, Steel, no committed machining ti
 milling + drilling ₹2,866.37 (material ₹2,349.49), casting with a 4.5 kg blank ₹4,666.50,
 cutting + welding ₹4,391.37.
 
+**v1.1.0** (published the same day, at the user's request "for demo purposes only") fills
+every gap with the assistant's own **ESTIMATED** figures, each labelled so in its note:
+casting pattern ₹25,000/batch, forging ₹130/kg + ₹75,000 die, moulding ₹15/piece + ₹2,50,000
+mould, drilling ₹150 + ₹90/h, a new grinding rate ₹400 + ₹90/h, and a demo-only purchased
+part at ₹500/piece. v1.0.0 is unchanged. With v1.1.0 every route on `model2.stp` prices:
+casting + machining ₹3,516.65 per part at 10 off falling to ₹527.65 at 500 off as the
+pattern spreads, purchased ₹6,100.00 for 10.
+
 ### Iteration 4 — route comparison, DFM flags and bulk preview (built in parallel)
 
 The user asked for the three candidates from the aPriori comparison to be built at once by

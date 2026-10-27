@@ -9,11 +9,13 @@ which of three kinds it is:
 
   SOURCED      a published figure (source and date in the note)
   DERIVED      a published figure combined with a stated assumption
-  PLACEHOLDER  no Indian figure was found; a value chosen only so the route can
-               be priced in a demo — replace it before any real use
+  ESTIMATED    no usable Indian figure was found; the assistant's own estimate of a
+               typical small-batch Indian job-shop figure, added at the user's request
+               "for demo purposes only" — replace it before any real use
 
-"Purchased complete" has no stage rate on purpose: a bought part's price is
-specific to the part, so any single figure would be invented.
+v1.1.0 adds those estimates (pattern, die and mould charges, forging, moulding,
+drilling, grinding, and a demo-only purchased-part price) on top of v1.0.0, which
+left them out. Rate set versions are immutable, so v1.0.0 stays as published.
 
 The rate set is published with is_illustrative = true, which keeps the app's
 "illustrative rates" warning on every estimate made with it. Publishing goes
@@ -30,14 +32,14 @@ import urllib.request
 RATE_SET = {
     "rate_set_id": "illustrative-india-2026",
     "name": "Illustrative India rates (web research, Oct 2026)",
-    "version": "1.0.0",
+    "version": "1.1.0",
     "currency": "INR",
     "is_illustrative": True,
     "description": (
         "ILLUSTRATIVE, not client data. Gathered from public web pages on 2026-10-27: trade "
         "indices (BigMint) for steel, marketplace asking prices (IndiaMART, TradeIndia, "
-        "OfBusiness) for most others. Each stage rate's note says SOURCED, DERIVED or "
-        "PLACEHOLDER. Prices exclude GST where the source says so. Replace with client rates."
+        "OfBusiness) for most others; gaps filled with the assistant's ESTIMATED figures for "
+        "demo use. Each stage rate's note says SOURCED, DERIVED or ESTIMATED. Not for quoting."
     ),
     "materials": {
         # SOURCED: BigMint, IS 2062 E250 HR plate, ex-Mumbai trade level, excl. GST, 25 Mar 2026.
@@ -71,8 +73,11 @@ RATE_SET = {
         "milling": {"machine_rate_per_hour": 360.0, "labor_rate_per_hour": 90.0},
         # DERIVED: CNC turning job work 300/h (IndiaMART Surat); 300 - 90.
         "turning": {"machine_rate_per_hour": 210.0, "labor_rate_per_hour": 90.0},
-        # PLACEHOLDER: no Indian drilling rate found; set below turning.
+        # ESTIMATED (assistant, demo only): no Indian drilling rate found; radial/CNC drill
+        # set below the VMC rate.
         "drilling": {"machine_rate_per_hour": 150.0, "labor_rate_per_hour": 90.0},
+        # ESTIMATED (assistant, demo only): surface/cylindrical grinder; no figure found.
+        "grinding": {"machine_rate_per_hour": 400.0, "labor_rate_per_hour": 90.0},
     },
     # Example Indian should-cost sheet (slideshare, ZBC in commodities): overhead 20%,
     # rejection 2%. An example, not a standard.
@@ -85,22 +90,21 @@ RATE_SET = {
         "casting": {
             "unit_basis": "per_kg",
             "unit_rate": 85.0,
-            "batch_charge": 0.0,
+            "batch_charge": 25000.0,
             "note": (
-                "SOURCED (marketplace): grey iron FG260 castings 70-100/kg of casting (IndiaMART "
-                "Rajkot/Ahmedabad, undated). Others found: SG iron 100-130, Al gravity ~200, Al "
-                "HPDC 200-450, investment steel 110-500. Pattern cost NOT found - add from a "
-                "foundry quote as a batch charge. Rate includes metal."
+                "SOURCED (marketplace): grey iron FG260 castings 70-100/kg of casting (IndiaMART, "
+                "undated); SG iron 100-130, Al gravity ~200, HPDC 200-450 also seen. Rate "
+                "includes metal. Pattern 25,000 per batch is ESTIMATED (assistant, demo only)."
             ),
         },
         "forging": {
             "unit_basis": "per_kg",
-            "unit_rate": 120.0,
-            "batch_charge": 0.0,
+            "unit_rate": 130.0,
+            "batch_charge": 75000.0,
             "note": (
-                "PLACEHOLDER: published forging prices spanned 15-5,000/kg (IndiaMART), not "
-                "usable as a range; no die cost found. Value chosen only to make the route "
-                "priceable. Replace with a forge shop quote."
+                "ESTIMATED (assistant, demo only): closed-die steel forging ~110-160/kg and a "
+                "small die ~50,000-1,50,000; published listings (15-5,000/kg) were unusable. "
+                "Rate includes metal. Replace with a forge shop quote."
             ),
         },
         "sheet_cutting": {
@@ -152,11 +156,11 @@ RATE_SET = {
         "moulding": {
             "unit_basis": "per_piece",
             "unit_rate": 15.0,
-            "batch_charge": 0.0,
+            "batch_charge": 250000.0,
             "note": (
-                "PLACEHOLDER: no Indian per-piece or machine-hour moulding rate found; mould "
-                "costs were only in USD (Zetwerk blog: simple 2-plate USD 3,500-8,000). Value "
-                "chosen only to make the route priceable. Rate includes the resin."
+                "ESTIMATED (assistant, demo only): ~30 g ABS part, 30 s cycle at ~800/h plus "
+                "resin; simple single-cavity mould 2-5 lakh (Zetwerk blog quotes USD 3,500-8,000 "
+                "for a simple 2-plate mould). Rate includes the resin."
             ),
         },
         "additive_build": {
@@ -166,6 +170,15 @@ RATE_SET = {
             "note": (
                 "SOURCED (marketplace): FDM PLA about 6/g = 6,000/kg (iamrapid, Zbotic, undated). "
                 "SLS/MJF nylon 32-40/cm3; metal AM not found. Enter the build mass."
+            ),
+        },
+        "purchase": {
+            "unit_basis": "per_piece",
+            "unit_rate": 500.0,
+            "batch_charge": 0.0,
+            "note": (
+                "ESTIMATED (assistant, demo only): one flat price for any bought part, so the "
+                "Purchased route can be shown. Meaningless for a real part - use its own quote."
             ),
         },
     },
