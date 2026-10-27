@@ -11,6 +11,9 @@ are different questions and now have different answers.
     CAD_COSTING_MAX_ASSEMBLY_COMPONENTS how many occurrences decomposition will walk
     CAD_COSTING_MAX_FEEDBACK_ESTIMATES  how many stored estimates the analytics will read
     CAD_COSTING_MIN_FEEDBACK_SAMPLE     observations before a pattern is called actionable
+    CAD_COSTING_MAX_BULK_ROWS           parts one bulk preview will price
+    CAD_COSTING_MAX_BULK_FILES          CAD files one bulk preview will accept
+    CAD_COSTING_MAX_BULK_TOTAL_MB       combined size of one bulk preview's CAD files
 
 The ordering that matters: a model can be **too complex to draw and still
 perfectly costable**. Geometry and mass need a volume, which is cheap; the
@@ -98,3 +101,22 @@ enough that one extreme correction cannot define a bias, and low enough to be
 reachable in a real shop's first week. Configurable because the right number
 depends on how much work a shop actually reviews, and every metric reports the
 threshold it was judged against alongside its own sample count."""
+
+
+MAX_BULK_ROWS = _positive_int("CAD_COSTING_MAX_BULK_ROWS", 100)
+"""Parts one bulk costing preview will price. Each row runs the whole pipeline
+(import, recognition, suggestion, time estimation, pricing) inside one request,
+so this bounds how long a request can run, not how much history is read."""
+
+MAX_BULK_FILES = _positive_int("CAD_COSTING_MAX_BULK_FILES", 50)
+"""CAD files one bulk preview accepts. Several rows may name the same file."""
+
+MAX_BULK_TOTAL_MB = _positive_int("CAD_COSTING_MAX_BULK_TOTAL_MB", 300)
+"""Combined size of a bulk preview's CAD files. Each file is still held to
+`MAX_UPLOAD_BYTES`; this bounds the sum, which all sits in memory at once."""
+
+MAX_BULK_TOTAL_BYTES = MAX_BULK_TOTAL_MB * _MEGABYTE
+
+MAX_BULK_CSV_BYTES = 1 * _MEGABYTE
+"""Largest batch CSV. A hundred rows is a few tens of kilobytes; this is a
+sanity bound, not a tuning knob."""

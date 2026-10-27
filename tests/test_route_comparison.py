@@ -279,8 +279,8 @@ def test_the_comparison_module_cannot_price_or_rank():
 def test_the_ui_script_is_loaded_between_actuals_and_estimateflow_and_does_no_arithmetic():
     html = (STATIC / "index.html").read_text(encoding="utf-8")
     order = re.findall(r'<script src="([\w.]+\.js)"', html)
-    assert order.index("actuals.js") + 1 == order.index("routecompare.js")
-    assert order.index("routecompare.js") + 1 == order.index("estimateflow.js")
+    # After the globals it borrows, before the flow router that may call it.
+    assert order.index("actuals.js") < order.index("routecompare.js") < order.index("estimateflow.js")
 
     source = (STATIC / "routecompare.js").read_text(encoding="utf-8")
     code = re.sub(r"//[^\n]*", "", re.sub(r"/\*.*?\*/", "", source, flags=re.S))

@@ -3639,3 +3639,318 @@ async def compare_routes(
             "nothing to compare. Choose a route yourself."
         ),
     )
+
+
+# ---------------------------------------------------------------- bulk preview
+#
+# Price many parts at once from a CSV and the CAD files it names, and store
+# NOTHING. Every row runs the same pipeline a person would (import, recognize,
+# suggest, plan, estimate times) and is then priced by `price_cad_part`, the one
+# path `/cost/cad-part` uses, so a preview figure cannot disagree with the
+# estimate the same inputs would produce. The times in a preview are the
+# system's unreviewed predictions, marked accepted on an in-memory copy of the
+# plan only so the part can be priced; that copy is never saved.
+
+from fastapi import Response  # noqa: E402
+
+from cad_costing_agent import bulk_preview  # noqa: E402
+from cad_costing_agent.limits import (  # noqa: E402
+    MAX_BULK_CSV_BYTES,
+    MAX_BULK_FILES,
+    MAX_BULK_ROWS,
+    MAX_BULK_TOTAL_BYTES,
+)
+from cad_costing_agent.manufacturing_plan import build_plan  # noqa: E402
+
+
+class BulkPreviewResponse(BaseModel):
+    preview_label: str = bulk_preview.PREVIEW_LABEL
+    notice: str = bulk_preview.PREVIEW_NOTICE
+    stored: bool = Field(default=False, description="Always false: a preview stores nothing.")
+    time_profile: str | None = None
+    rows: list[bulk_preview.BulkRowResult]
+    summary: bulk_preview.BulkSummary
+    csv: str = Field(description="The same rows as CSV, produced by the server.")
+
+
+def _bulk_reason(exc: Exception) -> tuple[str | None, str, bool]:
+    """(code, sentence, refused) for a failure on one row."""
+    if isinstance(exc, HTTPException):
+        detail = exc.detail
+        if isinstance(detail, dict):
+            message = detail.get("message") or detail.get("error") or str(detail)
+            return detail.get("error"), str(message), exc.status_code == 422
+        if isinstance(detail, list):
+            return None, "; ".join(str(item.get("msg", item)) for item in detail), False
+        return None, str(detail), False
+    if isinstance(exc, ValueError):
+        return None, str(exc), False
+    return "unexpected", f"Unexpected failure ({type(exc).__name__}): {exc}", False
+
+
+def _accept_for_preview(plan: ManufacturingPlan) -> ManufacturingPlan:
+    """An in-memory copy with every system time marked accepted. Never persisted."""
+    return plan.model_copy(
+        update={
+            "operations": [
+                o.model_copy(update={"system_time_accepted": True})
+                if o.system_suggested_cycle_time is not None
+                else o
+                for o in plan.operations
+            ],
+            "setups": [
+                s.model_copy(update={"system_setup_time_accepted": True})
+                if s.system_setup_time_minutes is not None
+                else s
+                for s in plan.setups
+            ],
+        }
+    )
+
+
+def _bulk_recognize(data: bytes, filename: str):
+    """(suggestions, classification) exactly as `/cad/operations/suggest` builds them."""
+    if len(data) > MAX_UPLOAD_BYTES:
+        raise HTTPException(status_code=400, detail="CAD file is above the upload limit.")
+    _import(data, filename, CAPABILITY_FEATURES, with_geometry=False)
+    try:
+        recognition = recognize_features_from_bytes(data, filename)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:  # noqa: BLE001 - one bad model must not stop the batch
+        raise HTTPException(
+            status_code=500,
+            detail=f"Feature recognition failed unexpectedly ({type(exc).__name__}).",
+        ) from exc
+    suggestions = suggest_operations(recognition)
+    return suggestions, classify_process(recognition, suggestions)
+
+
+def _bulk_price_row(
+    session: Session,
+    row: "bulk_preview.BulkRow",
+    files: dict[str, bytes],
+    recognized: dict,
+    default_rate_set: tuple[str | None, str | None],
+    profile,
+) -> "bulk_preview.BulkRowResult":
+    rate_set_id = row.rate_set_id or default_rate_set[0]
+    rate_set_version = row.rate_set_version or (
+        default_rate_set[1] if row.rate_set_id is None else None
+    )
+    base = dict(
+        line=row.line,
+        file=row.file,
+        part_id=row.part_id,
+        part_name=row.part_name,
+        material=row.material,
+        quantity=row.quantity,
+        rate_set_id=rate_set_id,
+        rate_set_version=rate_set_version,
+        route_id=row.route_id,
+    )
+
+    def failed(status: str, code: str | None, reason: str):
+        return bulk_preview.BulkRowResult(**base, status=status, reason_code=code, reason=reason)
+
+    if row.errors:
+        return failed("error", "invalid_row", " ".join(row.errors))
+    data = files.get(row.file)
+    if data is None:
+        return failed(
+            "error",
+            "file_not_uploaded",
+            f"File '{row.file}' was not uploaded. Uploaded: {', '.join(sorted(files)) or 'none'}.",
+        )
+    if not rate_set_id:
+        return failed("error", "no_rate_set", "No rate_set_id on the row and no batch default.")
+
+    try:
+        rate_set = RateSetRepository(session).get(rate_set_id, rate_set_version)
+        resolve_material(rate_set, row.material)
+    except ValueError as exc:
+        return failed("error", "unknown_rate_set_or_material", str(exc))
+    base["rate_set_version"] = rate_set.version
+
+    try:
+        if row.file not in recognized:
+            try:
+                recognized[row.file] = ("ok", _bulk_recognize(data, row.file))
+            except Exception as exc:  # noqa: BLE001 - cached so a repeat row fails the same way
+                recognized[row.file] = ("err", exc)
+        kind, held = recognized[row.file]
+        if kind == "err":
+            raise held
+        suggestions, classification = held
+
+        route_label = None
+        if row.route_id:
+            classification = record_route_decision(
+                classification, UserAction.EDITED, route_id=row.route_id
+            )
+            route_label = classification.route.label if classification.route else row.route_id
+
+        plan = build_plan(
+            suggestions.suggestions,
+            units=suggestions.units,
+            profile=profile,
+            source_filename=row.file,
+        )
+        plan = _accept_for_preview(plan)
+        priced = price_cad_part(
+            session,
+            data=data,
+            filename=row.file,
+            material=row.material,
+            source_unit=row.source_unit,
+            part_id=row.part_id,
+            part_name=row.part_name,
+            quantity=row.quantity,
+            rate_set_id=rate_set_id,
+            rate_set_version=rate_set.version,
+            manufacturing_plan=json.dumps(plan.model_dump(mode="json")),
+            process_classification=(
+                classification.model_dump_json() if row.route_id else None
+            ),
+        )
+    except Exception as exc:  # noqa: BLE001 - a row's failure never aborts the batch
+        code, reason, refused = _bulk_reason(exc)
+        return failed("refused" if refused else "error", code, reason)
+
+    cost = priced.result.part_cost
+    omitted = [
+        bulk_preview.OmittedOperation(
+            operation_id=o.operation_id,
+            operation_name=o.operation_name or o.operation_id,
+            reason=o.system_time_reason or o.not_costable_reason or "No time could be estimated.",
+        )
+        for o in priced.plan.uncosted_operations()
+    ]
+    costed = len(priced.requirement_models)
+    notes = []
+    if costed == 0:
+        notes.append("No operation carries a time, so this is the material cost only.")
+    return bulk_preview.BulkRowResult(
+        **base,
+        status="priced",
+        currency=cost.currency,
+        totals=bulk_preview.BulkTotals(
+            total_cost=round_money(cost.total_part_cost),
+            per_unit_cost=round_money(cost.per_unit_cost),
+            material_cost=round_money(cost.total_material_cost),
+            operations_cost=round_money(cost.total_operation_cost),
+            stages_cost=round_money(cost.total_stage_cost),
+            additional_cost=round_money(cost.total_additional_cost),
+        ),
+        operations_costed=costed,
+        operations_omitted=len(omitted),
+        omitted_operations=omitted,
+        operations_excluded_by_route=len(priced.plan.out_of_route_operations())
+        + len(priced.plan.as_formed_operations()),
+        notes=notes,
+        route=route_label,
+    )
+
+
+def _bulk_summary(rows, uploaded: list[str]) -> "bulk_preview.BulkSummary":
+    totals: dict[str, list] = {}
+    for row in rows:
+        if row.status == "priced":
+            entry = totals.setdefault(row.currency, [0, 0.0])
+            entry[0] += 1
+            entry[1] += row.totals.total_cost
+    named = {row.file for row in rows}
+    return bulk_preview.BulkSummary(
+        rows=len(rows),
+        priced=sum(r.status == "priced" for r in rows),
+        refused=sum(r.status == "refused" for r in rows),
+        error=sum(r.status == "error" for r in rows),
+        operations_omitted=sum(r.operations_omitted or 0 for r in rows),
+        by_currency=[
+            bulk_preview.CurrencyTotal(
+                currency=currency, priced_rows=count, total_cost=round_money(total)
+            )
+            for currency, (count, total) in sorted(totals.items())
+        ],
+        currency_note=bulk_preview.CURRENCY_NOTE,
+        unreferenced_files=[name for name in uploaded if name not in named],
+    )
+
+
+@app.post("/cad/bulk/preview", response_model=BulkPreviewResponse)
+def bulk_preview_run(
+    batch_csv: UploadFile = File(..., description="The batch CSV. See bulk_preview.py."),
+    files: list[UploadFile] = File(..., description="The CAD files the CSV's `file` column names."),
+    rate_set_id: str | None = Form(None, description="Default for rows with no rate_set_id."),
+    rate_set_version: str | None = Form(None),
+    time_profile_id: str | None = Form(None, description="Time profile; omit for the built-in baseline."),
+    time_profile_version: str | None = Form(None),
+    format: str = Query("json", description="'json' or 'csv'."),
+    session: Session = Depends(get_session),
+):
+    """Price a batch of parts as an unreviewed preview. Stores nothing.
+
+    Not an estimate and not quotable: every time is the system's own unreviewed
+    prediction. A row that cannot be priced is reported with its reason and no
+    cost; the other rows still run.
+    """
+    if format not in ("json", "csv"):
+        raise HTTPException(status_code=400, detail="format must be 'json' or 'csv'.")
+    raw_csv = batch_csv.file.read(MAX_BULK_CSV_BYTES + 1)
+    if len(raw_csv) > MAX_BULK_CSV_BYTES:
+        raise HTTPException(status_code=413, detail="The batch CSV is above the size limit.")
+    try:
+        text = raw_csv.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise HTTPException(status_code=422, detail="The batch CSV is not UTF-8 text.") from exc
+
+    if len(files) > MAX_BULK_FILES:
+        raise HTTPException(
+            status_code=413, detail=f"{len(files)} files uploaded; the limit is {MAX_BULK_FILES}."
+        )
+    uploaded: dict[str, bytes] = {}
+    total = 0
+    for upload in files:
+        name = upload.filename or ""
+        if name in uploaded:
+            raise HTTPException(status_code=422, detail=f"File '{name}' was uploaded twice.")
+        data = upload.file.read()
+        total += len(data)
+        if len(data) > MAX_UPLOAD_BYTES or total > MAX_BULK_TOTAL_BYTES:
+            raise HTTPException(status_code=413, detail="The CAD files are above the size limit.")
+        uploaded[name] = data
+
+    try:
+        parsed = bulk_preview.parse_batch_csv(text, max_rows=MAX_BULK_ROWS)
+    except bulk_preview.BatchRefused as exc:
+        raise HTTPException(
+            status_code=422, detail={"error": "bulk_batch_refused", "message": str(exc)}
+        ) from exc
+
+    profile = _resolve_time_profile(session, time_profile_id, time_profile_version)
+    recognized: dict = {}
+    results = [
+        _bulk_price_row(
+            session, row, uploaded, recognized, (rate_set_id, rate_set_version), profile
+        )
+        for row in parsed.rows
+    ]
+    csv_text = bulk_preview.render_csv(results)
+    if format == "csv":
+        return Response(
+            content=("﻿" + csv_text).encode("utf-8"),
+            media_type="text/csv; charset=utf-8",
+            headers={
+                "content-disposition": 'attachment; filename="bulk-preview-UNREVIEWED.csv"'
+            },
+        )
+    return BulkPreviewResponse(
+        time_profile=(
+            f"{profile.time_profile_id}@{profile.version}"
+            if profile is not None
+            else "built-in baseline"
+        ),
+        rows=results,
+        summary=_bulk_summary(results, sorted(uploaded)),
+        csv=csv_text,
+    )
