@@ -15,7 +15,9 @@ which of three kinds it is:
 
 v1.1.0 adds those estimates (pattern, die and mould charges, forging, moulding,
 drilling, grinding, and a demo-only purchased-part price) on top of v1.0.0, which
-left them out. Rate set versions are immutable, so v1.0.0 stays as published.
+left them out. v1.2.0 adds the route steps the catalog now prices separately (fettling,
+trimming, deburring, fit-up, weld finishing, degating, support removal), all ESTIMATED.
+Rate set versions are immutable, so earlier versions stay as published.
 
 The rate set is published with is_illustrative = true, which keeps the app's
 "illustrative rates" warning on every estimate made with it. Publishing goes
@@ -32,7 +34,7 @@ import urllib.request
 RATE_SET = {
     "rate_set_id": "illustrative-india-2026",
     "name": "Illustrative India rates (web research, Oct 2026)",
-    "version": "1.1.0",
+    "version": "1.2.0",
     "currency": "INR",
     "is_illustrative": True,
     "description": (
@@ -171,6 +173,48 @@ RATE_SET = {
                 "SOURCED (marketplace): FDM PLA about 6/g = 6,000/kg (iamrapid, Zbotic, undated). "
                 "SLS/MJF nylon 32-40/cm3; metal AM not found. Enter the build mass."
             ),
+        },
+        "fettling": {
+            "unit_basis": "per_kg",
+            "unit_rate": 12.0,
+            "batch_charge": 0.0,
+            "note": "ESTIMATED (assistant, demo only): foundry fettling, knock-out and shot blasting, typically 8-15/kg of casting. Charged on the casting's blank mass unless entered.",
+        },
+        "forge_finishing": {
+            "unit_basis": "per_kg",
+            "unit_rate": 8.0,
+            "batch_charge": 0.0,
+            "note": "ESTIMATED (assistant, demo only): flash trimming and shot blasting of a forging. Charged on the forging's blank mass unless entered.",
+        },
+        "deburring": {
+            "unit_basis": "per_piece",
+            "unit_rate": 10.0,
+            "batch_charge": 0.0,
+            "note": "ESTIMATED (assistant, demo only): a few minutes of hand deburring per cut part.",
+        },
+        "fit_up": {
+            "unit_basis": "per_piece",
+            "unit_rate": 40.0,
+            "batch_charge": 0.0,
+            "note": "ESTIMATED (assistant, demo only): about 20 min of fitter time at 90/h plus tack consumables.",
+        },
+        "weld_finishing": {
+            "unit_basis": "per_piece",
+            "unit_rate": 50.0,
+            "batch_charge": 0.0,
+            "note": "ESTIMATED (assistant, demo only): about 20 min of weld grinding and cleaning.",
+        },
+        "degating": {
+            "unit_basis": "per_piece",
+            "unit_rate": 2.0,
+            "batch_charge": 0.0,
+            "note": "ESTIMATED (assistant, demo only): seconds per moulding to remove the gate and trim flash.",
+        },
+        "support_removal": {
+            "unit_basis": "per_piece",
+            "unit_rate": 50.0,
+            "batch_charge": 0.0,
+            "note": "ESTIMATED (assistant, demo only): manual support removal on an FDM part.",
         },
         "purchase": {
             "unit_basis": "per_piece",

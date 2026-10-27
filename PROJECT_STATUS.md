@@ -856,6 +856,22 @@ all. One test added. Suite: **1,760 passing**, 1 skipped.
   (1,722 collected, 1 skipped). One file added, `static/estimateflow.js`. **No
   Python file changed, no endpoint, no schema, no migration.**
 
+### Routes broken into the steps a shop quotes
+
+At the user's request each non-machining route now carries the steps that follow its forming
+stage, priced separately from the rate set: casting → **fettling, knock-out and shot
+blasting**; forging → **flash trimming and shot blasting**; sheet cutting → **deburring**
+(→ bending); cutting → **fit-up and tacking** → welding → **weld grinding and cleaning**;
+moulding → **degating and trimming**; additive build → **support removal**. These *route
+steps* are not detected from geometry: a recommended route gets them from the catalog with a
+basis saying exactly that, and the route lookup ignores them, so no recommendation changed. A
+per-kg step after a casting or forging with no mass of its own is charged on the same blank
+(`blank_mass`). Every route still prices every stage or none, so a rate set without the new
+steps now refuses those routes with the step named; `illustrative-india-2026` v1.2.0 adds
+**ESTIMATED** rates for all seven. On `model2.stp`, 10 off, a 4.5 kg blank: casting ₹28,825 +
+fettling ₹540 (12/kg × 4.5 × 10) = ₹29,365 of stages; cutting + welding ₹250 + ₹400 + ₹1,000 +
+₹500 = ₹2,150. Full suite after the change: 2100 passed, 1 skipped.
+
 ### An illustrative India rate set (not client data)
 
 `scripts/publish_illustrative_india_rates.py` publishes `illustrative-india-2026` v1.0.0

@@ -285,6 +285,13 @@ optional one-off batch charge (pattern, die).
   does not charge material again** (`MATERIAL_SUPPLYING_STAGES`): `material_charged` is
   false, `total_material_cost` is 0 with `material_note` saying which stage carries it. A
   confirmed bar on such a route is a contradiction and is refused (400).
+- **Route steps** (`ROUTE_STEPS`: fettling, forge finishing, deburring, fit-up, weld
+  finishing, degating, support removal) are stages a route always carries after its forming
+  stage, never detected from geometry. `_ROUTE_BY_STAGES` keys on the *evidence* stages only and
+  `_route_for` fills the steps in from the catalog with `ROUTE_STEP_BASIS` as their basis — so
+  adding a step never breaks a recommendation. Never put one first: the first stage decides
+  material-included and as-formed. A per-kg stage after the forming stage with no mass of its
+  own takes the blank's (`mass_source: "blank_mass"`).
 - **Stage costs join the direct cost base**, so overhead and scrap apply to them as to
   material. `stage_costs` is empty and `total_stage_cost` 0 for every other estimate.
 - **It imports `money` and `rate_sets` only**; stage ids reach it as strings from `main.py`.

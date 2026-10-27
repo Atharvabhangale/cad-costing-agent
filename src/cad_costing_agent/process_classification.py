@@ -132,7 +132,27 @@ STAGES: dict[str, tuple[str, str | None]] = {
     "finishing": ("Post-processing and finishing", None),
     "moulding": ("Injection moulding", None),
     "purchase": ("Purchased complete", None),
+    # Route steps: what a shop does after the forming stage on that route, each
+    # quoted separately. None is detected from geometry — they come with the
+    # route as the catalog defines it (see ROUTE_STEPS).
+    "fettling": ("Fettling, knock-out and shot blasting", None),
+    "forge_finishing": ("Flash trimming and shot blasting", None),
+    "deburring": ("Deburring", None),
+    "fit_up": ("Fit-up and tacking", None),
+    "weld_finishing": ("Weld grinding and cleaning", None),
+    "degating": ("Degating and trimming", None),
+    "support_removal": ("Support removal", None),
 }
+
+# Stages that belong to a route rather than to evidence: a casting is fettled, a
+# weldment is fitted up before it is welded. The classifier never infers them;
+# a recommended route gets them from the catalog, with a basis that says so.
+ROUTE_STEPS = frozenset(
+    {"fettling", "forge_finishing", "deburring", "fit_up", "weld_finishing", "degating", "support_removal"}
+)
+ROUTE_STEP_BASIS = (
+    "a step that comes with this route, as the shop quotes it — not detected from the geometry"
+)
 
 # The routes an engineer can choose. A system recommendation is always one of
 # these, so a recommendation and an override are directly comparable by id.
@@ -149,41 +169,46 @@ _ROUTE_DEFINITIONS: tuple[tuple[str, str, ManufacturingFamily, tuple[str, ...]],
         ManufacturingFamily.MACHINING,
         ("turning", "milling", "drilling"),
     ),
-    ("sheet_cutting", "Sheet cutting (flat blank)", ManufacturingFamily.SHEET_METAL, ("sheet_cutting",)),
+    (
+        "sheet_cutting",
+        "Sheet cutting (flat blank)",
+        ManufacturingFamily.SHEET_METAL,
+        ("sheet_cutting", "deburring"),
+    ),
     (
         "sheet_cutting_bending",
         "Sheet cutting + bending",
         ManufacturingFamily.SHEET_METAL,
-        ("sheet_cutting", "bending"),
+        ("sheet_cutting", "deburring", "bending"),
     ),
-    ("casting", "Casting (as cast)", ManufacturingFamily.CASTING, ("casting",)),
+    ("casting", "Casting (as cast)", ManufacturingFamily.CASTING, ("casting", "fettling")),
     (
         "casting_machining",
         "Casting followed by CNC machining",
         ManufacturingFamily.CASTING,
-        ("casting", "milling", "drilling"),
+        ("casting", "fettling", "milling", "drilling"),
     ),
-    ("forging", "Forging (as forged)", ManufacturingFamily.FORGING, ("forging",)),
+    ("forging", "Forging (as forged)", ManufacturingFamily.FORGING, ("forging", "forge_finishing")),
     (
         "forging_machining",
         "Forging followed by CNC machining",
         ManufacturingFamily.FORGING,
-        ("forging", "milling", "drilling"),
+        ("forging", "forge_finishing", "milling", "drilling"),
     ),
     (
         "cutting_welding",
         "Cutting + welding",
         ManufacturingFamily.FABRICATION_WELDING,
-        ("cutting", "welding"),
+        ("cutting", "fit_up", "welding", "weld_finishing"),
     ),
-    ("additive", "Additive build", ManufacturingFamily.ADDITIVE, ("additive_build",)),
+    ("additive", "Additive build", ManufacturingFamily.ADDITIVE, ("additive_build", "support_removal")),
     (
         "additive_finishing",
         "Additive build followed by finishing",
         ManufacturingFamily.ADDITIVE,
-        ("additive_build", "finishing"),
+        ("additive_build", "support_removal", "finishing"),
     ),
-    ("injection_moulding", "Injection moulding", ManufacturingFamily.MOULDING, ("moulding",)),
+    ("injection_moulding", "Injection moulding", ManufacturingFamily.MOULDING, ("moulding", "degating")),
     ("purchased", "Purchased / off-the-shelf", ManufacturingFamily.PURCHASED, ("purchase",)),
     (
         "unknown",
@@ -548,8 +573,11 @@ ROUTE_CATALOG: dict[str, ProcessRoute] = {
     for route_id, label, family, stages in _ROUTE_DEFINITIONS
 }
 
+# Keyed on the stages evidence can establish; a route's own steps (ROUTE_STEPS)
+# are filled in from the catalog, so adding a step never breaks a recommendation.
 _ROUTE_BY_STAGES = {
-    tuple(stage.stage for stage in route.stages): route for route in ROUTE_CATALOG.values()
+    tuple(stage.stage for stage in route.stages if stage.stage not in ROUTE_STEPS): route
+    for route in ROUTE_CATALOG.values()
 }
 
 
@@ -559,9 +587,14 @@ def route_catalog() -> list[ProcessRoute]:
 
 
 def _route_for(stages: list[RouteStage]) -> ProcessRoute:
-    key = tuple(stage.stage for stage in stages)
+    key = tuple(stage.stage for stage in stages if stage.stage not in ROUTE_STEPS)
     template = _ROUTE_BY_STAGES[key]
-    return template.model_copy(update={"stages": stages})
+    given = {stage.stage: stage for stage in stages}
+    full = [
+        given.get(step.stage) or step.model_copy(update={"basis": [ROUTE_STEP_BASIS]})
+        for step in template.stages
+    ]
+    return template.model_copy(update={"stages": full})
 
 
 # ------------------------------------------------------------------- geometry

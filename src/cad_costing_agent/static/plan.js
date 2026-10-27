@@ -596,7 +596,7 @@ function renderPlanRoute() {
           rate.unit_basis === "per_kg"
             ? entered !== undefined
               ? ` · on ${number(entered, 3)} kg per part (entered)`
-              : " · on the part's mass from the CAD model unless you enter one on the route card"
+              : " · on a mass you enter on the route card, or else the casting/forging blank's or the CAD model's — the estimate says which"
             : "";
         priced = `<span class="muted">${parts.join(" + ")}${mass}</span>`;
       }

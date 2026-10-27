@@ -110,7 +110,7 @@ function routeCompareMasses(row) {
           `<input type="number" min="0" step="any" class="route-mass-input" ` +
           `data-stage="${escapeHtml(mass.stage)}" value="${escapeHtml(number(mass.mass_kg, 3))}">` +
           `<span class="pill ${mass.mass_source === "entered" ? "pill-sys" : "pill-off"}">` +
-          `${mass.mass_source === "entered" ? "entered" : "from CAD"}</span></label>` +
+          `${{ entered: "entered", blank_mass: "same as the blank" }[mass.mass_source] || "from CAD"}</span></label>` +
           `<div class="hint">${escapeHtml(mass.mass_note)}</div>`
       )
       .join("") + `<button type="button" class="secondary tiny route-recompare">Re-price</button>`

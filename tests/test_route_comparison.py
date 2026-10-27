@@ -98,7 +98,7 @@ def test_with_stage_rates_and_a_mass_the_casting_routes_are_priced_too():
     body = compare(rate_set_id="client-shop", stage_inputs={"casting": {"mass_kg": 3.0}}).json()
     rows = by_id(body)
     assert [row["status"] for row in body["routes"]] == ["priced"] * 3
-    assert rows["casting_machining"]["total_stage_cost"] == pytest.approx(16800.0)
+    assert rows["casting_machining"]["total_stage_cost"] == pytest.approx(16950.0)
     assert rows["casting_machining"]["material_charged"] is False
     assert rows["milling_drilling"]["total_stage_cost"] == 0.0
 
@@ -107,10 +107,14 @@ def test_a_per_kg_stage_with_no_entered_mass_is_priced_on_the_cad_mass_and_says_
     assert publish(STAGE_RATES).status_code == 201
     rows = by_id(compare(rate_set_id="client-shop").json())
     assert rows["casting"]["status"] == "priced"
-    [mass] = rows["casting"]["stage_masses"]
+    mass, fettling = rows["casting"]["stage_masses"]
     assert mass["stage"] == "casting"
     assert mass["mass_source"] == "cad_finished_mass"
     assert mass["mass_kg"] > 0
+    # Fettling works on the same blank, so it takes the casting's mass.
+    assert fettling["stage"] == "fettling"
+    assert fettling["mass_source"] == "blank_mass"
+    assert fettling["mass_kg"] == pytest.approx(mass["mass_kg"])
     assert rows["milling_drilling"]["status"] == "priced"
     assert rows["milling_drilling"]["stage_masses"] == []
 

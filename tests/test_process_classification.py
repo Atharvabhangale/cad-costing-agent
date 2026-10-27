@@ -265,7 +265,25 @@ def test_a_hole_the_suggestions_declined_is_named_rather_than_dropped():
 def test_a_bent_bracket_is_a_two_stage_cut_and_bend_route():
     route = classified("bent_sheet_bracket").system_route
     assert route.route_id == "sheet_cutting_bending"
-    assert stage_ids(route) == ["sheet_cutting", "bending"]
+    assert stage_ids(route) == ["sheet_cutting", "deburring", "bending"]
+
+
+def test_route_steps_come_with_the_route_and_say_they_were_not_detected():
+    from cad_costing_agent.process_classification import ROUTE_STEP_BASIS, ROUTE_STEPS, STAGES
+
+    # A route step is a priced stage, never a machining process.
+    assert all(STAGES[step][1] is None for step in ROUTE_STEPS)
+    # Each one is used by at least one route, after that route's first stage.
+    for step in ROUTE_STEPS:
+        routes = [r for r in ROUTE_CATALOG.values() if step in stage_ids(r)]
+        assert routes, step
+        assert all(stage_ids(r)[0] != step for r in routes)
+    # In a recommended route its basis says where it came from — not evidence.
+    route = classified("bent_sheet_bracket").system_route
+    deburring = next(stage for stage in route.stages if stage.stage == "deburring")
+    assert deburring.basis == [ROUTE_STEP_BASIS]
+    bending = next(stage for stage in route.stages if stage.stage == "bending")
+    assert bending.basis and bending.basis != [ROUTE_STEP_BASIS]
 
 
 def test_a_flat_blank_has_no_bending_stage():
@@ -283,9 +301,9 @@ def test_a_chosen_multi_stage_route_reports_each_stage_and_its_cost_model():
     c = record_route_decision(
         classified("block_with_counterbore"), UserAction.EDITED, route_id="casting_machining"
     )
-    assert stage_ids(c.route) == ["casting", "milling", "drilling"]
-    assert c.stage_rate_stages == ["Casting"]
-    assert [stage.cost_model_available for stage in c.route.stages] == [False, True, True]
+    assert stage_ids(c.route) == ["casting", "fettling", "milling", "drilling"]
+    assert c.stage_rate_stages == ["Casting", "Fettling, knock-out and shot blasting"]
+    assert [stage.cost_model_available for stage in c.route.stages] == [False, False, True, True]
     # Decided, so it is priced from stage rates at costing time rather than refused here.
     assert c.costing_status == "stage_rates_required"
     assert c.blocks_costing is False

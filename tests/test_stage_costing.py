@@ -41,6 +41,9 @@ STAGE_RATES = {
     "purchase": {"unit_basis": "per_piece", "unit_rate": 900.0},
     "sheet_cutting": {"unit_basis": "per_piece", "unit_rate": 35.0},
     "bending": {"unit_basis": "per_piece", "unit_rate": 20.0, "batch_charge": 500.0},
+    # Route steps that come with the casting and sheet routes.
+    "fettling": {"unit_basis": "per_kg", "unit_rate": 10.0},
+    "deburring": {"unit_basis": "per_piece", "unit_rate": 5.0},
 }
 
 
@@ -273,7 +276,7 @@ def test_stage_rates_are_published_and_read_back():
     assert stored["casting"]["unit_rate"] == 120.0
     assert stored["casting"]["batch_charge"] == 15000.0
     listing = {row["rate_set_id"]: row for row in client.get("/rates").json()}
-    assert listing["client-shop"]["stage_rate_count"] == 4
+    assert listing["client-shop"]["stage_rate_count"] == 6
 
 
 def test_a_seeded_rate_set_has_no_stage_rates():
@@ -341,20 +344,23 @@ def test_a_decided_casting_route_is_priced_and_the_material_is_not_charged_twice
     assert response.status_code == 200, response.text
     body = response.json()
     part_cost = body["part_cost"]
-    [line] = part_cost["stage_costs"]
+    line, fettling = part_cost["stage_costs"]
     assert line["stage"] == "casting"
     assert line["mass_kg"] == 3.0
     assert line["supplies_material"] is True
     # 120/kg x 3.0 kg x 5 off + 15,000 pattern.
     assert line["total_cost"] == pytest.approx(16800.0)
-    assert part_cost["total_stage_cost"] == pytest.approx(16800.0)
+    # Fettling works on the same 3.0 kg blank: 10/kg x 3.0 kg x 5 off.
+    assert fettling["stage"] == "fettling" and fettling["mass_source"] == "blank_mass"
+    assert fettling["total_cost"] == pytest.approx(150.0)
+    assert part_cost["total_stage_cost"] == pytest.approx(16950.0)
     assert part_cost["material_charged"] is False
     assert part_cost["total_material_cost"] == 0.0
     assert "Casting rate includes the material" in part_cost["material_note"]
     # The finished part's own mass is still what `mass` reports.
     assert body["mass"]["mass_kg"] < 3.0
     assert part_cost["direct_cost_base"] == pytest.approx(
-        part_cost["total_operation_cost"] + 16800.0, abs=0.01
+        part_cost["total_operation_cost"] + 16950.0, abs=0.01
     )
     assert part_cost["total_part_cost"] == pytest.approx(part_cost["direct_cost_base"], abs=0.01)
 
@@ -372,7 +378,8 @@ def test_a_casting_route_without_an_entered_mass_is_priced_on_the_cad_mass(clien
 
     assert response.status_code == 200, response.text
     body = response.json()
-    [line] = body["part_cost"]["stage_costs"]
+    line = body["part_cost"]["stage_costs"][0]
+    assert line["stage"] == "casting"
     assert line["mass_source"] == "cad_finished_mass"
     assert line["mass_kg"] == pytest.approx(body["mass"]["mass_kg"])
     # Casting followed by machining: the real blank is heavier, and it says so.
@@ -405,9 +412,9 @@ def test_a_purchased_part_is_priced_per_piece_with_nothing_machined(client_rates
 def test_a_sheet_route_prices_both_stages_and_still_charges_the_material(client_rates):
     body = cost(classification=classification_for("sheet_cutting_bending")).json()
     part_cost = body["part_cost"]
-    assert [line["stage"] for line in part_cost["stage_costs"]] == ["sheet_cutting", "bending"]
+    assert [line["stage"] for line in part_cost["stage_costs"]] == ["sheet_cutting", "deburring", "bending"]
     # 35 x 5 + (20 x 5 + 500)
-    assert part_cost["total_stage_cost"] == pytest.approx(775.0)
+    assert part_cost["total_stage_cost"] == pytest.approx(800.0)
     assert part_cost["material_charged"] is True
     assert part_cost["total_material_cost"] > 0
 
@@ -457,7 +464,7 @@ def test_the_quotation_lines_still_partition_the_stored_total(client_rates):
     quote = client.get(f"/estimates/{estimate_id}/quotation").json()
     totals = quote["totals"]
     lines = {line["category"]: line for line in totals["lines"]}
-    assert lines["route_stages"]["amount"] == pytest.approx(16800.0)
+    assert lines["route_stages"]["amount"] == pytest.approx(16950.0)
     assert lines["material"]["amount"] == 0.0
     assert "includes the material" in lines["material"]["detail"]
     assert not totals["reconciliation"]
@@ -480,6 +487,8 @@ def test_a_comparison_attributes_a_stage_change_and_leaves_nothing_unexplained(c
         f"/estimates/compare?baseline={lighter}&comparison={heavier}"
     ).json()
     impacts = {impact["category"]: impact for impact in comparison["impacts"]}
-    assert impacts["route_stage"]["delta"] == pytest.approx(600.0)  # 120 x 1 kg x 5
+    # Casting 120 x 1 kg x 5 and fettling, on the same blank, 10 x 1 kg x 5.
+    route_stage = [i for i in comparison["impacts"] if i["category"] == "route_stage"]
+    assert sum(i["delta"] for i in route_stage) == pytest.approx(650.0)
     assert "unexplained" not in impacts
     assert "material_rate" not in impacts and "material_quantity" not in impacts

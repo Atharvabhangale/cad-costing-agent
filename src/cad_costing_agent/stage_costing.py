@@ -154,6 +154,9 @@ def price_stages(
     lines: list[StageCostLine] = []
     problems: list[StageProblem] = []
     material_label: str | None = None
+    # The blank the forming stage produced (a casting, a forging): a per-kg step
+    # after it with no mass of its own — fettling, trimming — works on that blank.
+    blank_mass: float | None = None
 
     for stage in stages:
         supplies_material = stage.stage == material_stage
@@ -193,6 +196,13 @@ def price_stages(
                 if mass_kg is not None:
                     mass_source = "entered"
                     mass_note = "Mass entered by the engineer."
+                elif blank_mass is not None and not supplies_material:
+                    mass_kg = blank_mass
+                    mass_source = "blank_mass"
+                    mass_note = (
+                        f"Same mass as the {material_label} blank, {blank_mass:.4g} kg — the part "
+                        "this step works on. Edit it if the mass charged on differs."
+                    )
                 elif finished_mass_kg is not None:
                     # Derived, not invented: the finished part's own CAD volume x
                     # density. It is the right figure for a part made as formed;
@@ -244,6 +254,8 @@ def price_stages(
                     )
                     continue
                 unit_cost = rate.unit_rate * mass_kg
+                if supplies_material:
+                    blank_mass = mass_kg
             else:
                 unit_cost = rate.unit_rate
 
