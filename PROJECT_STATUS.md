@@ -856,6 +856,24 @@ all. One test added. Suite: **1,760 passing**, 1 skipped.
   (1,722 collected, 1 skipped). One file added, `static/estimateflow.js`. **No
   Python file changed, no endpoint, no schema, no migration.**
 
+### An illustrative India rate set (not client data)
+
+`scripts/publish_illustrative_india_rates.py` publishes `illustrative-india-2026` v1.0.0
+through `POST /rates`, flagged illustrative: 11 materials, milling/turning/drilling hourly
+rates, overhead 20 % and scrap 2 %, and stage rates for every route stage except
+*Purchased complete* (a bought part's price is part-specific, so no generic figure is
+given). Figures came from public web research on 2026-10-27 — BigMint trade indices for MS
+plate (₹61.4/kg) and EN8 (₹72.75/kg), otherwise mostly undated marketplace asking prices —
+and every stage rate's note says whether it is SOURCED, DERIVED (a published figure plus a
+stated assumption, e.g. laser cutting ₹450/m × an assumed 1 m per part) or PLACEHOLDER
+(forging, moulding and drilling: no usable Indian figure was found). Labour is ₹90/h from
+the Maharashtra statutory skilled minimum (no PF/ESI loading). The research found **no
+public or partner API** for CostMasters or SIAM: both are login or subscription products,
+and SIAM's statistics may not be redistributed without written permission. Published to a
+scratch database only. On `model2.stp`, 10 off, Steel, no committed machining times:
+milling + drilling ₹2,866.37 (material ₹2,349.49), casting with a 4.5 kg blank ₹4,666.50,
+cutting + welding ₹4,391.37.
+
 ### Iteration 4 — route comparison, DFM flags and bulk preview (built in parallel)
 
 The user asked for the three candidates from the aPriori comparison to be built at once by
