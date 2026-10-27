@@ -36,6 +36,7 @@ function resetProcessPanel() {
   $("process-costing").innerHTML = "";
   $("process-evidence").innerHTML = "";
   $("process-note").value = "";
+  if (typeof clearRouteComparison === "function") clearRouteComparison();
 }
 
 async function loadProcessRoutes() {

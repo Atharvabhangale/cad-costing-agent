@@ -3454,3 +3454,188 @@ async def cost_cad_part(
     result.estimate_id = estimate_id
     result.part_cost.estimate_id = estimate_id
     return result
+
+
+# ---------------------------------------------------------- route comparison
+#
+# The recommended route and the routes of the other families the evidence is
+# consistent with, each priced as if the engineer had chosen it. Every route goes
+# through `price_cad_part`, the same path `/cost/cad-part` uses, so a previewed
+# figure is the figure that route would be estimated at. Nothing is stored and
+# nothing is chosen: a person picks one through `/cad/process/decide`.
+
+from cad_costing_agent.route_comparison import (  # noqa: E402
+    STATUS_PRICED,
+    STATUS_REFUSED,
+    RouteComparison,
+    RouteComparisonRow,
+    RouteRefusal,
+    RouteStageSummary,
+    refusal_from_detail,
+    select_route_ids,
+)
+
+
+def _route_decided_as(
+    classification: ProcessClassification, route_id: str, recommended: bool
+) -> ProcessClassification:
+    """The classification as if the engineer had just chosen this route.
+
+    Any earlier answer is withdrawn first, so every route is previewed from the
+    same untouched recommendation.
+    """
+    fresh = record_route_decision(classification, UserAction.PENDING)
+    if recommended:
+        return record_route_decision(fresh, UserAction.ACCEPTED)
+    return record_route_decision(fresh, UserAction.EDITED, route_id=route_id)
+
+
+@app.post("/cost/route-comparison", response_model=RouteComparison)
+async def compare_routes(
+    file: UploadFile = File(...),
+    process_classification: str = Form(
+        ...,
+        description=(
+            "JSON-encoded ProcessClassification from /cad/operations/suggest. Its recommended "
+            "route and candidate families decide which routes are compared; any decision on it "
+            "is ignored for the preview and only reported as `currently_decided`."
+        ),
+    ),
+    material: str = Form(...),
+    source_unit: str = Form(...),
+    part_id: str = Form(...),
+    part_name: str = Form(...),
+    quantity: int = Form(1),
+    operations: str = Form("[]"),
+    operation_requirements: str = Form("[]"),
+    rate_set_id: str | None = Form(None),
+    rate_set_version: str | None = Form(None),
+    overhead_rate_percent: float | None = Form(None),
+    scrap_rate_percent: float | None = Form(None),
+    tooling_cost_per_batch: float | None = Form(None),
+    geometry_completion_method: str | None = Form(None),
+    geometry_completion_volume_mm3: float | None = Form(None),
+    manufacturing_plan: str | None = Form(None),
+    raw_stock: str | None = Form(None),
+    stage_inputs: str | None = Form(None),
+    session: Session = Depends(get_session),
+) -> RouteComparison:
+    """Price each candidate route as a preview. Stores nothing and chooses nothing.
+
+    Takes `/cost/cad-part`'s own inputs. A route that cannot be priced (a stage
+    with no rate in the rate set, a per-kg stage with no entered mass, a route
+    marked unknown) is listed with the reason rather than dropped or shown as zero.
+    """
+    try:
+        classification = ProcessClassification.model_validate_json(process_classification)
+    except ValidationError as exc:
+        raise HTTPException(
+            status_code=400, detail=f"'process_classification' is not valid: {exc}"
+        ) from exc
+
+    data = await file.read()
+    system = classification.system_route
+    selected = select_route_ids(
+        system.route_id if system is not None else None,
+        [candidate.family.value for candidate in classification.candidates],
+        [(route.route_id, route.family.value) for route in route_catalog()],
+    )
+    current = (
+        classification.route.route_id
+        if classification.user_action is not UserAction.PENDING and classification.route is not None
+        else None
+    )
+
+    rows: list[RouteComparisonRow] = []
+    rate_set_label: str | None = None
+    for route_id, role in selected:
+        decided = _route_decided_as(classification, route_id, role == "recommended")
+        route = decided.route
+        identity = dict(
+            route_id=route_id,
+            route_label=route.label if route is not None else route_id,
+            family=route.family.value if route is not None else classification.family.value,
+            role=role,
+            currently_decided=current == route_id,
+            stages=[
+                RouteStageSummary(
+                    stage=stage.stage,
+                    label=stage.label,
+                    pricing="machining" if stage.cost_model_available else "stage_rate",
+                )
+                for stage in (route.stages if route is not None else [])
+            ],
+        )
+        try:
+            priced = price_cad_part(
+                session,
+                data=data,
+                filename=file.filename or "",
+                material=material,
+                source_unit=source_unit,
+                part_id=part_id,
+                part_name=part_name,
+                quantity=quantity,
+                operations=operations,
+                operation_requirements=operation_requirements,
+                rate_set_id=rate_set_id,
+                rate_set_version=rate_set_version,
+                overhead_rate_percent=overhead_rate_percent,
+                scrap_rate_percent=scrap_rate_percent,
+                tooling_cost_per_batch=tooling_cost_per_batch,
+                geometry_completion_method=geometry_completion_method,
+                geometry_completion_volume_mm3=geometry_completion_volume_mm3,
+                manufacturing_plan=manufacturing_plan,
+                raw_stock=raw_stock,
+                process_classification=decided.model_dump_json(),
+                stage_inputs=stage_inputs,
+            )
+        except HTTPException as exc:
+            code, message, stages = refusal_from_detail(exc.status_code, exc.detail)
+            rows.append(
+                RouteComparisonRow(
+                    **identity,
+                    status=STATUS_REFUSED,
+                    refusal=RouteRefusal(code=code, message=message, stages=stages),
+                )
+            )
+            continue
+
+        cost = priced.result.part_cost
+        if cost.rate_set is not None and rate_set_label is None:
+            rate_set_label = f"{cost.rate_set.rate_set_id} v{cost.rate_set.version}"
+        plan = priced.plan
+        rows.append(
+            RouteComparisonRow(
+                **identity,
+                status=STATUS_PRICED,
+                currency=cost.currency,
+                total_part_cost=cost.total_part_cost,
+                per_unit_cost=cost.per_unit_cost,
+                total_material_cost=cost.total_material_cost,
+                total_operation_cost=cost.total_operation_cost,
+                total_stage_cost=cost.total_stage_cost,
+                total_additional_cost=cost.total_additional_cost,
+                material_charged=cost.material_charged,
+                operations_costed=(
+                    None if plan is None else sum(1 for o in plan.active if plan.counts_toward_cost(o))
+                ),
+                operations_not_timed=None if plan is None else len(plan.uncosted_operations()),
+                operations_out_of_route=(
+                    None if plan is None else len(plan.out_of_route_operations())
+                ),
+                operations_as_formed=None if plan is None else len(plan.as_formed_operations()),
+            )
+        )
+
+    return RouteComparison(
+        rate_set=rate_set_label,
+        quantity=quantity,
+        routes=rows,
+        not_compared=(
+            None
+            if rows
+            else "The evidence recommends no route and lists no other family, so there is "
+            "nothing to compare. Choose a route yourself."
+        ),
+    )

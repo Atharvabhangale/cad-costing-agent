@@ -264,7 +264,10 @@
             <button type="button" id="process-override" class="secondary tiny">Use selected route</button>
             <button type="button" id="process-unknown" class="secondary tiny">Mark unknown — needs information</button>
             <button type="button" id="process-reset" class="secondary tiny">Withdraw decision</button>
+            <button type="button" id="route-compare" class="secondary tiny" title="Price the recommended route and the other families' routes as previews. Stores nothing and chooses nothing.">Compare routes</button>
+            <span id="route-compare-status" class="hint"></span>
           </div>
+          <div id="route-compare-result"></div>
           <details class="detail-toggle" id="process-evidence-toggle">
             <summary>Evidence, uncertainty and what is not assessed</summary>
             <div id="process-evidence"></div>
@@ -948,6 +951,7 @@
 <script src="assembly.js"></script>
 <script src="feedback.js"></script>
 <script src="actuals.js"></script>
+<script src="routecompare.js"></script>
 <script src="estimateflow.js"></script>
 <script type="module" src="viewer.js"></script>
 </body>
