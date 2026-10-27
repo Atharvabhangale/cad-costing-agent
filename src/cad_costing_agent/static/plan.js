@@ -100,6 +100,10 @@ async function buildPlanFromSuggestions(result) {
     source_faces: suggestion.source_faces || [],
     source_facets: suggestion.source_facets || [],
     dimensions: suggestion.dimensions || {},
+    system_drilling_steps: [],
+    system_drilling_options: [],
+    user_drilling_steps: null,
+    user_machined: null,
     // Kept for the expandable "why" row; not part of the persisted plan model.
     // `_source_type` used to hold this too and has been removed: with the real
     // field carried above, a display-only duplicate is a second source of truth
@@ -133,6 +137,7 @@ async function buildPlanFromSuggestions(result) {
     operations,
     units: result.units,
     source_filename: result.filename,
+    route_processes: decidedRouteProcesses(), as_formed_feature_types: decidedAsFormedTypes(),
   };
   renderPlan();
 
@@ -155,6 +160,9 @@ async function buildPlanFromSuggestions(result) {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
         units: result.units,
+        // A turned part's passes are worked out from the bar it is proposed to be
+        // cut from (the system's proposal, so the estimate stays the system's).
+        stock_diameter_mm: state.rawStock ? state.rawStock.system_diameter_mm : null,
         operations: operations.map((operation) => ({
           operation_id: operation.operation_id,
           operation_type: operation.system_suggested_operation,
@@ -191,6 +199,10 @@ async function buildPlanFromSuggestions(result) {
     operation.system_time_profile_version = estimate.time_profile_version;
     operation.system_time_profile_name = estimate.time_profile_name;
     operation.system_time_parameters = estimate.parameters || {};
+    // How the hole is drilled, and the alternatives with their own times.
+    // Copied explicitly: a field this builder drops never reaches the server.
+    operation.system_drilling_steps = estimate.drilling_steps || [];
+    operation.system_drilling_options = estimate.drilling_options || [];
   });
 
   const baselines = operations
@@ -215,8 +227,32 @@ function systemTimeApplies(operation) {
   return (
     operation.system_time_status === "estimated" &&
     operation.system_suggested_operation != null &&
-    effectiveType(operation) === operation.system_suggested_operation
+    effectiveType(operation) === operation.system_suggested_operation &&
+    systemCycleForChoice(operation) != null
   );
+}
+
+// ------------------------------------------------------------------ drilling
+// Mirrors PlannedOperation.system_cycle_for_choice: the suggested drilling
+// sequence's time is system_suggested_cycle_time, never overwritten; another
+// sequence the system offered has its own system-computed time; one it did not
+// offer has none.
+
+function sameSteps(a, b) {
+  return Array.isArray(a) && Array.isArray(b) && a.length === b.length && a.every((v, i) => v === b[i]);
+}
+
+function drillingSteps(operation) {
+  return operation.user_drilling_steps || operation.system_drilling_steps || [];
+}
+
+function systemCycleForChoice(operation) {
+  const chosen = operation.user_drilling_steps;
+  if (chosen == null || sameSteps(chosen, operation.system_drilling_steps)) {
+    return operation.system_suggested_cycle_time;
+  }
+  const option = (operation.system_drilling_options || []).find((o) => sameSteps(o.steps, chosen));
+  return option ? option.cycle_time_minutes : null;
 }
 
 function effectiveType(operation) {
@@ -232,7 +268,7 @@ function timeSource(operation) {
 function finalCycle(operation) {
   if (operation.user_cycle_time != null) return operation.user_cycle_time;
   if (operation.system_time_accepted && systemTimeApplies(operation))
-    return operation.system_suggested_cycle_time;
+    return systemCycleForChoice(operation);
   return null;
 }
 
@@ -247,7 +283,83 @@ function isCostable(operation) {
   return (
     operation.user_action !== ACT.REJECTED &&
     Boolean(effectiveType(operation)) &&
-    finalCycle(operation) > 0
+    finalCycle(operation) > 0 &&
+    inRoute(operation) &&
+    !isAsFormed(operation)
+  );
+}
+
+// ------------------------------------------------------------------ as formed
+// Mirrors ManufacturingPlan.is_as_formed: on a decided route that casts or
+// forges a blank and then machines it, the backend's `as_formed_feature_types`
+// (its blends) are left as formed by default, and a row's own `user_machined`
+// overrides that either way. On any other route nothing is left as formed.
+
+function decidedAsFormedTypes() {
+  const classification = state.processClassification;
+  if (state.planComponentId || !classification || !Array.isArray(classification.as_formed_feature_types)) {
+    return null;
+  }
+  return [...classification.as_formed_feature_types];
+}
+
+function asFormedTypes() {
+  return state.plan && Array.isArray(state.plan.as_formed_feature_types)
+    ? state.plan.as_formed_feature_types
+    : null;
+}
+
+function isAsFormed(operation) {
+  const types = asFormedTypes();
+  if (types === null) return false;
+  if (operation.user_machined === true) return false;
+  if (operation.user_machined === false) return true;
+  return types.includes(operation.feature_type || "");
+}
+
+function asFormedOperations() {
+  if (!state.plan) return [];
+  return state.plan.operations.filter(
+    (operation) => operation.user_action !== ACT.REJECTED && inRoute(operation) && isAsFormed(operation)
+  );
+}
+
+// What a cast or forged blank's unmachined features are called: "As cast" or
+// "As forged", as the backend named it.
+function asFormedLabel() {
+  return (state.processClassification && state.processClassification.as_formed_label) || "As formed";
+}
+
+// ------------------------------------------------------------------ route
+// The processes the engineer's chosen manufacturing route includes, as the
+// backend's `plan_processes` reported them; null while no route is decided.
+// Mirrors `ManufacturingPlan.in_route`: an operation outside the route is kept
+// exactly as it is, but it is not costed and not "missing a time".
+
+// What a freshly created part plan should start with: the route the engineer
+// has decided, if any. A component plan opened from an assembly never takes the
+// single part's route.
+function decidedRouteProcesses() {
+  const classification = state.processClassification;
+  if (state.planComponentId || !classification || !Array.isArray(classification.plan_processes)) {
+    return null;
+  }
+  return [...classification.plan_processes];
+}
+
+function routeProcesses() {
+  return state.plan && Array.isArray(state.plan.route_processes) ? state.plan.route_processes : null;
+}
+
+function inRoute(operation) {
+  const processes = routeProcesses();
+  return processes === null || processes.includes(effectiveType(operation) || "");
+}
+
+function outOfRouteOperations() {
+  if (!state.plan) return [];
+  return state.plan.operations.filter(
+    (operation) => operation.user_action !== ACT.REJECTED && !inRoute(operation)
   );
 }
 
@@ -293,7 +405,10 @@ function activeOperations() {
   if (!state.plan) return [];
   const order = new Map(setupsOf().map((s, index) => [s.setup_id, index]));
   return state.plan.operations
-    .filter((operation) => operation.user_action !== ACT.REJECTED)
+    .filter(
+      (operation) =>
+        operation.user_action !== ACT.REJECTED && inRoute(operation) && !isAsFormed(operation)
+    )
     .sort(
       (a, b) =>
         (order.get(setupOf(a)) ?? 1e6) - (order.get(setupOf(b)) ?? 1e6) ||
@@ -357,7 +472,7 @@ function renderPlan() {
   const rows = [];
   setupsOf().forEach((setup) => {
     rows.push(setupHeaderRow(setup));
-    const members = operationsInSetup(setup.setup_id);
+    const members = operationsInSetup(setup.setup_id).filter((o) => inRoute(o) && !isAsFormed(o));
     if (!members.length) {
       rows.push(
         `<tr class="setup-empty"><td colspan="8">No operations in this setup yet — move one in,
@@ -367,7 +482,36 @@ function renderPlan() {
     members.forEach((operation) => rows.push(planRow(operation)));
   });
 
+  // Operations the chosen route leaves out, kept below rather than deleted, so
+  // switching the route back — or changing a row's process — restores them as
+  // they were, times and edits included.
+  const outside = outOfRouteOperations();
+  if (outside.length) {
+    rows.push(
+      `<tr class="setup-empty"><td colspan="8"><strong>Not in this route</strong> — ` +
+        `${outside.length} operation${outside.length === 1 ? "" : "s"} kept but not costed, ` +
+        `because the chosen route does not include their process. Switch the route back, or ` +
+        `change a row's process to one the route includes, to bring it back.</td></tr>`
+    );
+    outside.forEach((operation) => rows.push(planRow(operation)));
+  }
+
+  // On a cast or forged route, what the blank leaves as formed: kept below and
+  // not costed, each one a click from being machined after all.
+  const formed = asFormedOperations();
+  if (formed.length) {
+    rows.push(
+      `<tr class="setup-empty"><td colspan="8"><strong>${escapeHtml(asFormedLabel())} — not ` +
+        `machined</strong> — ${formed.length} operation${formed.length === 1 ? "" : "s"} on ` +
+        `features the blank is formed with (its fillets and chamfers by default), kept but not ` +
+        `costed. Use <em>Machine it</em> on any that are cut after all, or <em>` +
+        `${escapeHtml(asFormedLabel())}</em> on a row above to leave it unmachined.</td></tr>`
+    );
+    formed.forEach((operation) => rows.push(planRow(operation)));
+  }
+
   body.innerHTML = rows.join("");
+  renderPlanRoute();
   wirePlanRows();
   wireSetupRows();
   renderSequence(operations);
@@ -397,9 +541,52 @@ function renderPlan() {
   }
 }
 
+// The stages of the engineer's chosen route, in order, above the table. A
+// machining stage says how many operations of its process the plan holds; any
+// other stage says plainly that nothing here can price it. Read from the
+// classification the backend returned — this decides nothing.
+function renderPlanRoute() {
+  const strip = $("plan-route");
+  if (!strip) return;
+  const classification = state.processClassification;
+  if (state.planComponentId || routeProcesses() === null || !classification) {
+    strip.classList.add("hidden");
+    strip.innerHTML = "";
+    return;
+  }
+  const route = classification.route;
+  const stages = route ? route.stages : [];
+  const counted = activeOperations();
+  const items = stages.map((stage) => {
+    if (!stage.process_type) {
+      const formed = asFormedTypes() !== null && stage === stages[0] ? asFormedOperations().length : 0;
+      return (
+        `<li>${escapeHtml(stage.label)} <span class="pill pill-off">priced from stage rates</span> ` +
+        `<span class="muted">not an operation — needs a rate in the rate set` +
+        (formed ? ` · leaves ${formed} feature${formed === 1 ? "" : "s"} unmachined below` : "") +
+        `</span></li>`
+      );
+    }
+    const count = counted.filter((operation) => effectiveType(operation) === stage.process_type).length;
+    return (
+      `<li>${escapeHtml(stage.label)} <span class="pill pill-ok">cost model available</span> ` +
+      (count
+        ? `<span class="muted">${count} operation${count === 1 ? "" : "s"} below</span>`
+        : `<span class="muted">no operations yet — add one with + Add operation</span>`) +
+      "</li>"
+    );
+  });
+  strip.innerHTML =
+    `<strong>Route:</strong> ${escapeHtml(route ? route.label : "unknown")}` +
+    (items.length
+      ? `<ol class="sequence-list">${items.join("")}</ol>`
+      : `<p class="muted">No manufacturing stages in this route, so no operation below is costed.</p>`);
+  strip.classList.remove("hidden");
+}
+
 function setupHeaderRow(setup) {
   const id = escapeHtml(setup.setup_id);
-  const members = operationsInSetup(setup.setup_id);
+  const members = operationsInSetup(setup.setup_id).filter((o) => inRoute(o) && !isAsFormed(o));
   const costable = members.filter(isCostable).length;
   const source = setupTimeSource(setup);
   const committed = setupTime(setup);
@@ -484,7 +671,7 @@ function setupChoiceCell(operation) {
 function timeCell(operation, which) {
   const source = timeSource(operation);
   const systemValue =
-    which === "setup" ? operation.system_suggested_setup_time : operation.system_suggested_cycle_time;
+    which === "setup" ? operation.system_suggested_setup_time : systemCycleForChoice(operation);
   const userValue = which === "setup" ? operation.user_setup_time : operation.user_cycle_time;
   const applies = systemTimeApplies(operation);
 
@@ -519,6 +706,49 @@ function sourceCell(operation) {
   return `<span class="pill pill-off">Needs input</span>`;
 }
 
+// How the hole is opened up, smallest drill first. The options and their times
+// are the backend's (`system_drilling_options`); the suggested one is marked.
+// Shown only for a drilling row that has them.
+function drillingChoice(operation) {
+  const options = operation.system_drilling_options || [];
+  if (effectiveType(operation) !== "drilling" || !options.length) return "";
+  const chosen = drillingSteps(operation);
+  const current = options.find((option) => sameSteps(option.steps, chosen));
+  // Compact on the row (the routing row is one line); the full description is
+  // the tooltip and the option's own title.
+  const chain = (steps) => steps.map((d) => `Ø${d}`).join("→");
+  return (
+    `<select class="op-drill" data-id="${escapeHtml(operation.operation_id)}" ` +
+    `style="flex: 0 0 auto; max-width: 135px" ` +
+    `title="${escapeHtml(
+      `How this hole is drilled, smallest drill first${current ? `: ${current.label}` : ""}`
+    )}">` +
+    options
+      .map(
+        (option, index) =>
+          `<option value="${index}" title="${escapeHtml(option.label)}"` +
+          `${sameSteps(option.steps, chosen) ? " selected" : ""}>` +
+          `${escapeHtml(chain(option.steps))} · ${escapeHtml(String(option.cycle_time_minutes))} min` +
+          `${option.suggested ? " (suggested)" : ""}</option>`
+      )
+      .join("") +
+    // No "was …" note beside it: the row is one line, and the suggested option
+    // is already marked "(suggested)" in the list and named in Details.
+    `</select>`
+  );
+}
+
+// On a cast or forged route only: move a row between machined and as formed.
+function formedToggle(operation) {
+  if (asFormedTypes() === null || !inRoute(operation)) return "";
+  const id = escapeHtml(operation.operation_id);
+  return isAsFormed(operation)
+    ? `<button type="button" class="secondary tiny op-formed" data-id="${id}" data-machined="true" ` +
+        `title="This feature is cut after all: cost its machining">Machine it</button>`
+    : `<button type="button" class="secondary tiny op-formed" data-id="${id}" data-machined="false" ` +
+        `title="The blank is formed with this: do not cost machining it">${escapeHtml(asFormedLabel())}</button>`;
+}
+
 function planRow(operation) {
   const id = escapeHtml(operation.operation_id);
   const chosen = effectiveType(operation);
@@ -543,6 +773,7 @@ function planRow(operation) {
     (edited
       ? `<span class="was">was ${escapeHtml(operation.system_suggested_operation)}</span>`
       : "") +
+    drillingChoice(operation) +
     `</div>`;
 
   // Time confidence, not operation confidence: this column sits beside the
@@ -573,6 +804,7 @@ function planRow(operation) {
       <td class="row-actions">
         <button type="button" class="secondary tiny op-details" data-id="${id}"
           aria-expanded="false" title="Why this operation, its rule, its parameters and its provenance">Details</button>
+        ${formedToggle(operation)}
         <button type="button" class="secondary tiny remove-op" data-id="${id}">Remove</button>
       </td>
     </tr>
@@ -591,7 +823,16 @@ function planExplanation(operation) {
   }
   if (operation.system_time_status === "estimated") {
     parts.push(
-      `<strong>Estimated cycle:</strong> ${operation.system_suggested_cycle_time} min · ` +
+      `<strong>Estimated cycle:</strong> ${operation.system_suggested_cycle_time} min` +
+        (operation.system_drilling_steps && operation.system_drilling_steps.length > 1
+          ? ` for ${escapeHtml(operation.system_drilling_steps.map((d) => `Ø${d}`).join(" → "))}`
+          : "") +
+        (operation.user_drilling_steps != null
+          ? ` · <strong>you chose</strong> ${escapeHtml(
+              operation.user_drilling_steps.map((d) => `Ø${d}`).join(" → ")
+            )}`
+          : "") +
+        ` · ` +
         `<strong>setup:</strong> ${operation.system_suggested_setup_time} min · ` +
         `<strong>method:</strong> <code>${escapeHtml(operation.system_time_method)}</code>`
     );
@@ -651,7 +892,7 @@ function renderSequence(operations) {
   }
   list.innerHTML = setupsOf()
     .map((setup) => {
-      const members = operationsInSetup(setup.setup_id);
+      const members = operationsInSetup(setup.setup_id).filter((o) => inRoute(o) && !isAsFormed(o));
       const time = setupTime(setup);
       const inner = members.length
         ? `<ol class="sequence-ops">` +
@@ -747,6 +988,43 @@ function wirePlanRows() {
         // The estimate was for the old process and must not carry over.
         operation.system_time_accepted = false;
       }
+      renderPlan();
+    })
+  );
+
+  // A different drilling sequence is a different amount of work: the earlier
+  // acceptance does not carry over, exactly as with a change of process. The
+  // suggestion stays in system_drilling_steps; picking it again records no choice.
+  body.querySelectorAll(".op-drill").forEach((select) =>
+    select.addEventListener("change", () => {
+      const operation = operationById(select.dataset.id);
+      const option = (operation.system_drilling_options || [])[Number(select.value)];
+      if (!option) return;
+      if (sameSteps(option.steps, operation.system_drilling_steps)) {
+        operation.user_drilling_steps = null;
+        if (operation.user_operation_type == null && operation.user_action === ACT.EDITED) {
+          operation.user_action = ACT.ACCEPTED;
+        }
+      } else {
+        operation.user_drilling_steps = [...option.steps];
+        if (operation.user_action === ACT.PENDING || operation.user_action === ACT.ACCEPTED) {
+          operation.user_action = ACT.EDITED;
+        }
+      }
+      operation.system_time_accepted = false;
+      renderPlan();
+    })
+  );
+
+  // The engineer's answer to "is this cut, or left as formed?", stored beside the
+  // default. Choosing what the default already says records no choice.
+  body.querySelectorAll(".op-formed").forEach((button) =>
+    button.addEventListener("click", (event) => {
+      event.stopPropagation();
+      const operation = operationById(button.dataset.id);
+      const machined = button.dataset.machined === "true";
+      const byDefault = (asFormedTypes() || []).includes(operation.feature_type || "");
+      operation.user_machined = machined === !byDefault ? null : machined;
       renderPlan();
     })
   );
@@ -917,7 +1195,11 @@ function moveSetup(setupId, offset) {
 }
 
 $("add-setup").addEventListener("click", () => {
-  if (!state.plan) state.plan = { setups: [], operations: [], units: "mm", source_filename: "" };
+  if (!state.plan) {
+    state.plan = {
+      setups: [], operations: [], units: "mm", source_filename: "", route_processes: decidedRouteProcesses(), as_formed_feature_types: decidedAsFormedTypes(),
+    };
+  }
   const used = new Set((state.plan.setups || []).map((s) => s.setup_id));
   let index = used.size + 1;
   while (used.has(`SETUP-${String(index).padStart(3, "0")}`)) index += 1;
@@ -1059,11 +1341,18 @@ $("use-all-estimates").addEventListener("click", () => {
 
 $("add-op").addEventListener("click", () => {
   if (!state.plan) {
-    state.plan = { setups: [], operations: [], units: "mm", source_filename: "" };
+    state.plan = {
+      setups: [], operations: [], units: "mm", source_filename: "", route_processes: decidedRouteProcesses(), as_formed_feature_types: decidedAsFormedTypes(),
+    };
   }
   manualCounter += 1;
   if (!state.plan.setups || !state.plan.setups.length) $("add-setup").click();
-  const processes = Object.keys((state.rateSet && state.rateSet.operations) || {});
+  // A line added under a chosen route starts as one of the route's own
+  // processes, so it lands in the route's stage rather than outside it.
+  const processes = [
+    ...(routeProcesses() || []),
+    ...Object.keys((state.rateSet && state.rateSet.operations) || {}),
+  ];
   const target = setupsOf()[setupsOf().length - 1];
   state.plan.operations.push({
     operation_id: `OP-USER-${manualCounter}`,
@@ -1131,6 +1420,10 @@ function planPayload() {
     setups: state.plan.setups || [],
     units: state.plan.units || "mm",
     source_filename: state.plan.source_filename || "",
+    // Copied explicitly: this builder is a persistence path, and a field it
+    // does not copy never reaches the server.
+    route_processes: routeProcesses(),
+    as_formed_feature_types: asFormedTypes(),
     time_profile_id: state.plan.time_profile_id || null,
     time_profile_version: state.plan.time_profile_version || null,
     time_profile_name: state.plan.time_profile_name || null,

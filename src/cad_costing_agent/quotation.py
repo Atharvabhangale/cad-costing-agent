@@ -326,6 +326,11 @@ class QuoteProvenance(BaseModel):
     density_kg_m3: float | None = None
     material_cost_per_kg: float | None = None
     mass_kg: float | None = None
+    # When material was costed from the stock the part is cut from: what stock,
+    # and its mass. `mass_kg` stays the finished part's own.
+    material_basis: str | None = None
+    stock_description: str | None = None
+    stock_mass_kg: float | None = None
 
     rate_set_id: str | None = None
     rate_set_version: str | None = None
@@ -742,8 +747,30 @@ def _part_totals(detail: EstimateDetail, assumptions: EstimateAssumptions) -> Qu
         for op in operations
     )
 
+    # Non-machining route stages, present only when the estimate priced some, so
+    # a document for an estimate without them has exactly the lines it always had.
+    stage_costs = part_cost.get("stage_costs") or []
+    stage_lines = (
+        [
+            _line(
+                "route_stages",
+                "Route stages (" + ", ".join(str(s.get("label")) for s in stage_costs) + ")",
+                part_cost.get("total_stage_cost"),
+                "Priced from the rate set's stage rates.",
+            )
+        ]
+        if stage_costs
+        else []
+    )
+
     lines = [
-        _line("material", "Material", part_cost.get("total_material_cost")),
+        _line(
+            "material",
+            "Material",
+            part_cost.get("total_material_cost"),
+            part_cost.get("material_note") or "",
+        ),
+        *stage_lines,
         _line(
             "operation_setup",
             "Manufacturing — setup",
@@ -1179,6 +1206,9 @@ def _provenance(
         density_kg_m3=assumptions.density_kg_m3,
         material_cost_per_kg=assumptions.material_cost_per_kg,
         mass_kg=assumptions.mass_kg,
+        material_basis=assumptions.material_basis,
+        stock_description=assumptions.stock_description,
+        stock_mass_kg=assumptions.stock_mass_kg,
         rate_set_id=assumptions.rate_set_id,
         rate_set_version=assumptions.rate_set_version,
         rate_set_name=assumptions.rate_set_name,

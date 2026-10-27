@@ -276,19 +276,70 @@ It is a **recommendation for review, never a finding.** Shape does not determine
 The engineer can **confirm** it, choose **another route**, or **mark it unknown**; the
 recommendation is kept unchanged beside the answer and both are stored on the estimate.
 
-Only **milling, drilling and turning** stages have a cost model. When the effective route contains
-any other stage — sheet cutting, bending, casting, forging, welding, additive, moulding, finishing,
-purchase — `/cost/cad-part` refuses with `422 process_route_not_costable` instead of pricing the
-machined part of it as the whole. A route marked unknown is refused the same way. A cost request
-that sends no classification behaves exactly as before.
+Once a route is decided, the **manufacturing plan is arranged by it**. A strip above the
+operations table lists the route's stages in order — each machining stage with how many
+operations it holds (or "no operations yet — add one with + Add operation"), every other stage
+as "priced from stage rates". Operations whose process the route does not include move to
+**Not in this route**: kept exactly as they are, but not costed. Switching the route back,
+withdrawing the decision, or changing a row's process to one the route includes brings them
+back. Until someone decides, the plan is exactly as it was.
+
+**Milling, drilling and turning** stages are priced by the hour from the plan's times. Every other
+stage — sheet cutting, bending, casting, forging, welding, additive, moulding, finishing, purchase
+— is priced from **stage rates** in the selected rate set, once the route is decided:
+
+- A stage rate is published like any other rate (the **Rate sets** editor, *Processes* step, or
+  `stage_rates` on `POST /rates`): a unit rate **per kg** or **per piece**, and/or a one-off
+  **batch charge** such as a pattern or a die, with a note on where it came from. Keys are stage
+  ids; a machining or unknown stage id is refused (422). No seeded rate set has any.
+- A **per-kg** stage is charged on a mass someone enters for it, per part — on the route card,
+  or as `stage_inputs` on `/cost/cad-part`, e.g. `{"casting": {"mass_kg": 2.5}}`. The finished
+  CAD mass is never used in its place, and a cast or forged blank lighter than the part is refused.
+- `total_cost = unit_rate × (mass_kg if per kg) × quantity + batch_charge`, per stage. Stage costs
+  are direct cost, so overhead and scrap apply to them.
+- A route that **starts with casting, forging, moulding, an additive build or a purchase** takes
+  its material from that stage's rate: the material line is ₹0.00 and says so.
+- If any stage has no rate, or a per-kg stage has no mass, `/cost/cad-part` refuses with
+  `422 route_stages_not_priceable` and a reason per stage, and stores nothing — the machined
+  stages are never priced as the whole.
+
+Measured live on `model1_1.stp`, 10 off, *Casting followed by CNC machining*, an illustrative
+casting rate of ₹120/kg + ₹15,000 per batch and a 2.5 kg blank: casting ₹18,000.00
+(₹120 × 2.5 × 10 + ₹15,000), material ₹0.00 "included in the stage rate". A route marked unknown,
+or an *unreviewed* recommendation that would need stage rates, is still refused with
+`422 process_route_not_costable`. A cost request that sends no classification behaves exactly as
+before.
 
 | Endpoint | Purpose |
 |---|---|
-| `GET /process-routes` | the families, the 19 choosable routes, and which stages carry a cost model |
+| `GET /process-routes` | the families, the 19 choosable routes, and which stages are machining (hourly) and which are priced from stage rates |
 | `POST /cad/process/decide` | apply `accepted`, `edited` (with a `route_id`; `unknown` marks it unknown) or `pending` to a classification; persists nothing |
 | `POST /cost/cad-part` `process_classification` | optional JSON form field; stored in the request snapshot with any plan-vs-route differences |
 
 ## Processing-time estimation
+
+**A cast or forged blank leaves its blends unmachined.** When the route you decide on starts
+by casting or forging and then machines (*Casting followed by CNC machining*, *Forging followed
+by CNC machining*), the plan moves the blank's fillets and chamfers to an **"As cast — not
+machined"** group: kept, but not costed. Faces, holes and pockets stay machined by default,
+because the model cannot tell a machined face from an as-cast one — use *As cast* on any row to
+leave it unmachined, or *Machine it* to bring a blend back.
+
+**Turned parts are costed from the bar they are cut from.** For a part whose cylinders share
+one axis and whose flat faces are all square to it, the app proposes a round bar — largest Ø +
+5 mm rounded up to a 5 mm size, length + 2 mm facing at each end + 3 mm parting (illustrative)
+— in a *Raw material* card. Until you confirm it, or enter the bar you actually use, material is
+costed from the finished part as before; once confirmed, from the bar, with the part's own mass
+still shown beside it. Turning times on such a part are worked out from the bar down to each
+diameter, and its end faces and shoulders are suggested as facing on the lathe, not milling.
+
+**Large holes are drilled smallest first.** A hole larger than 13 mm is timed as a pilot
+(Ø6), then drills each at most 2.5× the previous, then its own size — Ø20 is drilled
+6 → 15 → 20. Each drilling row has a dropdown offering a single drill, pilot + drill and the
+step sequence, each with its own estimated time; the suggested one is marked, and whichever
+you pick is what gets costed once you accept its estimate. The three numbers are illustrative
+time-profile settings (*Time profiles → Drilling*), assembled from common practice — no ISO or
+DIN standard prescribes a pilot sequence — so replace them with your shop's.
 
 Each suggested operation gets a deterministic, parameter-based time estimate. A time is a much
 stronger claim than an operation — "this hole is drilled" is a fact about geometry, "it takes 1.8
@@ -1075,6 +1126,47 @@ Retrieves a persisted estimate by the `estimate_id` returned from `/cost/part` o
   "result_snapshot": {"...": "the full computed breakdown"}
 }
 ```
+
+### `POST /estimates/{estimate_id}/actuals` — record a client's actual cost
+
+Records a cost stated outside this application (an ERP actual, a past quotation) against an existing estimate, and returns it with its per-unit variance. Nothing in the estimate changes, and no costing reads an actual. In the UI this is in the **History** detail, under *Actual cost (client data)*.
+
+```json
+{
+  "source": "Client ERP actual FY2025",
+  "cost_basis": "per_batch",
+  "batch_quantity": 10,
+  "currency": "INR",
+  "total_cost": 3400.0,
+  "material_cost": 600.0,
+  "machining_cost": 2500.0,
+  "client_part_number": "BRK-100",
+  "drawing_revision": "B",
+  "cost_date": "2025-03-31"
+}
+```
+
+- `source`, `cost_basis`, `currency` and `total_cost` are required. `cost_basis` has no default.
+- `batch_quantity` is required for `per_batch`. A per-batch cost without it is refused (422), never treated as one unit.
+- `material_cost`, `machining_cost` and `additional_cost` are optional. One left out comes back `not_supplied`, never zero. A breakdown that adds up to more than `total_cost` is refused.
+- A currency different from the estimate's is refused (422). Nothing is converted.
+- Records are never edited. To correct one, send a new record with `supersedes_actual_id`; the original stays listed, marked `is_current: false`. A record can be corrected once (a second correction of the same record is `409`).
+
+The variance is per unit: `estimate - actual`, percentage relative to the actual (omitted when the actual is zero). Measured on `model1_1.stp`, 10 off, `poc-default` (estimate ₹316.39 per unit), with the request above:
+
+```
+total      est 316.39  actual 340.00  variance -23.61  -6.95%
+material   est   1.39  actual  60.00  variance -58.61  -97.69%
+machining  est 315.00  actual 250.00  variance +65.00  +26.00%
+additional est   0.00  not supplied
+unattributed actual: 30.00 per unit
+```
+
+An assembly estimate is compared on its total only, because its material/operation/additional figures cover manufactured components alone. An incomplete or mixed-currency assembly has no total to compare, and its variance is `unavailable` with the reason. A batch size different from the estimate's, or one not stated, is reported as a warning and not adjusted for.
+
+### `GET /estimates/{estimate_id}/actuals`
+
+Every actual recorded against the estimate, oldest first, each with `is_current`, `superseded_by` and its variance.
 
 ## API
 

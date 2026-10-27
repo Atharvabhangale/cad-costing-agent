@@ -30,6 +30,7 @@ const SIGNAL_MARK = { true: "observed", false: "not observed", null: "not assess
 
 function resetProcessPanel() {
   state.processClassification = null;
+  state.stageInputs = {};
   $("process-card").classList.add("hidden");
   $("process-summary").innerHTML = "";
   $("process-costing").innerHTML = "";
@@ -71,8 +72,8 @@ function stageList(route) {
         (stage) =>
           `<li>${escapeHtml(stage.label)} ` +
           (stage.cost_model_available
-            ? `<span class="pill pill-ok">cost model available</span>`
-            : `<span class="pill pill-off">no cost model</span>`) +
+            ? `<span class="pill pill-ok">machining — hourly rates</span>`
+            : `<span class="pill pill-off">priced from stage rates</span>`) +
           (stage.basis.length
             ? `<div class="hint">${stage.basis.map(escapeHtml).join("<br>")}</div>`
             : "") +
@@ -119,7 +120,9 @@ async function renderProcessClassification(classification) {
     (c.user_note ? `<p class="hint"><strong>Note:</strong> ${escapeHtml(c.user_note)}</p>` : "");
 
   $("process-costing").innerHTML =
-    `<p class="${c.blocks_costing ? "warning-inline" : "hint"}">${escapeHtml(c.costing_note)}</p>`;
+    `<p class="${c.blocks_costing ? "warning-inline" : "hint"}">${escapeHtml(c.costing_note)}</p>` +
+    `<div id="process-stage-inputs"></div>`;
+  renderStageInputs();
 
   $("process-evidence").innerHTML =
     `<table class="ops"><thead><tr><th>Signal</th><th>Result</th><th>Detail</th></tr></thead><tbody>` +
@@ -142,6 +145,76 @@ async function renderProcessClassification(classification) {
   $("process-reset").disabled = c.user_action === "pending";
   if (c.route) $("process-route").value = c.route.route_id;
   $("process-card").classList.remove("hidden");
+
+  // The decided route regroups the part's plan: operations outside it move to
+  // "Not in this route", unchanged. The processes come from the backend's
+  // `plan_processes`; null until someone decides. Never applied to a component
+  // plan opened from an assembly.
+  if (state.plan && !state.planComponentId) {
+    state.plan.route_processes = Array.isArray(c.plan_processes) ? [...c.plan_processes] : null;
+    // On a cast or forged route, the blank's blends are left as formed by
+    // default (the backend's `as_formed_feature_types`); null on any other.
+    state.plan.as_formed_feature_types = Array.isArray(c.as_formed_feature_types)
+      ? [...c.as_formed_feature_types]
+      : null;
+  }
+  if (typeof renderPlan === "function") renderPlan();
+}
+
+// The non-machining stages of a decided route, each with the rate the selected
+// rate set holds for it. A per-kg stage needs the mass it is charged on, typed
+// here per part and sent with the cost request as `stage_inputs`; nothing fills
+// it from the CAD mass. Whether the route can actually be priced is decided by
+// the server when it is costed — this only shows what it will need.
+function renderStageInputs() {
+  const host = $("process-stage-inputs");
+  const c = state.processClassification;
+  if (!host) return;
+  state.stageInputs = state.stageInputs || {};
+  if (!c || c.costing_status !== "stage_rates_required" || c.blocks_costing || !c.route) {
+    host.innerHTML = "";
+    return;
+  }
+  const rateSet = state.rateSet;
+  const currency = rateSet ? rateSet.currency : "INR";
+  const rows = c.route.stages
+    .filter((stage) => !stage.cost_model_available)
+    .map((stage) => {
+      const rate = rateSet && rateSet.stage_rates ? rateSet.stage_rates[stage.stage] : null;
+      if (!rate) {
+        return `<tr><th>${escapeHtml(stage.label)}</th><td colspan="2" class="warning-inline">
+          No rate in ${rateSet ? `${escapeHtml(rateSet.name)} v${escapeHtml(rateSet.version)}` : "the selected rate set"}.
+          Publish a version with one under Rate sets.</td></tr>`;
+      }
+      const parts = [];
+      if (rate.unit_rate !== null && rate.unit_rate !== undefined) {
+        parts.push(`${money(rate.unit_rate, currency)} ${rate.unit_basis === "per_kg" ? "per kg" : "per piece"}`);
+      }
+      if (rate.batch_charge) parts.push(`${money(rate.batch_charge, currency)} per batch`);
+      const entered = (state.stageInputs[stage.stage] || {}).mass_kg;
+      const input =
+        rate.unit_basis === "per_kg"
+          ? `<label>Mass charged on, kg per part
+               <input type="number" step="any" min="0" class="stage-mass" data-stage="${escapeHtml(stage.stage)}"
+                 value="${entered ?? ""}" placeholder="required"></label>`
+          : "";
+      return `<tr><th>${escapeHtml(stage.label)}</th>
+        <td>${parts.join(" + ")}${rate.note ? `<div class="hint">${escapeHtml(rate.note)}</div>` : ""}</td>
+        <td>${input}</td></tr>`;
+    })
+    .join("");
+  host.innerHTML =
+    `<table class="mini stage-rates"><tbody>${rows}</tbody></table>` +
+    `<p class="hint">For a casting or forging, the mass is the blank's weight; the finished part's ` +
+    `CAD mass is never used in its place.</p>`;
+  host.querySelectorAll("input.stage-mass").forEach((input) =>
+    input.addEventListener("input", () => {
+      const raw = input.value.trim();
+      // Blank is "not entered", never 0.
+      if (raw === "") delete state.stageInputs[input.dataset.stage];
+      else state.stageInputs[input.dataset.stage] = { mass_kg: Number(raw) };
+    })
+  );
 }
 
 async function decideProcess(action, routeId) {

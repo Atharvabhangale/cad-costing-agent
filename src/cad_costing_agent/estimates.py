@@ -177,6 +177,12 @@ class EstimateAssumptions(BaseModel):
     density_kg_m3: float | None = None
     material_cost_per_kg: float | None = None
     material_is_illustrative: bool | None = None
+    # What material was costed from. `mass_kg` above is always the finished
+    # part's own; when the material came from the stock it is cut from, that
+    # stock and its mass are named here, never put in the part's place.
+    material_basis: str | None = None
+    stock_description: str | None = None
+    stock_mass_kg: float | None = None
 
     # --- costing profile (money) ---
     rate_set_id: str | None = None
@@ -310,6 +316,14 @@ def extract_assumptions(detail: EstimateDetail) -> EstimateAssumptions:
     additional = part_cost.get("additional_costs") or {}
     geometry = result.get("geometry") or request.get("geometry") or {}
 
+    from_stock = result.get("material_basis") == "bar_stock"
+    stock = request.get("raw_stock") or {}
+    stock_description = (
+        f"round bar Ø{stock['diameter_mm']:g} × {stock['length_mm']:g} mm"
+        if from_stock and stock.get("diameter_mm") and stock.get("length_mm")
+        else None
+    )
+
     plan = _get(detail.plan_snapshot, "plan", default={}) or {}
     setups = plan.get("setups") or []
     operations = plan.get("operations") or []
@@ -352,7 +366,16 @@ def extract_assumptions(detail: EstimateDetail) -> EstimateAssumptions:
         geometry_status=geometry.get("geometry_status"),
         volume_mm3=geometry.get("volume"),
         volume_method=geometry.get("volume_method"),
-        mass_kg=material_cost.get("mass_kg") or _get(request, "mass", "mass_kg"),
+        # The part's own mass: from the CAD result when it has one, since the
+        # material line carries the stock's mass when material came from a bar.
+        mass_kg=(
+            _get(result, "mass", "mass_kg")
+            if from_stock
+            else material_cost.get("mass_kg") or _get(request, "mass", "mass_kg")
+        ),
+        material_basis=result.get("material_basis"),
+        stock_description=stock_description,
+        stock_mass_kg=_get(result, "stock_mass", "mass_kg") if from_stock else None,
         material=material.get("name") or request.get("material"),
         density_kg_m3=material.get("density_kg_m3"),
         material_cost_per_kg=material_cost.get("material_cost_per_kg"),
@@ -555,17 +578,24 @@ def decompose(
     after_pc = _get(comparison.result_snapshot, "part_cost", default={}) or {}
     impacts: list[CostImpact] = []
 
-    # --- material: price per kg against mass × quantity ---
+    # --- material: price per kg against mass × quantity. A material carried by
+    # --- a stage's rate was not charged, so it enters at a rate of zero.
     before_material = before_pc.get("material") or {}
     after_material = after_pc.get("material") or {}
+
+    def charged_rate(part_cost: dict, material: dict) -> float:
+        if part_cost.get("material_charged") is False:
+            return 0.0
+        return float(material.get("material_cost_per_kg") or 0.0)
+
     impacts.extend(
         _two_factor(
             rate_category="material_rate",
             driver_category="material_quantity",
             rate_label="cost/kg",
             driver_label="mass × quantity (kg)",
-            rate_before=float(before_material.get("material_cost_per_kg") or 0.0),
-            rate_after=float(after_material.get("material_cost_per_kg") or 0.0),
+            rate_before=charged_rate(before_pc, before_material),
+            rate_after=charged_rate(after_pc, after_material),
             driver_before=float(before_material.get("mass_kg") or 0.0)
             * int(before_material.get("quantity") or 1),
             driver_after=float(after_material.get("mass_kg") or 0.0)
@@ -645,6 +675,27 @@ def decompose(
             )
         )
 
+    # --- non-machining route stages, matched by stage id, each a stored total ---
+    before_stages = {s.get("stage"): s for s in before_pc.get("stage_costs") or []}
+    after_stages = {s.get("stage"): s for s in after_pc.get("stage_costs") or []}
+    for stage_id in [*before_stages, *(s for s in after_stages if s not in before_stages)]:
+        before_stage = before_stages.get(stage_id) or {}
+        after_stage = after_stages.get(stage_id) or {}
+        label = after_stage.get("label") or before_stage.get("label") or stage_id
+        impacts.extend(
+            _flat(
+                "route_stage",
+                f"{label} (route stage)"
+                if before_stage and after_stage
+                else f"{label} is no longer a route stage"
+                if before_stage
+                else f"{label} was added as a route stage",
+                float(before_stage.get("total_cost") or 0.0),
+                float(after_stage.get("total_cost") or 0.0),
+                currency,
+            )
+        )
+
     # --- additional costs, each already a separate figure in the snapshot ---
     before_additional = before_pc.get("additional_costs") or {}
     after_additional = after_pc.get("additional_costs") or {}
@@ -718,6 +769,10 @@ _COMPARABLE_FIELDS: tuple[tuple[str, str, bool, str], ...] = (
     ("mass_kg", "Mass (kg)", True, "cad"),
     ("material", "Material", True, "material"),
     ("density_kg_m3", "Density (kg/m³)", True, "material"),
+    # Costing material from the bar instead of the finished part is one input,
+    # and it moves the material cost without the part's mass changing at all.
+    ("material_basis", "Material costed from", True, "material"),
+    ("stock_mass_kg", "Stock mass (kg)", True, "material"),
     ("material_cost_per_kg", "Material cost/kg", True, "rates"),
     ("rate_set_id", "Costing profile", True, "rates"),
     ("rate_set_version", "Costing profile version", True, "rates"),

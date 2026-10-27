@@ -69,6 +69,7 @@ from cad_costing_agent.features.model import (
     FeatureRecognitionResult,
     FeatureType,
 )
+from cad_costing_agent.features.rotational import parallel, rotational_form
 from cad_costing_agent.rate_sets import OperationRequirement
 
 # ------------------------------------------------------------------ vocabulary
@@ -317,6 +318,8 @@ class _Context:
     """Per-model facts a rule needs that a single feature does not carry."""
 
     largest_plane_area_by_solid: dict[int, float]
+    # Set when the whole model is one body of revolution: its turning axis.
+    turning_axis: object | None = None
 
 
 # --- holes -------------------------------------------------------------------
@@ -491,6 +494,30 @@ def _plane_rule(feature: Feature, context: _Context) -> _Proposal | _Decline:
             ),
         )
 
+    # On a body of revolution every planar face is square to the turning axis
+    # (that is part of what made it rotational), so it is an end face or a
+    # shoulder — faced on the lathe in the same chucking, not milled.
+    if context.turning_axis is not None and feature.axis is not None and parallel(
+        feature.axis, context.turning_axis
+    ):
+        return _Proposal(
+            operation_type=TURNING,
+            rule_id="turned_part_face_to_facing",
+            reason=(
+                "a significant planar face square to the turning axis of a body of revolution, "
+                "which is faced on the lathe"
+            ),
+            ceiling=Confidence.MEDIUM,
+            alternatives=(MILLING,),
+            extra_evidence=(
+                f"this face is {share:.1%} of the largest planar face on its solid",
+                "every external cylinder of this part shares one axis and every planar face is "
+                "square to it, so the part is treated as turned",
+                "whether this face needs material removed is a process decision — it may already "
+                "be the bar's cut end",
+            ),
+        )
+
     # Deliberately capped at medium however cleanly the face was recognized:
     # geometry establishes that a flat surface exists, not that any material has
     # to come off it. A face may already be the stock surface.
@@ -603,6 +630,8 @@ def _operation_name(feature: Feature, operation_type: str) -> str:
     verb = {DRILLING: "Drill", MILLING: "Mill", TURNING: "Turn"}.get(
         operation_type, operation_type.capitalize()
     )
+    if operation_type == TURNING and feature.feature_type is FeatureType.PLANE:
+        verb = "Face"
     return f"{verb} {describe_feature(feature)}"
 
 
@@ -649,7 +678,11 @@ def suggest_operations(
         else {process.strip().lower() for process in priced_processes}
     )
 
-    context = _Context(largest_plane_area_by_solid=_largest_plane_area_by_solid(recognition.features))
+    form = rotational_form(list(recognition.features))
+    context = _Context(
+        largest_plane_area_by_solid=_largest_plane_area_by_solid(recognition.features),
+        turning_axis=form.axis if form.observed else None,
+    )
 
     suggestions: list[OperationSuggestion] = []
     declined: list[DeclinedSuggestion] = []

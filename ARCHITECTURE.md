@@ -846,6 +846,53 @@ the single implementation of which time counts — because the server-computed
 status goes stale the moment a person edits, and a fourth copy of the three-branch
 rule would drift from the other three.
 
+### Actual costs: a recorded fact, never an input
+
+`cost_actuals.py` holds a cost somebody outside the application states for an
+estimate's part — an ERP actual, a past quotation — and the per-unit variance
+between it and the estimate. It is the first place the system's figures meet a
+number it did not produce, and its design keeps the two apart.
+
+- **It imports `money` and nothing else**, and only `main.py` and `repository.py`
+  import it. Both are structural tests (the second parses imports with `ast`,
+  because the *table* is also called `cost_actuals` and a substring grep matches
+  the ORM model and the migration). Nothing in costing can read an actual, and
+  recording one changes no estimate — a test compares the stored estimate before
+  and after.
+- **Only the total is required.** A breakdown category left out is
+  `not_supplied`, never zero. A zero would read as "this part had no material
+  cost" and report the whole estimated figure as a variance.
+- **The basis is never guessed.** `cost_basis` (`per_unit` / `per_batch`) has no
+  default, and a per-batch cost without its batch quantity is refused rather
+  than assumed to be one unit. A breakdown that adds up to more than its total is
+  refused, because which figure is wrong cannot be told.
+- **Variance is per unit**: `estimate - actual`, with the percentage relative to
+  the actual and omitted where the actual is zero. Material is compared with the
+  estimate's material cost, machining with its operation cost (machine, labour
+  and setup), additional with overhead, scrap and tooling. Any part of the actual
+  total that no supplied category covers is reported as unattributed rather than
+  assigned to one.
+- **A different batch size is warned about, not corrected.** Setup and tooling
+  are spread over the batch, so per-unit cost depends on it; correcting for that
+  would need the setup share of the actual, which client data does not state.
+- **An assembly is compared on its total only.** Its material, operation and
+  additional figures cover manufactured components alone. And an incomplete or
+  mixed-currency assembly has nothing to compare against: its row stores `0.0`
+  where the roll-up had no total, so `figures_from_estimate` reads the snapshot's
+  `is_complete` / `is_aggregatable` / `production_total_cost` instead and reports
+  the variance `unavailable` with the reason.
+- **Currencies are never converted.** A mismatch is refused at entry (422).
+- **Immutable.** `CostActualRepository` has `record`, `get` and `for_estimate`
+  and nothing else. A correction is a new row whose `supersedes_actual_id` names
+  the one it replaces; that column is unique, so a record is corrected at most
+  once and the chain stays a single line. A superseded record stays listed,
+  marked not current.
+- **Client part number and drawing revision are plain columns on the actual**,
+  stored as entered and never matched against the estimate's part id. There is no
+  part-management system behind them.
+
+Migration `0006` adds the one table and touches nothing else.
+
 ### The quotation is a presentation, and must never become a calculation
 
 `quotation.py` turns a stored estimate into a business document. Its whole
@@ -1196,14 +1243,90 @@ recommended route records an acceptance. Costability (`costing_status`, `blocks_
 computed field, so a classification round-tripped through the browser cannot declare itself
 costable; the server recomputes it from the stages.
 
-**The costing boundary is a refusal, not a model.** Only stages whose process type is one the
-existing costing prices (milling, drilling, turning) report `cost_model_available`. A route with
-any other stage is refused before anything is priced, because pricing its machined stages alone
-would present part of a cost as all of it. An *unreviewed* `unknown` does not block — the
-engineer's own operations are priced as before and the snapshot says the route was not
-established — but a route the engineer *marked* unknown does.
+**The costing boundary.** Only stages whose process type is one the time estimation prices by
+the hour (milling, drilling, turning) report `cost_model_available`. Since Iteration 3 every
+other stage is priced from the rate set's stage rates (`stage_costing.py`, next section) once
+the route is *decided*; `costing_status` is then `stage_rates_required`. Which stages those are
+is read from `STAGES` by stage id, not from the payload. A route the engineer marked unknown,
+or an unreviewed recommendation that would need stage rates, is still refused before anything
+is priced. An *unreviewed* `unknown` does not block — the engineer's own operations are priced
+as before and the snapshot says the route was not established.
+
+### Route stages are priced from rates someone published
+
+`stage_costing.py` prices a decided route's non-machining stages — casting, forging, sheet
+cutting, bending, welding, finishing, moulding, additive, purchase — the way a supplier quotes
+them. `RateSet.stage_rates` holds, per stage id, a `StageRate`: a unit rate `per_kg` or
+`per_piece` and/or a one-off `batch_charge` (a pattern, a die), with a note on where it came
+from. Rates live in the existing JSON column, so no migration: a version published before them
+reads as having none.
+
+    unit_cost_per_part = unit_rate x mass_kg (per_kg) | unit_rate (per_piece)
+    total_cost         = unit_cost_per_part x quantity + batch_charge
+
+- **Every stage or none.** A stage with no rate in the selected rate set, or a per-kg stage with
+  no mass, returns a problem; `/cost/cad-part` refuses with `422 route_stages_not_priceable`
+  naming each stage and stores nothing.
+- **The mass is entered, per stage, per part** (`stage_inputs`), and recorded on the estimate.
+  The finished CAD mass is never substituted. For a material-supplying stage a mass below the
+  finished part's is refused.
+- **Material is not charged twice.** A route whose first stage is casting, forging, moulding,
+  an additive build or a purchase gets its material from that stage's rate:
+  `material_charged = false`, `total_material_cost = 0`, and `material_note` names the stage.
+  The material record stays in the result for reference. A confirmed bar on such a route is
+  refused as a contradiction.
+- **Stage costs are direct cost.** `direct_cost_base = material + operations + stages`, so
+  overhead and scrap apply to them exactly as to material. Without stages the result reads as
+  it always did: `stage_costs = []`, `total_stage_cost = 0`, `material_charged = true`.
+- **Boundaries.** `stage_costing` imports `money` and `rate_sets` only; it never sees a route.
+  `main.py` turns the decided route's stages into `StageInput`s and checks published
+  stage-rate keys against `STAGES` (`rate_sets` may not import the classifier).
+- **Downstream.** The quotation adds a `route_stages` line only when there are stages, so its
+  lines still partition the stored total; `estimates.decompose` reads a material that was not
+  charged at a zero rate and reports stage changes as `route_stage` impacts.
+
+**A decided route regroups the plan; it does not edit it.** `plan_processes` is computed on
+the classification — `None` until the engineer decides, then the process types of the route's
+machining stages (empty for a route with none, or one marked unknown). It becomes
+`ManufacturingPlan.route_processes`, and `in_route` is the one test: an operation outside the
+route stays in the plan with every field untouched, but `to_operation_requirements` skips it,
+`uncosted_operations` does not count it as missing a time, and `out_of_route_operations`
+names it. Setup time is still hung on the first *costable, in-route* operation of each setup.
+`/cost/cad-part` sets `route_processes` from the classification it was sent, never from the
+browser's copy, so the operations priced and the route recorded cannot disagree. The default
+`None` is the pre-route behaviour exactly, which is why assembly component plans are unaffected.
+Non-machining stages never become `PlannedOperation`s — they have no rate — and are shown only
+in the route strip above the table.
 
 ### Processing time, the plan, and the feedback record
+
+**What reaches the cost is one test.** `ManufacturingPlan.counts_toward_cost` — active, in the
+chosen route, not left as formed, and carrying a committed time — is read by
+`to_operation_requirements`, the time summary and `operation_feedback` alike, so the feedback
+record can no longer call an operation costed that the route or the blank left out. On a
+decided cast- or forged-then-machined route, `as_formed_feature_types` (from the
+classification) leaves the blank's blends as formed by default, and `PlannedOperation.
+user_machined` overrides it per row; on any other route nothing is as formed.
+
+**Turned parts.** `features/rotational.py` is the one rotational test (shared by the
+suggestions, the classifier and the bar proposal) and measures the largest diameter and the
+length along the axis. On a rotational part the plane rule proposes facing (turning), timed by
+`_facing`. `raw_stock.py` imports only the feature models: it proposes a `BarStock`, records the
+engineer's answer beside it, and computes a volume — never a mass or a price. `/cost/cad-part`
+passes a *confirmed* bar's volume to `calculate_cad_part_cost(material_stock_volume_mm3=…)`,
+which runs the unchanged mass calculation on it and costs material from that, reporting
+`stock_mass` beside the untouched `mass`. Turning passes use `stock_diameter_mm` when the
+estimate request carries one.
+
+**Stepped drilling.** `operation_time.drilling_steps` turns a hole diameter into the drills
+used, smallest first, from three `TimeAssumptions` parameters (threshold, pilot, max step
+ratio); a stepped hole's time is one full-depth pass per drill. The estimate carries every
+offered sequence in `drilling_options`, each with its own time, so an engineer's choice
+(`PlannedOperation.user_drilling_steps`, beside the frozen `system_drilling_steps`) is costed
+with a time the system computed — `system_cycle_for_choice` — or, for a sequence it never
+offered, with none. `system_suggested_cycle_time` keeps meaning "the suggested sequence's
+time", which is why feedback, quotation and assembly code read it unchanged. `plan.js`
+mirrors `system_cycle_for_choice`; change one, change both.
 
 Step 20 added the first module that produces a *time*, which is a much stronger claim than an
 operation and is therefore hedged much harder.
@@ -1675,6 +1798,8 @@ costing-agent/
 │       │                         #   only the planner and the classification vocabulary
 │       ├── quotation.py         # a stored estimate as a printable document; imports only
 │       │                         #   `estimates` and `money`, and calculates nothing
+│       ├── cost_actuals.py      # a client's actual cost vs the estimate, per unit; imports
+│       │                         #   only `money`, and no costing module reads it
 │       ├── component_classification.py
 │       │                         # manufactured / purchased / standard / excluded /
 │       │                         #   unresolved; imports nothing at all, and never infers
@@ -1686,7 +1811,9 @@ costing-agent/
 │       ├── operation_suggestions.py  # features -> suggested operations (suggestions only:
 │       │                         #   no time, no rate, no cost; never imported by costing)
 │       ├── process_classification.py # manufacturing family + route, recommended and
-│       │                         #   confirmed; refuses routes it cannot price, prices nothing
+│       │                         #   confirmed; says which stages need stage rates, prices nothing
+│       ├── stage_costing.py      # non-machining route stages priced from the rate set's
+│       │                         #   stage rates; imports only `money` and `rate_sets`
 │       ├── operation_time.py     # deterministic machining-time formulas (times only,
 │       │                         #   never money; needs_user_input rather than a default)
 │       ├── time_profiles.py     # versioned, immutable machining assumptions (no currency)

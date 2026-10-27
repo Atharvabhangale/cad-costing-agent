@@ -68,6 +68,7 @@ from cad_costing_agent.operation_suggestions import (
     UserAction,
 )
 from cad_costing_agent.operation_time import (
+    DrillingOption,
     OperationTimeEstimate,
     TimeAssumptions,
     TimeStatus,
@@ -157,6 +158,14 @@ class PlanTimeSummary(BaseModel):
     setups: list[SetupTimeSummary] = Field(default_factory=list)
     uncosted_operation_ids: list[str] = Field(default_factory=list)
     setups_needing_time: list[str] = Field(default_factory=list)
+    out_of_route_operation_ids: list[str] = Field(
+        default_factory=list,
+        description="Kept in the plan but not costed, because the chosen route does not include their process.",
+    )
+    as_formed_operation_ids: list[str] = Field(
+        default_factory=list,
+        description="Kept but not costed: left as cast or forged on a near-net-shape route.",
+    )
 
 
 class ManufacturingSetup(BaseModel):
@@ -406,6 +415,27 @@ class PlannedOperation(BaseModel):
     source_facets: list[int] = Field(default_factory=list)
     dimensions: dict[str, float] = Field(default_factory=dict)
 
+    # --- drilling: how a hole is opened up, smallest drill first ---
+    system_drilling_steps: list[float] = Field(
+        default_factory=list,
+        description="The drill sequence the drilling rule suggested. Never overwritten.",
+    )
+    system_drilling_options: list[DrillingOption] = Field(
+        default_factory=list,
+        description="Every sequence the system offered for this hole, each with its own time.",
+    )
+    user_drilling_steps: list[float] | None = Field(
+        default=None,
+        description="The sequence the engineer chose instead, smallest first. None: the suggestion.",
+    )
+    user_machined: bool | None = Field(
+        default=None,
+        description=(
+            "On a cast or forged route: True — machine this even though its feature type is "
+            "left as formed by default; False — leave it as formed. None follows the default."
+        ),
+    )
+
     # ---------------------------------------------------------------- derived
 
     @property
@@ -457,7 +487,33 @@ class PlannedOperation(BaseModel):
             return False
         if self.system_suggested_operation is None:
             return False
-        return self.operation_type == self.system_suggested_operation
+        if self.operation_type != self.system_suggested_operation:
+            return False
+        # A drilling sequence the system never timed has no system time.
+        return self.system_cycle_for_choice is not None
+
+    @property
+    def drilling_steps(self) -> list[float]:
+        """The drills actually planned for this hole: the engineer's choice, else the system's."""
+        if self.user_drilling_steps is not None:
+            return list(self.user_drilling_steps)
+        return list(self.system_drilling_steps)
+
+    @property
+    def system_cycle_for_choice(self) -> float | None:
+        """The system's cycle time for the drilling sequence now chosen.
+
+        The suggested sequence's time is `system_suggested_cycle_time`, never
+        overwritten. Another sequence the system offered carries its own
+        system-computed time in `system_drilling_options`; a sequence it did not
+        offer has none, and needs an entered time like any other change.
+        """
+        if self.user_drilling_steps is None or self.user_drilling_steps == self.system_drilling_steps:
+            return self.system_suggested_cycle_time
+        for option in self.system_drilling_options:
+            if option.steps == self.user_drilling_steps:
+                return option.cycle_time_minutes
+        return None
 
     @property
     def time_source(self) -> TimeSource:
@@ -472,7 +528,7 @@ class PlannedOperation(BaseModel):
         if self.user_cycle_time is not None:
             return self.user_cycle_time
         if self.system_time_accepted and self.system_time_applies:
-            return self.system_suggested_cycle_time
+            return self.system_cycle_for_choice
         return None
 
     @property
@@ -594,8 +650,31 @@ class PlannedOperation(BaseModel):
                 "system_time_evidence": list(estimate.evidence),
                 "system_time_assumptions": list(estimate.assumptions),
                 "system_time_missing": list(estimate.missing),
+                "system_drilling_steps": list(estimate.drilling_steps),
+                "system_drilling_options": list(estimate.drilling_options),
             }
         )
+
+    def with_drilling_steps(self, steps: list[float]) -> "PlannedOperation":
+        """Record the engineer's drilling sequence beside the system's.
+
+        Choosing the suggested sequence again is not a correction, so it is
+        recorded as no choice at all — the same rule a process edit follows.
+        """
+        chosen = [round(float(step), 3) for step in steps]
+        if not chosen or any(later <= earlier for earlier, later in zip(chosen, chosen[1:])):
+            raise ValueError("A drilling sequence must list increasing diameters, smallest first.")
+        # A different sequence is different work, so an earlier acceptance of the
+        # estimate does not carry over — the same rule as a change of process.
+        if chosen == self.system_drilling_steps:
+            update: dict = {"user_drilling_steps": None, "system_time_accepted": False}
+            if self.user_operation_type is None and self.user_action is UserAction.EDITED:
+                update["user_action"] = UserAction.ACCEPTED
+            return self.model_copy(update=update)
+        update = {"user_drilling_steps": chosen, "system_time_accepted": False}
+        if self.user_action in (UserAction.PENDING, UserAction.ACCEPTED):
+            update["user_action"] = UserAction.EDITED
+        return self.model_copy(update=update)
 
 
 class ManufacturingPlan(BaseModel):
@@ -623,6 +702,25 @@ class ManufacturingPlan(BaseModel):
     time_profile_id: str | None = None
     time_profile_version: str | None = None
     time_profile_name: str | None = None
+    route_processes: list[str] | None = Field(
+        default=None,
+        description=(
+            "The process types the engineer's chosen manufacturing route includes. None means "
+            "no route has been decided and every operation counts, which is how every plan "
+            "behaved before routes existed. An operation whose process is not listed is kept "
+            "in the plan, unchanged, but is not costed — changing the route back, or the "
+            "operation's process, brings it back."
+        ),
+    )
+    as_formed_feature_types: list[str] | None = Field(
+        default=None,
+        description=(
+            "On a decided route that casts or forges a blank and then machines it: the feature "
+            "types the blank leaves as formed by default (its blends). None on any other route, "
+            "and then nothing is left as formed. An operation's own `user_machined` overrides "
+            "the default either way."
+        ),
+    )
 
     @model_validator(mode="before")
     @classmethod
@@ -704,9 +802,52 @@ class ManufacturingPlan(BaseModel):
                 return operation
         raise ValueError(f"Unknown operation '{operation_id}' in this plan.")
 
+    def in_route(self, operation: PlannedOperation) -> bool:
+        """Whether the chosen route includes this operation's process. Always true with no route."""
+        if self.route_processes is None:
+            return True
+        return (operation.operation_type or "") in self.route_processes
+
+    def out_of_route_operations(self) -> list[PlannedOperation]:
+        """Active operations the chosen route leaves out. Kept, not costed, not deleted."""
+        return [o for o in self.active if not self.in_route(o)]
+
+    def is_as_formed(self, operation: PlannedOperation) -> bool:
+        """Whether a cast or forged blank leaves this unmachined. Never on any other route."""
+        if self.as_formed_feature_types is None:
+            return False
+        if operation.user_machined is not None:
+            return not operation.user_machined
+        return (operation.feature_type or "") in self.as_formed_feature_types
+
+    def as_formed_operations(self) -> list[PlannedOperation]:
+        """In-route operations left as cast or forged. Kept, not costed, not deleted."""
+        return [o for o in self.active if self.in_route(o) and self.is_as_formed(o)]
+
+    def counts_toward_cost(self, operation: PlannedOperation) -> bool:
+        """The one test of whether an operation reaches the cost.
+
+        Active, in the chosen route, machined rather than left as formed, and
+        carrying a committed time. Costing, the time summary and the feedback
+        record all read this, so none of them can disagree about what was costed.
+        """
+        return (
+            operation.user_action is not UserAction.REJECTED
+            and operation.costable
+            and self.in_route(operation)
+            and not self.is_as_formed(operation)
+        )
+
     def uncosted_operations(self) -> list[PlannedOperation]:
-        """Active operations that carry no committed time, so are left out."""
-        return [o for o in self.active if not o.costable]
+        """Active, in-route, machined operations that carry no committed time, so are left out.
+
+        An operation outside the route, or left as formed, is not "missing a
+        time" — it is excluded on purpose — so it is reported by
+        `out_of_route_operations` or `as_formed_operations` instead.
+        """
+        return [
+            o for o in self.active if self.in_route(o) and not self.is_as_formed(o) and not o.costable
+        ]
 
     def to_operation_requirements(self, quantity: int) -> list[OperationRequirement]:
         """The costable operations, as the existing unmodified costing wants them.
@@ -733,7 +874,7 @@ class ManufacturingPlan(BaseModel):
         charged: set[str] = set()
 
         for operation in self.ordered:
-            if operation.user_action is UserAction.REJECTED or not operation.costable:
+            if not self.counts_toward_cost(operation):
                 continue
 
             setup_time = 0.0
@@ -766,7 +907,9 @@ class ManufacturingPlan(BaseModel):
         """
         per_setup: list[SetupTimeSummary] = []
         for setup in self.ordered_setups:
-            members = [o for o in self.operations_in(setup.setup_id) if o.costable]
+            members = [
+                o for o in self.operations_in(setup.setup_id) if self.counts_toward_cost(o)
+            ]
             cycle = sum((o.final_cycle_time or 0.0) * quantity for o in members)
             per_setup.append(
                 SetupTimeSummary(
@@ -800,6 +943,8 @@ class ManufacturingPlan(BaseModel):
                 for entry in per_setup
                 if entry.costable_operation_count and entry.setup_time_minutes is None
             ],
+            out_of_route_operation_ids=[o.operation_id for o in self.out_of_route_operations()],
+            as_formed_operation_ids=[o.operation_id for o in self.as_formed_operations()],
         )
 
     # ---------------------------------------------------------------- editing

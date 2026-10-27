@@ -1,13 +1,20 @@
 # Project Status
 
-Last updated: 2026-10-21 (Iteration 2 — manufacturing family and route classification)
+Last updated: 2026-10-27 (Iteration 3 — non-machining route stages priced from stage rates)
 
-**Paused after Step 30.** `CHECKPOINT.md` is the short way back in: the current
-architecture, database and migration state, test baseline, the exact remaining
-evidence limitations and what the next session should do first. This file remains
-the full step-by-step record.
+`CHECKPOINT.md` is a point-in-time handoff written at the Step 30 pause and is not
+updated in place; this file is the step-by-step record.
 
 ## Current stage
+
+**Iteration 3: a decided route's casting, forging, sheet, finishing or purchase stages are
+priced from rates a person publishes in the rate set**, instead of the whole route being
+refused. A stage rate is per kg or per piece, plus an optional one-off batch charge; a per-kg
+stage is charged on a mass someone enters, never on the CAD mass. Every stage is priced or
+none is. A route that starts by casting, forging, moulding, building or buying the part does
+not charge the material again. No seeded rate set has stage rates, so nothing is priced
+until real ones are published. Details in *Iteration 3* below. A pre-existing defect found on
+the way — the rate-set editor broke on opening, since Step 29 — is fixed.
 
 **Iteration 2: a part's manufacturing family and process route are recommended from
 its recognized features, and an engineer confirms, overrides or marks them unknown.**
@@ -20,13 +27,22 @@ price (anything but milling, drilling and turning) is refused by `/cost/cad-part
 a 422 rather than priced as machining, and so is a route marked unknown. Sending no
 classification changes nothing. Details in *Iteration 2* below.
 
-**UI restructuring, ahead of a live demo — not a roadmap step.** The estimate page
-was one scrolling page of eighteen cards; it is now six sections in the order the
-work happens (Overview, CAD, Manufacturing, Cost, Assembly, Quote), with the
-engineering-heavy views moved out of the primary flow. No capability was added or
-removed, no backend behaviour changed, no migration was added, and the same part
-costs the same figure to the paisa. Step 31 has still not been started. Details in
-*Presentation* below; the roadmap state is unchanged and described from Step 30 on.
+**Iteration 1: a client's actual cost can be recorded against an estimate and the
+variance reported.** This is the first place the system's figures meet a number it
+did not produce. Only the total is required; a breakdown category left out is shown
+as *not supplied*, never as zero. A per-batch figure without its batch quantity is
+refused rather than assumed to be one unit, a different currency is refused rather
+than converted, and an actual is never edited — a correction is a new record that
+names the one it supersedes. An assembly is compared on its total only, and an
+incomplete assembly reports no variance at all. Nothing in costing reads an actual,
+and recording one changes no estimate. Details in *Iteration 1* below.
+
+Iteration 0 (2026-10-19) was an audit with no code change: baseline 1760 passed,
+1 skipped; the real database at Alembic `0005` with 137 estimates.
+
+UI restructuring, ahead of a live demo (not a roadmap step): the estimate page is six
+sections in the order the work happens (Overview, CAD, Manufacturing, Cost, Assembly,
+Quote). Details in *Presentation* below.
 
 Step 30: the evidence behind the feedback dataset is now measured honestly, and
 the one place it was genuinely being lost has been fixed. Step 29's readiness
@@ -834,6 +850,95 @@ all. One test added. Suite: **1,760 passing**, 1 skipped.
   (1,722 collected, 1 skipped). One file added, `static/estimateflow.js`. **No
   Python file changed, no endpoint, no schema, no migration.**
 
+### Iteration 3 — non-machining route stages priced from stage rates
+
+Iteration 2 let an engineer confirm *Casting followed by CNC machining* and then refused
+to cost it. The user asked for costing-model improvements based on client inputs and
+confirmed routes, and decided four questions before anything was built: rates per kg /
+per piece / per batch; the per-kg mass entered by the engineer; a casting, forging or
+purchase rate includes the metal; all non-machining stages in scope.
+
+**What was built.**
+- `rate_sets.StageRate` and `RateSet.stage_rates`, keyed by stage id: `unit_basis`
+  (`per_kg`/`per_piece`) with `unit_rate`, and/or `batch_charge`, plus a `note`. Stored in
+  the existing JSON column only when present, so **no migration** and seeded rows keep their
+  exact shape. Keys are checked against the route catalog at publish and validate (an
+  unknown stage or a machining stage is refused, 422). `RateSetSummary.stage_rate_count`.
+- `stage_costing.py` (imports `money` and `rate_sets` only): `price_stages` returns lines or
+  per-stage problems (`no_rate_set`, `no_stage_rate`, `needs_mass`), never a partial price;
+  `material_supplying_stage` names the first stage when it is casting, forging, moulding,
+  an additive build or a purchase.
+- `process_classification`: `unsupported_stages` → `stage_rate_stages`, read from `STAGES`
+  by stage id rather than from the payload; `costing_status` `cost_model_not_available` →
+  `stage_rates_required`; `blocks_costing` now only for a route marked unknown or an
+  *unreviewed* recommendation needing stage rates.
+- `/cost/cad-part`: `stage_inputs` (`{"casting": {"mass_kg": 2.5}}`), recorded in the request
+  snapshot; `422 route_stages_not_priceable` with a reason per stage; a confirmed bar on a
+  material-supplying route is refused (400).
+- `part_cost`: `stage_costs`, `total_stage_cost`, `material_charged`, `material_note`;
+  `direct_cost_base = material + operations + stages`, so overhead and scrap apply to stages.
+  Defaults leave every other estimate's figures unchanged.
+- `quotation`: a `route_stages` line only when there are stages; the material line carries
+  the note. `estimates.decompose`: a material not charged enters at a zero rate, and stage
+  changes are `route_stage` impacts.
+- UI: a stage-rate table in the rate-set editor's *Processes* step (stage list from
+  `/process-routes`) and in its review; per-stage rates and a mass input on the route card;
+  a *Route stages* row and its formula in the result panel; the route strip and stage pills
+  say "priced from stage rates".
+
+**A pre-existing defect, found and fixed.** `feedback.js` (Step 29) declared a global
+`renderOperations`, which silently replaced the rate-set editor's: opening *New profile* or
+*Create new version* threw before the processes table was drawn, and the next step click read
+the empty table back into the draft — a version published that way would have had no
+machine or labour rates. Found only because this iteration's editor rows would not render.
+Renamed to `renderOperationAnalytics`; a new test fails if any two classic scripts declare
+the same top-level function (shown to fail on the old name). A second, new race — the stage
+table being read back before its catalog round trip had drawn it — was also fixed.
+
+**Tests.** Baseline before this iteration **1974 passed, 1 skipped** (1975). 45 new in
+`tests/test_stage_costing.py` and 1 in `tests/test_ui.py`; three tests in
+`test_process_classification.py` updated for the intended change (the route-refusal test now
+expects `route_stages_not_priceable` for decided routes priced with `poc-default`, which has no
+stage rates; the "browser cannot declare costability" test also tries relabelling the casting
+stage as milling). Final full run: **2020 passed, 1 skipped** (2021 collected, 511 s); the
+route strip's wording in `plan.js` changed after it started, and the four files that cover it
+were re-run afterwards (294 passed).
+
+**Live verification** (scratch database, port 8712, a rate set published for the check and
+**marked illustrative**: casting ₹120/kg + ₹15,000/batch, purchase ₹900/piece). `model1_1.stp`,
+10 off, every operation timed at 2 min:
+- *Casting followed by CNC machining*: no mass → 422 `needs_mass`; 1.0 kg → 422 (finished part
+  1.732 kg); 2.5 kg → casting ₹18,000.00 (₹120 × 2.5 × 10 + ₹15,000), operations ₹13,000.00
+  (fillets as cast), material ₹0.00 "included in the stage rate", total ₹31,000.00.
+- 2.5 → 3.0 kg compared: one impact, `route_stage` +₹600.00, nothing unexplained.
+- *Purchased complete*: ₹9,000.00, no operations, no material. `poc-default` (no stage rates):
+  422 naming Casting. *Milling + drilling* with the stage-rate set: ₹19,613.86, identical to
+  sending no classification.
+- Quotation: a `route_stages` line of ₹18,000.00. Its ₹0.02 reconciliation note is the
+  existing rounding of per-operation run costs — a machining-only estimate shows the same.
+- In headless Chrome: the editor copies both stage rates into a new version and lists them in
+  review; the route card shows the casting rate and a required mass field; Calculate without
+  a mass shows the per-stage refusal; with 2.5 kg the result panel reads *Route stages
+  ₹18,000.00 — Casting: ₹18,000.00 (₹120.00/kg × 2.5 kg × 10 + ₹15,000.00 per batch)*. The
+  first screenshots showed *+ Add process* displaced under the new table; moved back.
+
+**Limitations.**
+- No seeded rate set has stage rates and none was added: until a client's rates are
+  published, every non-machining route is refused, as before, now with the reason.
+- One mass per stage, entered by hand; nothing estimates a casting's or forging's blank
+  weight. A per-kg finishing rate is charged on the mass entered for it, not on surface area.
+- Stage costs carry overhead and scrap like material; a client who applies neither to
+  bought-out work will see that difference. No per-stage scrap or yield.
+- Moulding and additive builds were taken to include their material along with the three
+  the user named; the constant is `MATERIAL_SUPPLYING_STAGES`.
+- Sheet, cut-and-weld and other stock-based routes still cost material from the finished
+  mass — no sheet blank or nesting.
+- The *Assumptions* panel still lists the material's cost per kg without saying it was not
+  charged; the result panel and the quotation say so.
+- Assembly components are not classified, so assembly roll-ups have no stage costs.
+- Actual-cost variance (Iteration 1) compares material/machining/additional only; stage costs
+  sit inside the total.
+
 ### Iteration 2 — manufacturing family and process route, recommended and confirmed
 
 **Audit first.** No family or route classification existed. `operation_suggestions`
@@ -889,19 +994,13 @@ engineer's own operations are priced as before and the snapshot records that the
 route was not established. An unreviewed *sheet* recommendation does block, with a
 note asking for a confirmation or an override.
 
-**Tests.** New `tests/test_process_classification.py` (84 tests) and six STEP
-builders in `tests/step_fixtures.py` (`PROCESS_FIXTURES`, kept out of `ALL_FIXTURES`):
-a stepped shaft, the shaft with an axial blind hole, the shaft with a cross hole, a
-2 mm L-bracket with two holes, a flat 2 mm blank, and the blank with a milled pocket.
-No existing test was changed. Full run of exactly this commit's tree, exported from
-the index into a separate directory: **1844 passed, 1 skipped** (1845
-collected, 210 s). It was developed in a working tree that also held a separate,
-uncommitted iteration recording actual costs, which this change does not touch; with
-that work present the suite was 1802 passed, 1 skipped before this change and 1886
-passed, 1 skipped after it.
+**Tests.** Baseline 1802 passed, 1 skipped. New `tests/test_process_classification.py`
+(84 tests) and six STEP builders in `tests/step_fixtures.py` (`PROCESS_FIXTURES`,
+kept out of `ALL_FIXTURES`): a stepped shaft, the shaft with an axial blind hole, the
+shaft with a cross hole, a 2 mm L-bracket with two holes, a flat 2 mm blank, and the
+blank with a milled pocket. Final full run: **1886 passed, 1 skipped** (1887 collected, 291 s), with no existing test changed or failing.
 
-**Live verification** (scratch database, port 8711; run in the working tree described
-above, and nothing below depends on the actual-cost work).
+**Live verification** (scratch database, port 8711).
 - Classification of the real models: `model1_1.stp` and `model1_1_solid.igs` agree —
   machining, milling + drilling, low (no feature cut into the solid; 4 unrecognized
   faces; an 8 mm wall holds 72% of the planar area, below 75%). `model2.stp`:
@@ -928,22 +1027,282 @@ above, and nothing below depends on the actual-cost work).
   fixed during this: a doubled full stop after the sheet reason, and the surface-mode
   IGES signal wrongly describing its features as fitted to polygons.
 
+**Follow-up: a decided route regroups the manufacturing plan** (requested after
+review — changing the route used to leave the plan below unchanged). Once the
+engineer confirms, overrides or marks the route unknown, the plan is arranged by it:
+- `ProcessClassification.plan_processes` (computed; `None` until a decision) lists the
+  processes the route includes; `ManufacturingPlan.route_processes` carries it
+  (default `None`, the old behaviour). An operation whose process is outside the route
+  stays in the plan untouched, is shown under **Not in this route — kept but not
+  costed**, is left out of `to_operation_requirements`, and is not reported as missing
+  a time. Changing its process into the route, or switching/withdrawing the route,
+  brings it back. Setup time is still charged once, on the first in-route costable
+  operation of the setup.
+- A strip above the operations table lists the route's stages in order: machining
+  stages with their operation count (or "no operations yet — add one with + Add
+  operation"), other stages as "no cost model — needs inputs — not costed". A line
+  added by hand starts as one of the route's processes.
+- `/cost/cad-part` sets `route_processes` from the classification and ignores the
+  browser's copy; the plan snapshot records `out_of_route_operation_ids` (only when a
+  route was decided).
+- 18 more tests in `tests/test_process_classification.py` (102 in the file). Full run: **1904 passed, 1 skipped** (1905 collected, 393 s).
+- Live, in Chrome against a scratch database: `model1_1.stp` overridden to Turning +
+  drilling showed the strip (turning: no operations yet; drilling: 6) and 25 milling
+  operations under *Not in this route*; Casting followed by CNC machining put all 31
+  in its machining stages with Casting marked *no cost model*; *Withdraw decision*
+  restored the plan exactly. Costed under Turning + drilling with all estimated times
+  accepted: **₹1,371.86**, from the 6 drilling operations only; the snapshot recorded
+  the route, the 25 out-of-route operations and "the plan costs no turning operation".
+
+**Follow-up: large holes are drilled smallest first** (requested after review — a
+senior engineer: a big hole is not drilled in one go; "Ø20 needs 3"). Searched first:
+**no ISO or DIN standard prescribes a pilot or step-drilling sequence.** What is
+published is a practice — size the pilot so the larger drill's chisel edge does not
+cut, step very large holes through successively larger pilots (Wikipedia, *Pilot
+hole*); the NIMI *Fitter Trade Practical* drills a 6 mm pilot before 8–16 mm holes;
+CAM software (Autodesk FeatureCAM) takes the pilot list as a shop setting; forum rules
+of thumb put the threshold at about ½" (13 mm). ISO 2306/DIN 336 (tap drills) and
+ISO 273 (clearance holes) are not about this. The user approved a rule built from these:
+- Three new time-profile parameters, illustrative and editable on the Time profiles
+  screen: `drilling_pilot_threshold_mm` 13, `drilling_pilot_diameter_mm` 6,
+  `drilling_max_step_ratio` 2.5. Above the threshold a hole is drilled from the pilot,
+  each drill at most 2.5× the previous: Ø14 → 6, 14; **Ø20 → 6, 15, 20**; Ø25/Ø30 →
+  6, 15, final; Ø40 → 6, 15, 37.5, 40. At or below it, one pass, exactly as before
+  (`drilling_time_baseline_v1`); stepped holes are `drilling_time_stepped_v1`. A stored
+  profile without the parameters reads with the defaults.
+- A stepped hole's cycle time is the sum of one full-depth pass per drill. The estimate
+  also returns `drilling_options` — single drill, pilot + drill, and the rule's
+  sequence — each with its own system-computed time, one marked `suggested`.
+- Each drilling row has a dropdown of those options. The choice goes to
+  `user_drilling_steps` beside the untouched `system_drilling_steps`; picking the
+  suggestion again records no choice; any change un-accepts the estimate and marks the
+  row edited, as a change of process does. Once accepted, the chosen option's own
+  system time is costed (`PlannedOperation.system_cycle_for_choice`, mirrored in
+  `plan.js`); a sequence the system never offered has no system time and needs one
+  entered. `system_suggested_cycle_time` keeps its meaning, so feedback, quotation and
+  assembly code are unchanged (the assembly panel's accepted-time line now reads the
+  resolved time).
+- 29 tests in the new `tests/test_drilling_steps.py`; no existing test changed. Full run: **1933 passed, 1 skipped** (1934 collected, 591 s).
+- Live, in Chrome against a scratch database, `model1_1.stp`: Ø25 holes suggested
+  6 → 15 → 25 (0.81 min), Ø16 × 80 mm 6 → 15 → 16 (2.63 min), Ø8 holes one pass. One
+  Ø25 hole switched to a single drill and accepted: costed at 0.44 min, while the other
+  Ø25 kept 0.81; the stored plan recorded both the system's and the engineer's
+  sequence. The first screenshots showed the dropdown squeezing the operation name to a
+  few characters; labels were shortened and the row is back to one 35 px line.
+
+**Follow-up: turned components** (after a client meeting that asked for costing logic
+to start with simple part families, and for raw material to be judged from the
+part's form and size). The client did not share CAD files, so six representative
+turned parts were generated with OpenCASCADE into the git-ignored `cadmodels/`
+(stepped shaft, bush, flanged pin, spacer ring, hub with a bolt circle, shaft with a
+cross hole) and run through the app before anything changed. All six were classified
+rotational / turning correctly, and that run found three faults for turned parts:
+material costed from the finished mass (0.67 kg for a shaft cut from a 1.59 kg bar);
+every diameter turned from a fixed 2 mm allowance (a Ø20 step from Ø45 bar has
+12.5 mm to come off); and end faces suggested as *milling*, so under a confirmed
+turning route they fell out of the cost altogether. What was built:
+- `features/rotational.py` — the rotational test, moved out of the classifier so the
+  suggestions, the classifier and the bar proposal share one implementation; it also
+  measures the largest diameter and the overall length along the axis.
+- Facing: on a rotational part, a significant planar face (square to the axis by
+  definition) is suggested as **turning — "Face …"** (`turned_part_face_to_facing`,
+  medium, milling offered as the alternative), timed by a new facing formula across
+  the radius (`facing_time_baseline_v1`) with a new time-profile parameter
+  `turning_facing_allowance_mm` (1 mm, illustrative, editable). Parts that are not
+  rotational are unchanged.
+- `raw_stock.py` — a **bar proposal** for a rotational part: largest Ø + 2 × 2.5 mm,
+  rounded up to a 5 mm step; length + 2 mm facing each end + 3 mm parting
+  (illustrative). Returned as `raw_stock` with the suggestions; `/cad/stock/decide`
+  confirms it, takes the engineer's bar (kept beside the proposal; a bar smaller than
+  the part is refused) or withdraws. **Unconfirmed, it changes nothing.** Confirmed,
+  `/cost/cad-part` costs material from the bar's volume at the same density and price;
+  `mass` stays the finished part's, and `stock_mass` / `material_basis` report the bar.
+- **Turning passes from the bar**: `/operations/estimate-time` takes
+  `stock_diameter_mm`; each diameter's passes are then (bar Ø − Ø)/2 ÷ depth of cut
+  (`turning_time_from_bar_v1`). The browser estimates with the *proposed* bar, so the
+  time stays the system's; entering a different bar shows that the turning times were
+  estimated for the proposed one.
+- UI: a *Raw material* card in Manufacturing (`static/stock.js`); the result panel
+  names the bar mass beside the part mass when it was used.
+- 26 tests in the new `tests/test_turned_parts.py` (full run: **1959 passed, 1 skipped**, 1960 collected); two existing tests updated for the
+  intended changes (the classifier's import set now includes `features.rotational`;
+  the suggest response also carries `raw_stock`).
+- Live, in Chrome against a scratch database, the generated Ø40/Ø30/Ø20 × 120 mm
+  stepped shaft: bar proposed Ø45 × 127 mm; turning 0.34 / 1.04 / 1.01 min from the
+  bar (the Ø20 step was 0.23 min on the fixed allowance); four faces suggested as
+  facing; route confirmed CNC turning with nothing left out of it; bar confirmed and
+  costed — 10 off, ₹1,242.02, material ₹12.68 = 1.5856 kg × 10 × ₹0.80/kg, and the
+  result read "0.6715 kg per part · material costed from the bar: 1.5856 kg per part".
+  Entering Ø50 was recorded as the engineer's bar with the proposal beside it and the
+  stale-times warning; Ø30 was refused as smaller than the part. Screenshots could not
+  be captured in this session (Chrome's capture timed out repeatedly while the test
+  suite was running); these results were read from the page itself.
+
+**Fix: a casting route changed nothing in the plan, and two records misreported**
+(reported by the user — "even if I select casting the operations don't change" —
+followed by a review of every change since the Iteration 2 commit).
+- **Casting/forging followed by machining now leaves the blank's blends as formed.**
+  The route filter only compared processes, and milling and drilling are both in
+  that route, so `model1_1.stp` under *Casting followed by CNC machining* kept all 31
+  operations, 11 of them fillet millings — exactly the "discard many irrelevant
+  machining items by hand" the client warned about. The classification now reports
+  `as_formed_feature_types` (fillets and chamfers) and `as_formed_label` ("As cast" /
+  "As forged") for a *decided* route that starts by casting or forging and then
+  machines; `ManufacturingPlan.as_formed_feature_types` carries it (`None` on every
+  other route, the old behaviour), and a row's own `user_machined` overrides it either
+  way. Faces, holes, pockets and cylinders stay machined by default — the geometry
+  cannot tell a machined datum from an as-cast wall. The plan shows an **"As cast —
+  not machined"** group with *Machine it* on each row and an *As cast* button on the
+  machined rows; the stage strip says how many features the blank leaves unmachined.
+  `/cost/cad-part` sets the default from the classification, and the plan snapshot
+  records `as_formed_operation_ids`. Measured: 11 fillets as cast, 20 operations
+  machined.
+- **Feedback said "costed" for operations the plan did not cost.** `operation_feedback`
+  recorded `costed = operation.costable`, but the route (and now the as-formed
+  default) lives on the plan, so every operation moved to *Not in this route* was
+  recorded as costed — and the analytics count those as accepted. On `model1_1.stp`
+  under Turning + drilling it recorded 31 costed where 6 were. There is now one test,
+  `ManufacturingPlan.counts_toward_cost`, read by `to_operation_requirements`, the time
+  summary and the feedback record alike.
+- **The bar's mass was shown as the part's.** With material costed from a bar, the
+  assumptions panel and the quotation took "Mass" from the material line — the bar —
+  and printed it in the CAD section beside the finished volume and as "kg per part".
+  `EstimateAssumptions` (and the quotation's provenance) now keep `mass_kg` as the
+  finished part's own mass and carry `material_basis`, `stock_description` ("round
+  bar Ø35 × 77 mm") and `stock_mass_kg` beside it; the comparison lists a switch to
+  bar stock as a material input, and does not report the part's mass as changed.
+- 15 more tests (full run: **1974 passed, 1 skipped**, 1975 collected) — as-formed defaults and overrides, feedback costing, the mass
+  separation in the assumptions, the quotation and the comparison).
+- Live, in Chrome against a scratch database: `model1_1.stp` overridden to Casting
+  followed by CNC machining — the band read "As cast — not machined — 11 operations",
+  the strip "Casting … leaves 11 features unmachined below", 20 operations remained to
+  machine; *Machine it* on FIL-001 brought it back and *As cast* on a face moved it
+  into the group.
+
 **Limitations.**
+- As-formed defaults are by feature type only (fillets, chamfers). Which faces of a
+  casting are machined is a drawing and tolerance question the model cannot answer;
+  the engineer moves faces individually. Rows left as formed still offer *Use
+  estimate*, which records an acceptance but costs nothing while they stay there.
+- Turned parts: the bar rule's allowances are illustrative; tube stock, hexagon bar
+  and standard bar-size tables are not modelled; parting off, grooves, threads,
+  knurls, boring and second-operation (flip) setups are not recognized or timed;
+  a face with a bore through it is faced as if solid; cross holes stay declined (the
+  recognizer reports them ambiguous). Tolerances and finishes — which the client
+  stressed come from the drawing — are not read or entered yet.
 - Shape does not determine process, and this layer says so rather than solving it.
   The thresholds behind the two geometric signals are stated constants, not measured
   against a population of real parts. `model1_1.stp` (an 8 mm bracket) is classified
   machining because its wall holds 72% of the planar area against the 75% threshold;
   if it is in fact a bent plate, the engineer has to say so.
 - No cost model exists for any stage but milling, drilling and turning. This iteration
-  refuses those routes; it does not price them.
+  refuses those routes; it does not price them. *(Superseded by Iteration 3: a decided
+  route's other stages are now priced from the rate set's stage rates.)*
 - Assembly components are not classified. `/cad/assembly/plans` and `/cost/assembly`
   are unchanged.
-- The plan's operations are not adjusted to match a confirmed route; disagreements are
-  recorded only.
+- The step rule is applied literally, which produces one sequence no machinist would
+  use: Ø16 is just over 2.5× the 6 mm pilot, so it becomes 6 → 15 → 16, a 1 mm last
+  step. Intermediate sizes are not rounded to stock drills (Ø40 gets a 37.5 mm drill).
+  Drill changes are not timed, and every pass is assumed to run the full depth at the
+  same speed and feed. These are for the shop to correct, not the rule to hide.
+- A decided route regroups the plan but never creates operations: a stage the
+  suggestions produced nothing for (turning chosen for a part with no external
+  cylinder) is shown empty, to be filled with *+ Add operation*. Non-machining stages
+  are lines in the route strip, never plan operations.
 - A hole the suggestions decline (for example a cross hole opening onto a cylinder,
   which the recognizer reports as ambiguous) is named in the evidence but not added to
   the route.
 - STL is refused here as it is for feature recognition (400).
+
+### Iteration 1 — actual costs recorded against estimates, with variance
+
+**What was built.** `POST` and `GET /estimates/{estimate_id}/actuals`; a pure module
+`cost_actuals.py` (input validation, the estimate-figures carrier, `compute_variance`)
+that imports only `money`; `CostActualRepository` with `record`, `get` and
+`for_estimate` and no update or delete; migration `0006_add_cost_actuals` (one new
+table, nothing else touched); and an *Actual cost (client data)* panel in the History
+detail (`static/actuals.js`, loaded after `app.js`) that lists every record with its
+variance, records a new one and starts a correction from an existing one.
+
+**Decisions, as agreed:**
+- Total required; material, machining and additional optional; absent means
+  `not_supplied`, never zero.
+- `cost_basis` is `per_unit` or `per_batch` with no default; `batch_quantity` is
+  required for `per_batch`. Normalisation to per unit happens only from those stated
+  values.
+- Linked to an existing estimate. Optional `client_part_number` and
+  `drawing_revision` are plain columns on the record, stored as entered and not
+  matched against anything.
+- Immutable; a correction names the record it supersedes. `supersedes_actual_id` is
+  unique, so a record is corrected once (a second attempt is `409`).
+- Currency mismatch refused (`422`), never converted.
+
+**What the variance compares.** Per unit, `estimate - actual`, percentage relative to
+the actual and omitted when the actual is zero. Material vs the estimate's material
+cost, machining vs its operation cost (machine + labour + setup), additional vs
+overhead + scrap + tooling. The part of the actual total that no supplied category
+covers is reported as *unattributed*, not assigned. A batch size different from the
+estimate's, or not stated, is a warning and is not adjusted for.
+
+An **assembly** is compared on its total only: its material/operation/additional
+figures cover manufactured components alone. An assembly estimate's row stores
+`0.0` where the roll-up had no total, so the comparison reads the snapshot's
+`is_complete`, `is_aggregatable` and `production_total_cost`, and an incomplete or
+mixed-currency assembly reports the variance `unavailable` with the reason.
+
+**Tests.** Baseline 1760 passed, 1 skipped (1761 collected). Final full run: **1802 passed, 1 skipped** (1803 collected, 537 s):
+41 new in `tests/test_cost_actuals.py`, plus the existing no-destructive-operations
+check, which is parametrised per migration file and now also covers `0006`.
+`tests/test_migrations.py`'s head constant moved to `0006`. The first full run had
+**2 failures** in `tests/test_money.py`: its fixture rebuilds a revision-`0001`
+database from today's models and must drop every table a later revision adds, as it
+already did for `quotations`; it now drops `cost_actuals` too. One new structural test
+initially failed because it grepped for the module name and matched the identically
+named table in the ORM model and the migration; it now parses imports with `ast`. The
+no-arithmetic regexes for `actuals.js` were checked against three deliberately
+arithmetic lines to confirm they can fail.
+
+**Migration verified against a copy of the real database.** The real
+`cad_costing_agent.db` was copied through a read-only SQLite backup and the copy
+migrated: path `upgraded`, Alembic `0005 -> 0006`; `estimates` (137), `rate_sets` (8),
+`time_profiles` (7) and `quotations` (3) identical by content hash before and after;
+`cost_actuals` added empty; `PRAGMA integrity_check` ok. The original file's SHA-256
+was unchanged afterwards. **The real database itself has not been migrated** — that
+happens the next time the app starts against it.
+
+**Live verification** (scratch database, port 8711). `model1_1.stp`, 10 off,
+`poc-default`, milling 10 min setup + 6 min cycle and drilling 3 min: estimate
+₹3,163.86, ₹316.39 per unit. A per-batch actual of ₹3,400 for 10 with material ₹600
+and machining ₹2,500 gave total -23.61 (-6.95%), material -58.61 (-97.69%), machining
++65.00 (+26.00%), additional *not supplied*, ₹30.00 unattributed. A correction to
+₹3,450 left the original listed and marked superseded; a total-only per-unit actual
+warned that its batch size was not stated. Refused as specified: USD (422), per-batch
+without a quantity (422), breakdown above the total (422), no basis (422), correcting
+the same record twice (409). `GET /estimates/{id}` was identical before and after. The
+`pump_assembly` fixture costed without plans was `is_complete: false`, and its actual
+came back `unavailable / assembly_incomplete`.
+
+The History panel was driven in headless Chrome over the DevTools protocol and
+inspected from screenshots: records listed with the superseded one dimmed, a new
+record posted from the form, the per-batch refusal shown in the page, and a
+correction prefilled with its banner. The first screenshots showed two defects that
+were fixed before finishing: the shared `table.mini th { width: 40% }` crushed a
+per-row note column so a *not supplied* row was about 150 px tall (notes moved under
+the table, column widths scoped to the new table), and a previous error stayed
+visible when a correction started.
+
+The material line of -97.69% is the seeded ₹0.80/kg steel price showing through, not
+a fault of the comparison. It is the kind of gap this feature exists to expose.
+
+**Limitations.**
+- One actual is compared with one estimate. There is no report across many parts yet.
+- The categories map onto this application's cost structure. A client whose
+  "machining" excludes labour, or whose overhead sits inside machine rates, will see
+  variance that comes from the mapping, and nothing here can detect that.
+- No adjustment for batch size, and no import of actuals from a file — each is typed in.
+- `cost_date` is optional, so records can always be ordered by when they were
+  recorded here, but not necessarily by when the cost was incurred.
+- Pydantic's validation messages reach the page with their `Value error, ` prefix.
 
 ### Step 30 — closing the feedback data gaps, and measuring which could not be closed
 
@@ -1694,6 +2053,10 @@ above, and nothing below depends on the actual-cost work).
 - Sequence *consequences*. Both levels of order are recorded and editable, and a comparison now says explicitly that reordering costs nothing, but nothing is sequence-dependent: no routing optimisation, no alternative routes, no enforced precedence, and no automatic setup generation. Setup *membership* changes cost; setup *order* does not
 - Currency conversion. Two estimates in different currencies are compared on their inputs only; their money is never converted or subtracted
 - Aggregate reporting across estimates. A single pair can be compared and explained; nothing rolls many estimates up into a trend
+- A validation report across many historical parts. Iteration 1 compares one actual with one estimate; nothing aggregates the variances
+- Importing actual costs from a file. Each is entered through the History panel or the API
+- Adjusting a variance for a difference in batch size. It is reported as a warning only
+- Matching an actual's client part number or drawing revision to anything. They are stored as entered
 - Fixture recognition. The system cannot tell from geometry whether two operations can share a fixturing; it groups conservatively, says so at low confidence, and leaves the decision to the engineer
 - A training pipeline. Step 20 *persists* the prediction/decision pairs an eventual learning loop would need, but nothing reads them back, aggregates them, or learns from them
 - Face-level highlighting in the 3D viewer. A selected feature is marked with a point and its axis; lighting up its exact faces needs a per-face id the wire mesh does not carry
@@ -1717,36 +2080,22 @@ above, and nothing below depends on the actual-cost work).
 
 ## Next step
 
-Step 30's honest result is that the dataset was in better shape than Step 29's
-report suggested, and that the one place it was genuinely leaking has been
-plugged. Where a value can exist, it is now captured at 100% — component
-identity, paired times, rule ids, evidence types and profile versions all read
-complete against the records that can carry them. The single remaining gap is
-712 historical feature confidences that nothing can bring back, and every future
-estimate records its own.
+The roadmap agreed at Iteration 0, in order: (2) a raw-stock material basis, since
+material is costed from finished mass today and the first live comparison showed
+material at -97.69%; (3) bulk import of a client's rates; (4) per-piece and per-kg
+pricing for outsourced processes; (5) confirming cost-model assumptions with the
+client (labour during setup, linear scrap); (6) a validation report across many
+parts; (7) housekeeping, including the stale assembly capability text in
+`cad_import` that still says make/buy classification is unimplemented.
 
-Candidates for Step 31:
+Iteration 2 (manufacturing family and route classification) was taken ahead of these
+at the user's request. Since then: (2) is done for **turned parts** (bar stock, a
+follow-up to Iteration 2) but not for milled or sheet parts; (4) is done by Iteration 3
+(stage rates per kg / per piece / per batch). Still open: raw stock for prismatic and
+sheet parts (plate/block stock, sheet blank and nesting); (3) bulk import of a client's
+rates; (5) the cost-model assumptions; (6) the multi-part validation report; (7)
+housekeeping, now also the *Assumptions* panel's material line on a stage-supplied
+route and the quotation's ₹0.02 per-operation rounding remainder.
 
-1. **Quotation revisions as a chain.** A quotation names its previous estimate and
-   the change, but a revised quotation of the same subject is currently just
-   another number. Linking a revision chain would let a customer see Rev A against
-   Rev B, and the comparison layer already computes the difference. The largest
-   remaining piece of customer-facing work.
-2. **The operations table's own layout.** Measured in Step 28 and still true: 600 px
-   wide in a 487 px card even for a single part, so the page scrolls sideways by
-   about 105 px. Pre-existing since Step 21, unrelated to any later step, and the
-   most visible rough edge left in the interface. Steps 26, 28 and 29 all
-   established the fix — wide content on its own full-width sub-row.
-3. **Waiting.** With 4 operation corrections and 19 time corrections across 128
-   estimates, the dataset is complete but small. Nothing further can honestly be
-   concluded from it until a shop reviews substantially more work, and the
-   analytics layer's job until then is to keep saying exactly that.
-
-Recommendation: **(1)**, with **(2)** alongside it. Learning remains explicitly
-out of scope: Step 30 improved the evidence's *quality*, not its *quantity*, and
-the sample-size safeguards exist precisely so that better evidence is not mistaken
-for enough of it.
-
-Iteration 2 (manufacturing family and route classification) has since been built at
-the user's request. The user has said the next iteration addresses costing-model
-improvements based on client inputs and confirmed routes.
+Each needs the user's go-ahead. Prismatic stock needs the client's convention for
+stock size and allowance before anything is built.

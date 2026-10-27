@@ -292,7 +292,9 @@ function renderReadiness(readiness) {
     <p class="provenance">${escapeHtml(readiness.note)}</p>`;
 }
 
-function renderOperations(body) {
+// Named apart from setup.js's renderOperations: every classic script shares one
+// global scope, and the later declaration silently replaced the rate-set editor's.
+function renderOperationAnalytics(body) {
   const cells = body.confusion || [];
   return `
     ${renderDisclaimer(body)}
@@ -559,7 +561,7 @@ async function drillInto(system, user) {
 const FEEDBACK_RENDERERS = {
   summary: renderSummary,
   evidence: renderEvidence,
-  operations: renderOperations,
+  operations: renderOperationAnalytics,
   times: renderTimes,
   setups: renderSetups,
   classifications: renderClassifications,

@@ -538,7 +538,7 @@ function renderComponentPlanDetail(definitionId) {
                     operation.user_cycle_time !== undefined
                       ? `${number(operation.user_cycle_time, 2)} min (you entered it)`
                       : operation.system_time_accepted
-                      ? `${number(operation.system_suggested_cycle_time, 2)} min (system estimate, accepted)`
+                      ? `${number(finalCycle(operation), 2)} min (system estimate, accepted)`
                       : "no committed cycle time"
                   }${
                     operation.feature_ids.length

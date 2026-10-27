@@ -71,6 +71,7 @@ from enum import Enum
 
 from pydantic import BaseModel, ConfigDict, Field, computed_field
 
+from cad_costing_agent.features.rotational import rotational_form
 from cad_costing_agent.features.model import (
     Confidence,
     Feature,
@@ -113,10 +114,10 @@ FAMILY_LABELS = {
     ManufacturingFamily.UNKNOWN: "Unknown — insufficient evidence",
 }
 
-# Stage id → (label, the existing process type that prices it, or None).
-# Only the three process types the existing costing and time estimation know
-# carry a cost model; every other stage is named so it can be chosen and
-# recorded, and is reported as not costable rather than priced as machining.
+# Stage id → (label, the machining process type that prices it, or None).
+# Only the three process types the time estimation knows are priced by the
+# hour; every other stage is priced from the rate set's stage rates
+# (`stage_costing`) once the route is decided, never as machining.
 STAGES: dict[str, tuple[str, str | None]] = {
     "turning": ("CNC turning", TURNING),
     "milling": ("CNC milling", MILLING),
@@ -196,6 +197,16 @@ UNKNOWN_ROUTE_ID = "unknown"
 
 # Families nothing in this application can find evidence for, and why. Listed
 # on every classification so their absence is explained, never implied.
+# Stages that make a near-net-shape blank, and how the plan names what such a
+# blank leaves unmachined.
+NEAR_NET_SHAPE_STAGES = {"casting": "As cast", "forging": "As forged"}
+
+# What a cast or forged blank leaves as formed by default: blends, which the
+# mould or die produces. Everything else stays machined until the engineer says
+# otherwise — a planar face may be a machined datum or an as-cast wall, and the
+# geometry does not say which.
+AS_FORMED_FEATURE_TYPES = ("fillet", "chamfer")
+
 NOT_ASSESSED = (
     "Casting, forging and moulding are not assessed: no recognizer here detects draft angles, "
     "parting lines or near-net-shape surfaces, so geometry never proposes them. Choose one if "
@@ -265,7 +276,11 @@ class RouteStage(BaseModel):
         ),
     )
     cost_model_available: bool = Field(
-        description="Whether the existing costing can price this stage. False is never priced."
+        description=(
+            "Whether a machining cost model (hourly rates and an estimated time) prices this "
+            "stage. A stage without one is priced from the rate set's stage rates once the "
+            "route is decided, or not at all."
+        )
     )
     basis: list[str] = Field(
         default_factory=list,
@@ -374,53 +389,122 @@ class ProcessClassification(BaseModel):
 
     @computed_field
     @property
-    def unsupported_stages(self) -> list[str]:
+    def plan_processes(self) -> list[str] | None:
+        """The process types the manufacturing plan should cost, once someone has decided.
+
+        None while the recommendation is unreviewed, so a plan behaves exactly as
+        before until the engineer answers. An empty list when the decided route
+        has no machining stage (sheet, purchased, cast as-is) or was marked
+        unknown — nothing in the plan then belongs to the route.
+        """
+        if self.decision_status in ("awaiting_review", "insufficient_evidence"):
+            return None
         route = self.route
         if route is None:
             return []
-        return [stage.label for stage in route.stages if not stage.cost_model_available]
+        processes: list[str] = []
+        for stage in route.stages:
+            if stage.process_type and stage.process_type not in processes:
+                processes.append(stage.process_type)
+        return processes
+
+    @computed_field
+    @property
+    def as_formed_feature_types(self) -> list[str] | None:
+        """Feature types a near-net-shape blank leaves unmachined by default, once decided.
+
+        Only for a decided route that starts by casting or forging and then
+        machines: the blank's blends come from the mould or die, so they are
+        not cut. Faces, holes, pockets and cylinders stay machined by default,
+        because the geometry cannot tell a mating face from an as-cast one —
+        the engineer moves any of them either way. None otherwise.
+        """
+        if self.decision_status not in ("confirmed", "overridden"):
+            return None
+        route = self.route
+        if route is None or not route.stages or route.stages[0].stage not in NEAR_NET_SHAPE_STAGES:
+            return None
+        if not any(stage.process_type for stage in route.stages):
+            return None  # nothing is machined at all: the route alone leaves it out
+        return list(AS_FORMED_FEATURE_TYPES)
+
+    @computed_field
+    @property
+    def as_formed_label(self) -> str | None:
+        """'As cast' or 'As forged' — how the plan names what it leaves unmachined."""
+        if self.as_formed_feature_types is None:
+            return None
+        return NEAR_NET_SHAPE_STAGES[self.route.stages[0].stage]
+
+    @computed_field
+    @property
+    def stage_rate_stages(self) -> list[str]:
+        """Labels of the stages no machining model prices, read from the catalog by id.
+
+        These are priced from the rate set's stage rates at costing time. The
+        catalog, not the payload, says which they are, so a browser cannot
+        declare a stage machined.
+        """
+        route = self.route
+        if route is None:
+            return []
+        return [
+            stage.label
+            for stage in route.stages
+            if stage.stage not in STAGES or STAGES[stage.stage][1] is None
+        ]
 
     @computed_field
     @property
     def costing_status(self) -> str:
-        """`machining_supported`, `cost_model_not_available`, `route_unknown` or `route_not_established`."""
+        """`machining_supported`, `stage_rates_required`, `route_unknown` or `route_not_established`."""
         route = self.route
         if route is None or route.family is ManufacturingFamily.UNKNOWN or not route.stages:
             if self.decision_status == "marked_unknown":
                 return "route_unknown"
             return "route_not_established"
-        if self.unsupported_stages:
-            return "cost_model_not_available"
+        if self.stage_rate_stages:
+            return "stage_rates_required"
         return "machining_supported"
 
     @computed_field
     @property
     def blocks_costing(self) -> bool:
-        return self.costing_status in ("cost_model_not_available", "route_unknown")
+        """A route marked unknown, or stage rates on a recommendation nobody reviewed.
+
+        A decided route with non-machining stages is not blocked here: whether it
+        can be priced depends on the rate set and the inputs, and is checked when
+        it is costed.
+        """
+        if self.costing_status == "route_unknown":
+            return True
+        return (
+            self.costing_status == "stage_rates_required"
+            and self.decision_status == "awaiting_review"
+        )
 
     @computed_field
     @property
     def costing_note(self) -> str:
         status = self.costing_status
         route = self.route
-        if status == "cost_model_not_available":
+        if status == "stage_rates_required":
             assert route is not None
-            stages = ", ".join(self.unsupported_stages)
+            stages = ", ".join(self.stage_rate_stages)
             lead = (
-                f"The route '{route.label}' includes {stages}, which this application has no cost "
-                "model for."
+                f"The route '{route.label}' includes {stages}, which no machining time model "
+                "prices; they are priced from the rate set's stage rates."
             )
             if self.decision_status == "awaiting_review":
                 return (
                     f"{lead} This is the system's recommendation and has not been reviewed: "
                     "confirm it, or override it with the route the part is actually made by. No "
-                    "estimate is produced for a route that cannot be priced — pricing only the "
-                    "machined stages would present part of the cost as all of it."
+                    "estimate is produced from stage rates for a route nobody has confirmed."
                 )
             return (
-                f"{lead} No estimate is produced: costing it needs a cost model and inputs for "
-                "those stages, and pricing only the stages that can be priced would present part "
-                "of the cost as all of it."
+                f"{lead} The estimate needs a rate for each of them in the selected rate set, and "
+                "for a rate per kg the mass it is charged on. If any is missing no estimate is "
+                "produced — pricing only some stages would present part of the cost as all of it."
             )
         if status == "route_unknown":
             return (
@@ -532,55 +616,11 @@ def _ids(features: Iterable[Feature]) -> str:
 def _rotational_form(features: list[Feature]) -> tuple[bool | None, str]:
     """Every external cylinder on one axis, and every planar face perpendicular to it.
 
-    That is what a body of revolution looks like through these recognizers:
-    cylinders about the turning axis, and shoulders and end faces square to it.
-    A boss on a plate fails on the plate's side faces; a turned shaft with a
-    milled flat fails on the flat. Off-axis holes are allowed — cross and
-    bolt-circle holes are secondary drilling on a turned part.
+    The test itself lives in `features.rotational`, shared with the operation
+    suggestions and the bar-stock proposal so the three cannot disagree.
     """
-    shafts = [
-        f
-        for f in features
-        if f.feature_type is FeatureType.CYLINDER
-        and f.subtype == "shaft"
-        and f.axis is not None
-        and f.location is not None
-    ]
-    if not shafts:
-        return None, "no external cylindrical surface was recognized, so no turning axis exists to test"
-
-    reference = shafts[0]
-    for shaft in shafts[1:]:
-        if not _parallel(shaft.axis, reference.axis) or (
-            _distance_to_line(shaft.location, reference.location, reference.axis)
-            > AXIS_OFFSET_TOLERANCE_MM
-        ):
-            return False, (
-                f"external cylinders {reference.feature_id} and {shaft.feature_id} do not share "
-                "one axis, so the part is not a single body of revolution"
-            )
-
-    pockets = [f for f in features if f.feature_type in (FeatureType.POCKET, FeatureType.SLOT)]
-    if pockets:
-        return False, (
-            f"pocket/slot feature(s) {_ids(pockets)} are not surfaces of revolution about the "
-            "cylinder axis"
-        )
-
-    planes = [f for f in features if f.feature_type is FeatureType.PLANE and f.axis is not None]
-    off_axis = [p for p in planes if not _parallel(p.axis, reference.axis)]
-    if off_axis:
-        shown = _ids(off_axis[:6]) + (" …" if len(off_axis) > 6 else "")
-        return False, (
-            f"{len(off_axis)} planar face(s) ({shown}) are not perpendicular to the axis of "
-            f"{reference.feature_id}, which a body of revolution does not have"
-        )
-
-    return True, (
-        f"{len(shafts)} external cylinder(s) ({_ids(shafts)}) share one axis within "
-        f"{AXIS_OFFSET_TOLERANCE_MM} mm, and all {len(planes)} planar face(s) are perpendicular "
-        "to it"
-    )
+    form = rotational_form(features)
+    return form.observed, form.detail
 
 
 def _constant_thickness(

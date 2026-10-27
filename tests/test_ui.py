@@ -495,6 +495,25 @@ def test_the_roll_up_total_says_which_basis_it_is_on():
     assert "production_total_cost" in assembly_js
 
 
+def test_no_two_classic_scripts_declare_the_same_global_function():
+    """Every classic script shares one global scope, so a later declaration of
+    the same name silently replaces the earlier one. That is how feedback.js's
+    renderOperations replaced the rate-set editor's, and opening the editor
+    threw before its processes table was drawn."""
+    markup = (STATIC_PATH / "index.html").read_text(encoding="utf-8")
+    scripts = re.findall(r'<script src="([a-z]+\.js)"></script>', markup)
+    assert "setup.js" in scripts and "feedback.js" in scripts
+    declared: dict[str, str] = {}
+    duplicates = []
+    for script in scripts:
+        source = (STATIC_PATH / script).read_text(encoding="utf-8")
+        for name in re.findall(r"^(?:async )?function ([A-Za-z_$][\w$]*)", source, re.MULTILINE):
+            if name in declared:
+                duplicates.append(f"{name}: {declared[name]} and {script}")
+            declared[name] = script
+    assert duplicates == []
+
+
 def test_ui_contains_no_costing_arithmetic():
     """Costing stays in the backend; the page only formats what it is given."""
     app_js = (STATIC_PATH / "app.js").read_text(encoding="utf-8")

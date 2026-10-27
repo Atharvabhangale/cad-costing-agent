@@ -38,6 +38,7 @@ from cad_costing_agent.costing import MaterialCostResult, calculate_material_cos
 from cad_costing_agent.operation import ManufacturingOperation
 from cad_costing_agent.operation_costing import OperationCostResult, calculate_operation_cost
 from cad_costing_agent.money import DEFAULT_CURRENCY, Money
+from cad_costing_agent.stage_costing import StageCostLine
 from cad_costing_agent.part import Part
 from cad_costing_agent.rate_sets import (
     PRECEDENCE_RULE,
@@ -50,6 +51,10 @@ from cad_costing_agent.rate_sets import (
 
 TOTAL_PART_COST_FORMULA = (
     "total_part_cost = total_material_cost + total_operation_cost + total_additional_cost"
+)
+TOTAL_PART_COST_WITH_STAGES_FORMULA = (
+    "total_part_cost = total_material_cost + total_operation_cost + total_stage_cost "
+    "+ total_additional_cost"
 )
 PER_UNIT_COST_FORMULA = "per_unit_cost = total_part_cost / part.quantity"
 QUANTITY_ASSUMPTION = (
@@ -80,6 +85,20 @@ class PartCostEstimateRequest(BaseModel):
     rate_set_id: str | None = None
     rate_set_version: str | None = Field(
         default=None, description="Exact version to pin. Omit to use the latest version of the id."
+    )
+    stage_costs: list[StageCostLine] = Field(
+        default_factory=list,
+        description=(
+            "Non-machining route stages already priced by `stage_costing.price_stages`, each "
+            "a batch total. Added to the direct cost base as they are."
+        ),
+    )
+    material_supplied_by: str | None = Field(
+        default=None,
+        description=(
+            "The stage whose rate includes the material, when the route starts with one. The "
+            "material line is then not charged on top of it."
+        ),
     )
 
 
@@ -114,6 +133,19 @@ class PartCostEstimateResult(BaseModel):
     per_unit_formula: str
     quantity_assumption: str
     rate_precedence: str
+    # Non-machining route stages. Empty, zero and charged unless a decided
+    # route has such a stage, so an estimate without one reads as it always did.
+    stage_costs: list[StageCostLine] = Field(default_factory=list)
+    total_stage_cost: Money = 0.0
+    material_charged: bool = Field(
+        default=True,
+        description=(
+            "False when the route's first stage supplies the material. `material` still "
+            "shows what the finished part's material would cost, for reference; it is not "
+            "in the total."
+        ),
+    )
+    material_note: str = ""
 
 
 def _validate_rate_set_selection(
@@ -180,10 +212,12 @@ def calculate_part_cost(
             )
         operation_results.append(calculate_operation_cost(operation))
 
-    total_material_cost = material_result.total_material_cost
+    material_charged = request.material_supplied_by is None
+    total_material_cost = material_result.total_material_cost if material_charged else 0.0
     total_operation_cost = sum(result.total_operation_cost for result in operation_results)
+    total_stage_cost = sum(line.total_cost for line in request.stage_costs)
 
-    direct_cost_base = total_material_cost + total_operation_cost
+    direct_cost_base = total_material_cost + total_operation_cost + total_stage_cost
 
     # Explicit additional costs replace the rate set's wholesale; omitting them
     # falls back to the rate set, and with no rate set to zero as before.
@@ -216,7 +250,18 @@ def calculate_part_cost(
         total_part_cost=total_part_cost,
         per_unit_cost=per_unit_cost,
         currency=rate_set.currency if rate_set is not None else DEFAULT_CURRENCY,
-        formula=TOTAL_PART_COST_FORMULA,
+        formula=TOTAL_PART_COST_WITH_STAGES_FORMULA if request.stage_costs else TOTAL_PART_COST_FORMULA,
+        stage_costs=request.stage_costs,
+        total_stage_cost=total_stage_cost,
+        material_charged=material_charged,
+        material_note=(
+            ""
+            if material_charged
+            else (
+                f"Not charged separately: the {request.material_supplied_by} rate includes the "
+                "material. The material figures shown are the finished part's, for reference."
+            )
+        ),
         per_unit_formula=PER_UNIT_COST_FORMULA,
         quantity_assumption=QUANTITY_ASSUMPTION,
         rate_precedence=PRECEDENCE_RULE,

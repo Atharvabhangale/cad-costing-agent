@@ -271,6 +271,28 @@
           </details>
         </div>
 
+        <!-- The bar a turned part is cut from: proposed from the geometry, used for
+             material cost only once confirmed. Filled by stock.js. -->
+        <div class="card hidden" id="stock-card">
+          <div class="panel-head">
+            <h2>Raw material <span class="muted">— bar stock for a turned part</span></h2>
+          </div>
+          <div id="stock-summary"></div>
+          <div class="grid2">
+            <label>Bar diameter (mm) <input id="stock-diameter" type="number" min="0" step="any"></label>
+            <label>Bar length (mm) <input id="stock-length" type="number" min="0" step="any"></label>
+          </div>
+          <div class="viewer-tools">
+            <button type="button" id="stock-confirm" class="secondary tiny">Confirm proposed bar</button>
+            <button type="button" id="stock-use" class="secondary tiny">Use this size</button>
+            <button type="button" id="stock-withdraw" class="secondary tiny">Back to finished-part material</button>
+          </div>
+          <details class="detail-toggle" id="stock-basis-toggle">
+            <summary>How the bar was sized</summary>
+            <div id="stock-basis"></div>
+          </details>
+        </div>
+
         <div class="card">
           <div class="panel-head">
             <h2>Manufacturing plan</h2>
@@ -293,6 +315,8 @@
                named when an assembly component's plan has been opened here, so
                an edit is never made to the wrong component's routing. -->
           <div id="plan-scope" class="plan-scope hidden"></div>
+          <!-- The chosen route's stages, drawn by plan.js once a route is decided. -->
+          <div id="plan-route" class="plan-scope hidden"></div>
           <div id="plan-impact" class="plan-impact hidden"></div>
           <div class="table-scroll">
             <table id="ops-table" class="ops plan">
@@ -395,6 +419,8 @@
                 <tbody>
                   <tr><th>Material</th><td id="r-material"></td></tr>
                   <tr><th>Operations</th><td id="r-ops"></td></tr>
+                  <tr id="r-stages-row" class="hidden"><th>Route stages</th><td id="r-stages"></td></tr>
+                  <tr id="r-stage-detail-row" class="hidden"><td colspan="2" class="hint" id="r-stage-detail"></td></tr>
                   <tr class="subtotal"><th>Direct cost</th><td id="r-direct"></td></tr>
                   <tr><th>Overhead</th><td id="r-overhead"></td></tr>
                   <tr><th>Scrap allowance</th><td id="r-scrap"></td></tr>
@@ -672,6 +698,25 @@
         <tbody id="operations-body"></tbody>
       </table>
       <button type="button" id="add-process" class="secondary">+ Add process</button>
+      <p class="hint">
+        <strong>Route stages</strong> that are not priced by the hour — casting, forging, sheet
+        cutting, finishing, a bought-out part. Enter the rate as your supplier or shop quotes it:
+        per kg (charged on a mass entered with each estimate) or per piece, and/or a one-off
+        charge per batch such as a pattern or die. A casting, forging, moulding, additive or
+        purchase rate is taken to include the material, which is then not charged again.
+      </p>
+      <table class="editor-table">
+        <thead><tr>
+          <th>Stage</th>
+          <th>Basis</th>
+          <th>Unit rate (<span class="cur-symbol">₹</span>)</th>
+          <th>Batch charge (<span class="cur-symbol">₹</span>)</th>
+          <th>Note / source</th>
+          <th></th>
+        </tr></thead>
+        <tbody id="stage-rates-body"></tbody>
+      </table>
+      <button type="button" class="secondary" id="add-stage-rate">+ Add stage rate</button>
     </div>
 
     <div class="card wpane hidden" id="wpane-additional">
@@ -767,7 +812,14 @@
           <label>Approach (mm) <input id="t-drill-approach" data-param="drilling_approach_mm" type="number" step="any"></label>
           <label>Breakthrough (mm) <input id="t-drill-break" data-param="drilling_breakthrough_mm" type="number" step="any"></label>
           <label>Setup (min) <input id="t-drill-setup" data-param="drilling_setup_minutes" type="number" step="any"></label>
+          <label>Step holes above (mm) <input id="t-drill-pilot-threshold" data-param="drilling_pilot_threshold_mm" type="number" step="any"></label>
+          <label>Pilot drill (mm) <input id="t-drill-pilot" data-param="drilling_pilot_diameter_mm" type="number" step="any"></label>
+          <label>Max step ratio <input id="t-drill-step-ratio" data-param="drilling_max_step_ratio" type="number" step="any"></label>
         </div>
+        <p class="hint">A hole larger than the threshold is drilled smallest first: the pilot, then
+          drills each at most the ratio times the previous, then the hole's own size — with the
+          defaults, Ø20 is drilled 6 → 15 → 20. Illustrative values from common practice; no
+          standard prescribes them.</p>
       </div>
       <div class="card">
         <h3>Milling — facing, pockets, slots, blends</h3>
@@ -790,6 +842,7 @@
           <label>Depth of cut (mm) <input id="t-turn-doc" data-param="turning_depth_of_cut_mm" type="number" step="any"></label>
           <label>Radial stock allowance (mm) <input id="t-turn-stock" data-param="turning_stock_allowance_mm" type="number" step="any"></label>
           <label>Approach (mm) <input id="t-turn-approach" data-param="turning_approach_mm" type="number" step="any"></label>
+          <label>Facing allowance (mm) <input id="t-turn-facing" data-param="turning_facing_allowance_mm" type="number" step="any"></label>
           <label>Setup (min) <input id="t-turn-setup" data-param="turning_setup_minutes" type="number" step="any"></label>
         </div>
       </div>
@@ -888,11 +941,13 @@
 <script src="suggestions.js"></script>
 <script src="plan.js"></script>
 <script src="process.js"></script>
+<script src="stock.js"></script>
 <script src="setup.js"></script>
 <script src="timesetup.js"></script>
 <script src="impact.js"></script>
 <script src="assembly.js"></script>
 <script src="feedback.js"></script>
+<script src="actuals.js"></script>
 <script src="estimateflow.js"></script>
 <script type="module" src="viewer.js"></script>
 </body>

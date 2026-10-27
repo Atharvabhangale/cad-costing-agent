@@ -27,7 +27,7 @@ from cad_costing_agent.time_profiles import SEED_TIME_PROFILES
 SEEDED_VERSIONS = len(SEED_RATE_SETS) + len(SEED_TIME_PROFILES)
 from cad_costing_agent.repository import EstimateRepository, RateSetRepository
 
-HEAD_REVISION = "0005"
+HEAD_REVISION = "0006"
 
 
 def _engine(path=None):
@@ -112,6 +112,7 @@ def test_upgrade_head_on_a_fresh_database_creates_the_schema():
         "estimates",
         "time_profiles",
         "quotations",
+        "cost_actuals",
         ALEMBIC_VERSION_TABLE,
     } <= tables
     assert _stamped_revision(engine) == HEAD_REVISION

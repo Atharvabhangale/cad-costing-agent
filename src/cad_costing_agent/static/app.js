@@ -34,6 +34,7 @@ const state = {
   timeProfile: null, // the full selected time profile — machining assumptions, no money
   plan: null,        // the manufacturing plan, owned by plan.js
   processClassification: null,// recommended family and route + the engineer's answer, owned by process.js
+  rawStock: null,    // proposed bar for a turned part + the engineer's answer, owned by stock.js
   result: null,
   assumptions: null,        // what the current estimate rested on
   previousEstimateId: null, // so a new estimate can be explained against it
@@ -622,6 +623,8 @@ async function loadSelectedRateSet() {
   populateMaterials();
   populateProcessOptions();
   refreshCalculateState();
+  // Guarded forward: process.js shows which stage rates this rate set holds.
+  if (typeof renderStageInputs === "function") renderStageInputs();
 }
 
 function renderRateSetDetail() {
@@ -772,6 +775,16 @@ $("calculate").addEventListener("click", async () => {
   if (state.processClassification) {
     body.append("process_classification", JSON.stringify(state.processClassification));
   }
+  // The proposed bar and any decision on it. The backend costs material from
+  // it only if it was confirmed; nothing about that is decided here.
+  if (state.rawStock) {
+    body.append("raw_stock", JSON.stringify(state.rawStock));
+  }
+  // Masses typed for per-kg route stages, only those entered. The backend
+  // decides whether the route can be priced with them.
+  if (state.stageInputs && Object.keys(state.stageInputs).length) {
+    body.append("stage_inputs", JSON.stringify(state.stageInputs));
+  }
 
   // Blank additional-cost fields are OMITTED, never sent as 0. Sending a zero
   // would override the rate set's own overhead/scrap/tooling rather than
@@ -810,8 +823,30 @@ function renderResult(response) {
   $("r-total").textContent = money(cost.total_part_cost, currency);
   $("r-unit").textContent = money(cost.per_unit_cost, currency);
 
-  $("r-material").textContent = money(cost.total_material_cost, currency);
+  $("r-material").textContent =
+    money(cost.total_material_cost, currency) +
+    (cost.material_charged === false ? " — included in the stage rate" : "");
   $("r-ops").textContent = money(cost.total_operation_cost, currency);
+  // Non-machining route stages, as the server priced them. Hidden for an
+  // estimate without any, so it reads exactly as before.
+  const stages = cost.stage_costs || [];
+  $("r-stages-row").classList.toggle("hidden", !stages.length);
+  $("r-stage-detail-row").classList.toggle("hidden", !stages.length && !cost.material_note);
+  $("r-stages").textContent = stages.length ? money(cost.total_stage_cost, currency) : "";
+  $("r-stage-detail").innerHTML = [
+    ...stages.map(
+        (line) =>
+          `${escapeHtml(line.label)}: ${money(line.total_cost, currency)}` +
+          (line.unit_basis === "per_kg"
+            ? ` (${money(line.unit_rate, currency)}/kg × ${number(line.mass_kg, 3)} kg × ${line.quantity}` +
+              `${line.batch_charge ? ` + ${money(line.batch_charge, currency)} per batch` : ""})`
+            : line.unit_basis === "per_piece"
+              ? ` (${money(line.unit_rate, currency)} × ${line.quantity}` +
+                `${line.batch_charge ? ` + ${money(line.batch_charge, currency)} per batch` : ""})`
+              : ` (${money(line.batch_charge, currency)} per batch)`)
+    ),
+    ...(cost.material_note ? [escapeHtml(cost.material_note)] : []),
+  ].join("<br>");
   $("r-direct").textContent = money(cost.direct_cost_base, currency);
   $("r-overhead").textContent = money(cost.additional_costs.overhead_cost, currency);
   $("r-scrap").textContent = money(cost.additional_costs.scrap_cost, currency);
@@ -823,7 +858,13 @@ function renderResult(response) {
   $("r-rateset").textContent = rateSet
     ? `${rateSet.rate_set_id} v${rateSet.version} — ${rateSet.name}`
     : "none (rates supplied per request)";
-  $("r-mass").textContent = `${number(response.mass.mass_kg, 4)} kg per part`;
+  // The finished part's mass is always shown; when material was costed from
+  // the bar it is cut from, that mass is named beside it, never in its place.
+  $("r-mass").textContent =
+    `${number(response.mass.mass_kg, 4)} kg per part` +
+    (response.material_basis === "bar_stock" && response.stock_mass
+      ? ` · material costed from the bar: ${number(response.stock_mass.mass_kg, 4)} kg per part`
+      : "");
   $("r-id").textContent = cost.estimate_id || "—";
 
   // Mass needs a material and a unit, so it only exists once an estimate has
@@ -982,8 +1023,11 @@ async function showEstimateDetail(estimateId) {
     <p class="provenance">Read back from the stored snapshot taken when this estimate was
     created, so it reflects the rates in force at that moment. The quotation is rendered from
     that same snapshot and recalculates nothing, so it keeps saying what this estimate said
-    however the rates change later.</p>`;
+    however the rates change later.</p>
+    <div id="history-actuals"></div>`;
   panel.scrollIntoView({ behavior: "smooth", block: "nearest" });
+  // Guarded forward: actuals.js is loaded after this file.
+  if (typeof renderActualsPanel === "function") renderActualsPanel(estimate);
 }
 
 $("refresh-history").addEventListener("click", loadHistory);

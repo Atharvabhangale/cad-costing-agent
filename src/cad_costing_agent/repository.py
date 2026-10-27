@@ -13,7 +13,14 @@ from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
-from cad_costing_agent.db_models import EstimateRow, QuotationRow, RateSetRow, TimeProfileRow
+from cad_costing_agent.cost_actuals import ActualCostInput, ActualCostRecord
+from cad_costing_agent.db_models import (
+    CostActualRow,
+    EstimateRow,
+    QuotationRow,
+    RateSetRow,
+    TimeProfileRow,
+)
 from cad_costing_agent.estimates import EstimateListPage, EstimateSummary
 from cad_costing_agent.money import Money, round_money
 from cad_costing_agent.rate_sets import RateSet, RateSetSummary, version_key
@@ -116,6 +123,7 @@ class RateSetRepository:
                 is_illustrative=row.is_illustrative,
                 material_count=len((row.rates or {}).get("materials") or {}),
                 process_count=len((row.rates or {}).get("operations") or {}),
+                stage_rate_count=len((row.rates or {}).get("stage_rates") or {}),
             )
             for row in ordered
         ]
@@ -184,6 +192,9 @@ class RateSetRepository:
                 "materials": payload["materials"],
                 "operations": payload["operations"],
                 "additional_costs": payload["additional_costs"],
+                # Only when there are some, so a version without stage rates is
+                # stored exactly as every version before them was.
+                **({"stage_rates": payload["stage_rates"]} if payload["stage_rates"] else {}),
             },
         )
         self.session.add(row)
@@ -560,3 +571,68 @@ class QuotationRepository:
             .all()
         )
         return [IssuedQuotation.model_validate(row, from_attributes=True) for row in rows]
+
+
+class CostActualRepository:
+    """Records and reads actual costs. There is deliberately no update or delete.
+
+    An actual is a statement somebody made about a real cost; changing it in
+    place would lose what was first entered. A correction is recorded as a new
+    actual naming the one it supersedes, and the superseded one stays readable.
+    """
+
+    def __init__(self, session: Session) -> None:
+        self.session = session
+
+    def record(self, estimate_id: str, entry: ActualCostInput) -> ActualCostRecord:
+        if entry.supersedes_actual_id is not None:
+            previous = self._row(entry.supersedes_actual_id)
+            if previous is None or previous.estimate_id != estimate_id:
+                raise LookupError(
+                    f"Actual cost '{entry.supersedes_actual_id}' is not recorded against "
+                    f"estimate '{estimate_id}', so it cannot be corrected here."
+                )
+        row = CostActualRow(
+            actual_id=uuid.uuid4().hex,
+            estimate_id=estimate_id,
+            recorded_at=datetime.now(timezone.utc).replace(tzinfo=None),
+            **entry.model_dump(),
+        )
+        self.session.add(row)
+        try:
+            self.session.flush()
+        except IntegrityError as exc:
+            self.session.rollback()
+            raise ValueError(
+                f"Actual cost '{entry.supersedes_actual_id}' has already been corrected. "
+                "Correct the latest record instead, so the history stays one line."
+            ) from exc
+        return _row_to_actual(row)
+
+    def get(self, actual_id: str) -> ActualCostRecord:
+        row = self._row(actual_id)
+        if row is None:
+            raise ValueError(f"Unknown actual cost '{actual_id}'.")
+        return _row_to_actual(row)
+
+    def for_estimate(self, estimate_id: str) -> list[ActualCostRecord]:
+        """Every actual recorded against the estimate, oldest first."""
+        rows = (
+            self.session.execute(
+                select(CostActualRow)
+                .where(CostActualRow.estimate_id == estimate_id)
+                .order_by(CostActualRow.id)
+            )
+            .scalars()
+            .all()
+        )
+        return [_row_to_actual(row) for row in rows]
+
+    def _row(self, actual_id: str) -> CostActualRow | None:
+        return self.session.execute(
+            select(CostActualRow).where(CostActualRow.actual_id == actual_id)
+        ).scalar_one_or_none()
+
+
+def _row_to_actual(row: CostActualRow) -> ActualCostRecord:
+    return ActualCostRecord.model_validate(row, from_attributes=True)

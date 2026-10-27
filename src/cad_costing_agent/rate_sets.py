@@ -37,7 +37,9 @@ lives in `repository.py`, and the costing calculators receive an already
 resolved `RateSet` rather than reaching for one themselves.
 """
 
-from pydantic import BaseModel, ConfigDict, Field
+from typing import Literal
+
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from cad_costing_agent.additional_costs import AdditionalCostInputs
 from cad_costing_agent.materials import Material
@@ -75,6 +77,47 @@ class OperationRate(BaseModel):
 
     machine_rate_per_hour: float = Field(gt=0, description="ILLUSTRATIVE POC VALUE.")
     labor_rate_per_hour: float = Field(gt=0, description="ILLUSTRATIVE POC VALUE.")
+
+
+PER_KG = "per_kg"
+PER_PIECE = "per_piece"
+
+
+class StageRate(BaseModel):
+    """What a shop or supplier charges for one non-machining route stage.
+
+    Casting, forging, heat treatment, plating, a bought-out part: these are not
+    priced by the hour, so they do not fit `OperationRate`. A stage rate is a
+    unit rate on a stated basis — per kg of a mass someone enters, or per piece
+    — and/or a one-off charge per batch such as a pattern or a die. Keyed in the
+    rate set by stage id ('casting', 'finishing', 'purchase', ...).
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    unit_basis: Literal["per_kg", "per_piece"] | None = Field(
+        default=None, description="What `unit_rate` is per. Required with a unit rate."
+    )
+    unit_rate: float | None = Field(
+        default=None, gt=0, allow_inf_nan=False, description="Per kg or per piece."
+    )
+    batch_charge: float = Field(
+        default=0.0,
+        ge=0,
+        allow_inf_nan=False,
+        description="One-off charge for the whole batch, e.g. a pattern or a die.",
+    )
+    note: str = Field(default="", max_length=500, description="Where the rate came from.")
+
+    @model_validator(mode="after")
+    def _complete(self) -> "StageRate":
+        if (self.unit_rate is None) != (self.unit_basis is None):
+            raise ValueError(
+                "A unit rate needs its basis (per_kg or per_piece), and a basis needs its rate."
+            )
+        if self.unit_rate is None and self.batch_charge == 0:
+            raise ValueError("A stage rate needs a unit rate, a batch charge, or both.")
+        return self
 
 
 class OperationRequirement(BaseModel):
@@ -130,6 +173,14 @@ class RateSet(BaseModel):
         default_factory=dict, description="Keyed by lowercase process type."
     )
     additional_costs: AdditionalCostInputs = Field(default_factory=AdditionalCostInputs)
+    stage_rates: dict[str, StageRate] = Field(
+        default_factory=dict,
+        description=(
+            "Rates for non-machining route stages, keyed by stage id ('casting', 'finishing', "
+            "'purchase', ...). A version published before these existed has none, so a route "
+            "containing such a stage cannot be priced with it."
+        ),
+    )
 
     def reference(self) -> RateSetReference:
         return RateSetReference(
@@ -157,6 +208,7 @@ class RateSetVersionCreate(BaseModel):
     materials: dict[str, MaterialRate] = Field(default_factory=dict)
     operations: dict[str, OperationRate] = Field(default_factory=dict)
     additional_costs: AdditionalCostInputs = Field(default_factory=AdditionalCostInputs)
+    stage_rates: dict[str, StageRate] = Field(default_factory=dict)
 
 
 class RateSetSummary(BaseModel):
@@ -175,6 +227,7 @@ class RateSetSummary(BaseModel):
     is_illustrative: bool
     material_count: int = 0
     process_count: int = 0
+    stage_rate_count: int = 0
 
 
 class RateSetValidation(BaseModel):

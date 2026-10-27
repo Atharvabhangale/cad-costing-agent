@@ -31,6 +31,7 @@ function resetSuggestionsPanel() {
   $("declined-list").innerHTML = "";
   if (typeof resetPlan === "function") resetPlan();
   if (typeof resetProcessPanel === "function") resetProcessPanel();
+  if (typeof resetRawStock === "function") resetRawStock();
 
   const file = state.file;
   if (!file) {
@@ -82,6 +83,9 @@ $("suggest-operations").addEventListener("click", async () => {
   if (typeof renderProcessClassification === "function") {
     await renderProcessClassification(result.process_classification);
   }
+  // The bar a turned part would be cut from, before the plan is built: the
+  // turning times are estimated from it.
+  if (typeof renderRawStock === "function") renderRawStock(result.raw_stock);
   // The plan is what gets costed; suggestions only explain where it came from.
   await buildPlanFromSuggestions(result);
   $("suggest-operations").disabled = false;

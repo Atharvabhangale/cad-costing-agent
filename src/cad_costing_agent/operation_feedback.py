@@ -277,7 +277,10 @@ def feedback_from_plan(
             ),
             user_action=operation.user_action,
             origin=operation.origin,
-            costed=operation.costable,
+            # What the plan actually costed — not merely whether the operation
+            # carries a time: one outside the chosen route, or left as cast or
+            # forged, has a time and was still not costed.
+            costed=plan.counts_toward_cost(operation),
             timestamp=moment,
         )
         for operation in plan.ordered

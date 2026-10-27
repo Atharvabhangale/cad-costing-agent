@@ -13,9 +13,9 @@ Identity — `rate_set_id` and `version` — stays in real indexed columns, sinc
 that is what gets queried.
 """
 
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 
-from sqlalchemy import JSON, Boolean, DateTime, Float, Integer, String, UniqueConstraint
+from sqlalchemy import JSON, Boolean, Date, DateTime, Float, Integer, String, UniqueConstraint
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
 from cad_costing_agent.money import DEFAULT_CURRENCY
@@ -162,3 +162,44 @@ class QuotationRow(Base):
     currency: Mapped[str] = mapped_column(String(3), default=DEFAULT_CURRENCY)
     total_at_issue: Mapped[float | None] = mapped_column(Float, nullable=True)
     per_unit_at_issue: Mapped[float | None] = mapped_column(Float, nullable=True)
+
+
+class CostActualRow(Base):
+    """A cost somebody outside this application states for an estimate's part.
+
+    Recorded against an estimate and never fed back into one. Immutable like a
+    quotation: there is no update path anywhere in the repository, and a
+    correction is a new row whose `supersedes_actual_id` names the one it
+    replaces. That column is unique, so a record is corrected at most once and
+    the history of corrections stays a single line.
+
+    The breakdown columns are nullable because a client may supply only a total;
+    `NULL` there means "not supplied", which is a different statement from zero.
+    """
+
+    __tablename__ = "cost_actuals"
+    __table_args__ = (
+        UniqueConstraint("actual_id", name="uq_cost_actual_id"),
+        UniqueConstraint("supersedes_actual_id", name="uq_cost_actual_supersedes"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    actual_id: Mapped[str] = mapped_column(String(32))
+    estimate_id: Mapped[str] = mapped_column(String(32), index=True)
+    recorded_at: Mapped[datetime] = mapped_column(DateTime, default=_utc_now)
+
+    source: Mapped[str] = mapped_column(String(200))
+    cost_basis: Mapped[str] = mapped_column(String(16))
+    batch_quantity: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    currency: Mapped[str] = mapped_column(String(3))
+
+    total_cost: Mapped[float] = mapped_column(Float)
+    material_cost: Mapped[float | None] = mapped_column(Float, nullable=True)
+    machining_cost: Mapped[float | None] = mapped_column(Float, nullable=True)
+    additional_cost: Mapped[float | None] = mapped_column(Float, nullable=True)
+
+    cost_date: Mapped[date | None] = mapped_column(Date, nullable=True)
+    client_part_number: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    drawing_revision: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    notes: Mapped[str] = mapped_column(String(2000), default="")
+    supersedes_actual_id: Mapped[str | None] = mapped_column(String(32), nullable=True)

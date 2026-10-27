@@ -138,6 +138,28 @@ class TimeAssumptions(BaseModel):
         default=3.0, ge=0, description="Extra travel past a through hole to clear the drill point."
     )
     drilling_setup_minutes: float = Field(default=5.0, ge=0, le=10000.0)
+    # A large hole is not drilled in one pass: a pilot first, then drills no
+    # more than `drilling_max_step_ratio` times the one before, then the final
+    # size (see `drilling_steps`). The defaults are ILLUSTRATIVE, assembled from
+    # common practice rather than any standard — no ISO or DIN document
+    # prescribes a pilot sequence: a pilot above about ½" (13 mm), the 6 mm
+    # pilot of the NIMI fitter-trade practice, and a ratio that reproduces a
+    # shop's "three drills for Ø20". Replace them with your own.
+    drilling_pilot_threshold_mm: float = Field(
+        default=13.0,
+        gt=0,
+        le=1000.0,
+        description="Holes larger than this are drilled in steps; smaller ones in one pass.",
+    )
+    drilling_pilot_diameter_mm: float = Field(
+        default=6.0, gt=0, le=1000.0, description="The first, smallest drill of a stepped hole."
+    )
+    drilling_max_step_ratio: float = Field(
+        default=2.5,
+        gt=1.0,
+        le=10.0,
+        description="Each drill is at most this many times the diameter of the one before it.",
+    )
 
     # --- milling ---
     milling_cutting_speed_m_per_min: float = Field(default=80.0, gt=0, le=2000.0)
@@ -159,6 +181,12 @@ class TimeAssumptions(BaseModel):
         default=2.0, ge=0, description="Radial material to remove; decides the number of passes."
     )
     turning_approach_mm: float = Field(default=3.0, ge=0, le=1000.0)
+    turning_facing_allowance_mm: float = Field(
+        default=1.0,
+        ge=0,
+        le=100.0,
+        description="Axial material taken off an end face or shoulder when it is faced.",
+    )
     turning_setup_minutes: float = Field(default=12.0, ge=0, le=10000.0)
 
     # --- shared spindle limits ---
@@ -252,8 +280,80 @@ class OperationTimeEstimate(BaseModel):
         ),
     )
 
+    # --- drilling only: how the hole is opened up, smallest drill first ---
+    drilling_steps: list[float] = Field(
+        default_factory=list,
+        description="The drill diameters this cycle time is for, smallest first. Empty unless drilling.",
+    )
+    drilling_options: list["DrillingOption"] = Field(
+        default_factory=list,
+        description=(
+            "Every drilling sequence offered for this hole, each with its own estimated cycle "
+            "time, so an engineer who picks a different one is given a time the system worked "
+            "out rather than one nobody did. Exactly one is `suggested`."
+        ),
+    )
+
+
+class DrillingOption(BaseModel):
+    """One way to drill a hole: the drills used, smallest first, and how long they take."""
+
+    model_config = ConfigDict(frozen=True)
+
+    steps: list[float] = Field(description="Drill diameters in mm, smallest first; the last is the hole.")
+    label: str = Field(description="e.g. 'Step drilling: Ø6 → Ø15 → Ø20'.")
+    cycle_time_minutes: float = Field(description="All the passes together, per part.")
+    suggested: bool = Field(description="True for the sequence the drilling rule recommends.")
+
+
+OperationTimeEstimate.model_rebuild()
+
 
 # --------------------------------------------------------------- the formulas
+
+
+def drilling_steps(diameter_mm: float, a: TimeAssumptions) -> list[float]:
+    """The drills a hole of this diameter is opened up with, smallest first.
+
+    At or below `drilling_pilot_threshold_mm` it is one pass. Above it: the
+    pilot, then each drill at most `drilling_max_step_ratio` times the previous,
+    then the final size. With the defaults (13 mm, 6 mm, 2.5): Ø12 → [12];
+    Ø14 → [6, 14]; Ø20 → [6, 15, 20]; Ø40 → [6, 15, 37.5, 40].
+
+    Intermediate sizes are the ratio applied exactly, not rounded to a stock
+    drill: which drills a shop keeps is not something this model knows.
+    """
+    diameter = round(diameter_mm, 3)
+    pilot = a.drilling_pilot_diameter_mm
+    if diameter <= a.drilling_pilot_threshold_mm or diameter <= pilot:
+        return [diameter]
+    steps = [round(pilot, 3)]
+    while diameter / steps[-1] > a.drilling_max_step_ratio:
+        steps.append(round(steps[-1] * a.drilling_max_step_ratio, 3))
+    steps.append(diameter)
+    return steps
+
+
+def _steps_label(steps: list[float]) -> str:
+    chain = " → ".join(f"Ø{step:g}" for step in steps)
+    if len(steps) == 1:
+        return f"Single drill: {chain}"
+    if len(steps) == 2:
+        return f"Pilot + drill: {chain}"
+    return f"Step drilling: {chain}"
+
+
+def _valid_steps(steps: list[float], diameter: float) -> str | None:
+    """Why an engineer's drilling sequence cannot be used, or None if it can."""
+    if not steps:
+        return "the drilling sequence is empty"
+    if any(not math.isfinite(step) or step <= 0 for step in steps):
+        return "every drill in the sequence must be a positive diameter"
+    if any(later <= earlier for earlier, later in zip(steps, steps[1:])):
+        return "the drills must get larger at every step, smallest first"
+    if abs(steps[-1] - diameter) > 0.01:
+        return f"the last drill (Ø{steps[-1]:g}) must be the hole's own Ø{diameter:g}"
+    return None
 
 
 def _round(value: float) -> float:
@@ -306,9 +406,17 @@ def _positive(dimensions: dict[str, float], key: str) -> float | None:
     return value if math.isfinite(value) and value > 0 else None
 
 
-def _drilling(
+def _drill_pass(diameter: float, travel: float, a: TimeAssumptions) -> tuple[float, float, float]:
+    """One drill through the hole's depth: (minutes, rpm, feed rate in mm/min)."""
+    rpm = _spindle_rpm(a.drilling_cutting_speed_m_per_min, diameter, a)
+    feed_rate = a.drilling_feed_mm_per_rev * rpm
+    return travel / feed_rate, rpm, feed_rate
+
+
+def _drilling_geometry(
     dimensions: dict[str, float], subtype: str | None, a: TimeAssumptions
-) -> tuple[float, str, list[str], list[str], dict[str, float]] | OperationTimeEstimate:
+) -> tuple[float, float, bool, float] | OperationTimeEstimate:
+    """(diameter, depth, through, travel), or a refusal naming what is missing."""
     diameter = _positive(dimensions, "diameter_mm")
     depth = _positive(dimensions, "depth_mm")
     missing = [name for name, value in [("diameter_mm", diameter), ("depth_mm", depth)] if value is None]
@@ -319,35 +427,123 @@ def _drilling(
             missing,
             a.is_illustrative,
         )
-
-    rpm = _spindle_rpm(a.drilling_cutting_speed_m_per_min, diameter, a)
-    feed_rate = a.drilling_feed_mm_per_rev * rpm
-
     # A through hole must clear the drill point on the far side; a blind hole
     # stops at depth. Anything whose ends were never classified is treated as
     # blind, which is the shorter of the two — stated in the assumptions rather
-    # than silently rounded up.
+    # than silently rounded up. Every drill of a stepped hole travels the same
+    # depth: each one opens up the whole hole.
     through = (subtype or "").startswith("through")
     breakthrough = a.drilling_breakthrough_mm if through else 0.0
-    travel = depth + a.drilling_approach_mm + breakthrough
-    cycle = travel / feed_rate
+    return diameter, depth, through, depth + a.drilling_approach_mm + breakthrough
+
+
+def drilling_options(
+    dimensions: dict[str, float], subtype: str | None, a: TimeAssumptions
+) -> list[DrillingOption]:
+    """Single drill, pilot + drill, and the rule's step sequence, each with its time.
+
+    Empty when the hole's geometry is incomplete. The rule's sequence is the
+    one marked `suggested`; the others are there so choosing one does not leave
+    the engineer without an estimate.
+    """
+    geometry = _drilling_geometry(dimensions, subtype, a)
+    if isinstance(geometry, OperationTimeEstimate):
+        return []
+    diameter, _, _, travel = geometry
+    suggested = drilling_steps(diameter, a)
+    candidates = [[round(diameter, 3)]]
+    if a.drilling_pilot_diameter_mm < diameter:
+        candidates.append([round(a.drilling_pilot_diameter_mm, 3), round(diameter, 3)])
+    candidates.append(suggested)
+
+    options: list[DrillingOption] = []
+    for steps in candidates:
+        if any(option.steps == steps for option in options):
+            continue
+        cycle = sum(_drill_pass(step, travel, a)[0] for step in steps)
+        options.append(
+            DrillingOption(
+                steps=steps,
+                label=_steps_label(steps),
+                cycle_time_minutes=_round(cycle),
+                suggested=steps == suggested,
+            )
+        )
+    return options
+
+
+def _drilling(
+    dimensions: dict[str, float],
+    subtype: str | None,
+    a: TimeAssumptions,
+    steps: list[float] | None = None,
+) -> tuple[float, str, list[str], list[str], dict[str, float]] | OperationTimeEstimate:
+    geometry = _drilling_geometry(dimensions, subtype, a)
+    if isinstance(geometry, OperationTimeEstimate):
+        return geometry
+    diameter, depth, through, travel = geometry
+    breakthrough = a.drilling_breakthrough_mm if through else 0.0
+
+    chosen = drilling_steps(diameter, a) if steps is None else [round(s, 3) for s in steps]
+    problem = _valid_steps(chosen, diameter)
+    if problem is not None:
+        return _needs_input(
+            f"This drilling sequence cannot be timed: {problem}. No time is assumed.",
+            ["drilling_steps"],
+            a.is_illustrative,
+        )
+
+    passes = [(step, *_drill_pass(step, travel, a)) for step in chosen]
+    cycle = sum(minutes for _, minutes, _, _ in passes)
+    _, _, rpm, feed_rate = passes[-1]
 
     evidence = [
         f"Ø{diameter:g} mm × {depth:g} mm deep"
         + (" through hole" if through else f" {subtype or 'hole'}"),
-        f"spindle speed {rpm:.0f} rpm = 1000 × {a.drilling_cutting_speed_m_per_min:g} m/min "
-        f"/ (π × {diameter:g} mm)",
-        f"feed rate {feed_rate:.1f} mm/min = {a.drilling_feed_mm_per_rev:g} mm/rev × {rpm:.0f} rpm",
-        f"drill travel {travel:g} mm = {depth:g} mm depth + {a.drilling_approach_mm:g} mm approach"
-        + (f" + {a.drilling_breakthrough_mm:g} mm breakthrough" if through else ""),
     ]
+    if len(passes) > 1:
+        evidence.append(
+            f"drilled in {len(passes)} steps, smallest first: "
+            + " → ".join(f"Ø{step:g}" for step, *_ in passes)
+            + (
+                " (the drilling rule's sequence)"
+                if steps is None
+                else " (the sequence the engineer chose)"
+            )
+        )
+        evidence.extend(
+            f"pass Ø{step:g}: {minutes:.2f} min at {pass_rpm:.0f} rpm, {pass_feed:.1f} mm/min"
+            for step, minutes, pass_rpm, pass_feed in passes
+        )
+    else:
+        evidence.extend(
+            [
+                f"spindle speed {rpm:.0f} rpm = 1000 × {a.drilling_cutting_speed_m_per_min:g} m/min "
+                f"/ (π × {diameter:g} mm)",
+                f"feed rate {feed_rate:.1f} mm/min = {a.drilling_feed_mm_per_rev:g} mm/rev × "
+                f"{rpm:.0f} rpm",
+            ]
+        )
+    evidence.append(
+        f"drill travel {travel:g} mm = {depth:g} mm depth + {a.drilling_approach_mm:g} mm approach"
+        + (f" + {a.drilling_breakthrough_mm:g} mm breakthrough" if through else "")
+        + (" for each drill" if len(passes) > 1 else "")
+    )
     assumptions = [
         f"cutting speed {a.drilling_cutting_speed_m_per_min:g} m/min",
         f"feed {a.drilling_feed_mm_per_rev:g} mm/rev",
         f"approach allowance {a.drilling_approach_mm:g} mm",
         f"breakthrough allowance {a.drilling_breakthrough_mm:g} mm (through holes only)",
         f"spindle limited to {a.min_spindle_rpm:g}–{a.max_spindle_rpm:g} rpm",
+        f"holes above Ø{a.drilling_pilot_threshold_mm:g} mm are stepped from a "
+        f"Ø{a.drilling_pilot_diameter_mm:g} mm pilot, each drill at most "
+        f"{a.drilling_max_step_ratio:g}× the previous — an illustrative shop rule, not a standard",
     ]
+    if len(passes) > 1:
+        assumptions.append(
+            "every drill travels the full depth at the same cutting speed and feed; drill changes "
+            "are not timed"
+        )
     if not through:
         assumptions.append(
             "this hole's ends were not classified as through, so no breakthrough travel was added"
@@ -358,12 +554,17 @@ def _drilling(
         "drilling_approach_mm": a.drilling_approach_mm,
         "drilling_breakthrough_mm": breakthrough,
         "drilling_setup_minutes": a.drilling_setup_minutes,
+        "drilling_pilot_threshold_mm": a.drilling_pilot_threshold_mm,
+        "drilling_pilot_diameter_mm": a.drilling_pilot_diameter_mm,
+        "drilling_max_step_ratio": a.drilling_max_step_ratio,
+        "drilling_step_count": float(len(passes)),
         "min_spindle_rpm": a.min_spindle_rpm,
         "max_spindle_rpm": a.max_spindle_rpm,
         "resolved_spindle_rpm": round(rpm, 3),
         "resolved_feed_rate_mm_per_min": round(feed_rate, 3),
     }
-    return cycle, "drilling_time_baseline_v1", evidence, assumptions, parameters
+    method = "drilling_time_baseline_v1" if len(passes) == 1 else "drilling_time_stepped_v1"
+    return cycle, method, evidence, assumptions, parameters
 
 
 def _milling_area(dimensions: dict[str, float]) -> tuple[float | None, str]:
@@ -500,8 +701,60 @@ def _milling(
     )
 
 
-def _turning(
+def _facing(
     dimensions: dict[str, float], a: TimeAssumptions
+) -> tuple[float, str, list[str], list[str], dict[str, float]] | OperationTimeEstimate:
+    """Facing an end face or shoulder on the lathe: the tool crosses the radius."""
+    # A circular planar face's in-plane extent is its diameter.
+    diameter = _positive(dimensions, "length_mm") or _positive(dimensions, "width_mm")
+    if diameter is None:
+        return _needs_input(
+            "Facing time needs the face's diameter, and this face carries no in-plane size. "
+            "No time is assumed.",
+            ["length_mm"],
+            a.is_illustrative,
+        )
+    rpm = _spindle_rpm(a.turning_cutting_speed_m_per_min, diameter, a)
+    feed_rate = a.turning_feed_mm_per_rev * rpm
+    passes = max(1, math.ceil(a.turning_facing_allowance_mm / a.turning_depth_of_cut_mm))
+    travel = diameter / 2.0 + a.turning_approach_mm
+    cycle = passes * travel / feed_rate
+
+    evidence = [
+        f"Ø{diameter:g} mm face, square to the turning axis",
+        f"spindle speed {rpm:.0f} rpm at the outer diameter (the slowest point of the cut)",
+        f"feed rate {feed_rate:.1f} mm/min = {a.turning_feed_mm_per_rev:g} mm/rev × {rpm:.0f} rpm",
+        f"{passes} pass(es) = ceil({a.turning_facing_allowance_mm:g} mm facing allowance / "
+        f"{a.turning_depth_of_cut_mm:g} mm depth of cut)",
+        f"travel per pass {travel:g} mm = {diameter / 2:g} mm radius + "
+        f"{a.turning_approach_mm:g} mm approach",
+    ]
+    assumptions = [
+        f"cutting speed {a.turning_cutting_speed_m_per_min:g} m/min, held at the outer diameter's "
+        "spindle speed across the face — no constant-surface-speed, so this errs long",
+        f"feed {a.turning_feed_mm_per_rev:g} mm/rev",
+        f"facing allowance {a.turning_facing_allowance_mm:g} mm",
+        "the tool crosses the full radius; a face with a bore through it is timed as if solid",
+        f"spindle limited to {a.min_spindle_rpm:g}–{a.max_spindle_rpm:g} rpm",
+    ]
+    parameters = {
+        "turning_cutting_speed_m_per_min": a.turning_cutting_speed_m_per_min,
+        "turning_feed_mm_per_rev": a.turning_feed_mm_per_rev,
+        "turning_depth_of_cut_mm": a.turning_depth_of_cut_mm,
+        "turning_facing_allowance_mm": a.turning_facing_allowance_mm,
+        "turning_approach_mm": a.turning_approach_mm,
+        "turning_setup_minutes": a.turning_setup_minutes,
+        "min_spindle_rpm": a.min_spindle_rpm,
+        "max_spindle_rpm": a.max_spindle_rpm,
+        "resolved_spindle_rpm": round(rpm, 3),
+        "resolved_feed_rate_mm_per_min": round(feed_rate, 3),
+        "passes": float(passes),
+    }
+    return cycle, "facing_time_baseline_v1", evidence, assumptions, parameters
+
+
+def _turning(
+    dimensions: dict[str, float], a: TimeAssumptions, stock_diameter_mm: float | None = None
 ) -> tuple[float, str, list[str], list[str], dict[str, float]] | OperationTimeEstimate:
     diameter = _positive(dimensions, "diameter_mm")
     length = _positive(dimensions, "length_mm")
@@ -515,10 +768,25 @@ def _turning(
             missing,
             a.is_illustrative,
         )
+    if stock_diameter_mm is not None and stock_diameter_mm < diameter:
+        return _needs_input(
+            f"The bar (Ø{stock_diameter_mm:g} mm) is smaller than this Ø{diameter:g} mm diameter, "
+            "so it cannot be turned from it. Check the bar size. No time is assumed.",
+            ["stock_diameter_mm"],
+            a.is_illustrative,
+        )
 
     rpm = _spindle_rpm(a.turning_cutting_speed_m_per_min, diameter, a)
     feed_rate = a.turning_feed_mm_per_rev * rpm
-    passes = max(1, math.ceil(a.turning_stock_allowance_mm / a.turning_depth_of_cut_mm))
+    # From a known bar, the radial stock is what lies between the bar and this
+    # diameter — a Ø20 step on a Ø45 bar has 12.5 mm to come off, not a fixed
+    # allowance. Without a bar the old fixed allowance stands, stated as such.
+    radial = (
+        (stock_diameter_mm - diameter) / 2.0
+        if stock_diameter_mm is not None
+        else a.turning_stock_allowance_mm
+    )
+    passes = max(1, math.ceil(radial / a.turning_depth_of_cut_mm))
     travel = length + a.turning_approach_mm
     cycle = passes * travel / feed_rate
 
@@ -527,16 +795,27 @@ def _turning(
         f"spindle speed {rpm:.0f} rpm = 1000 × {a.turning_cutting_speed_m_per_min:g} m/min "
         f"/ (π × {diameter:g} mm)",
         f"feed rate {feed_rate:.1f} mm/min = {a.turning_feed_mm_per_rev:g} mm/rev × {rpm:.0f} rpm",
-        f"{passes} pass(es) = ceil({a.turning_stock_allowance_mm:g} mm radial stock / "
-        f"{a.turning_depth_of_cut_mm:g} mm depth of cut)",
+        (
+            f"{passes} pass(es) = ceil({radial:g} mm radial stock (Ø{stock_diameter_mm:g} bar to "
+            f"Ø{diameter:g}) / {a.turning_depth_of_cut_mm:g} mm depth of cut)"
+            if stock_diameter_mm is not None
+            else f"{passes} pass(es) = ceil({a.turning_stock_allowance_mm:g} mm radial stock / "
+            f"{a.turning_depth_of_cut_mm:g} mm depth of cut)"
+        ),
         f"travel per pass {travel:g} mm = {length:g} mm + {a.turning_approach_mm:g} mm approach",
     ]
     assumptions = [
         f"cutting speed {a.turning_cutting_speed_m_per_min:g} m/min",
         f"feed {a.turning_feed_mm_per_rev:g} mm/rev",
         f"depth of cut {a.turning_depth_of_cut_mm:g} mm",
-        f"radial stock allowance {a.turning_stock_allowance_mm:g} mm — the CAD says nothing about "
-        "the bar this is turned from, so the number of passes rests on this figure",
+        (
+            f"turned from a Ø{stock_diameter_mm:g} mm bar — the proposed bar stock, which the "
+            "engineer can change"
+            if stock_diameter_mm is not None
+            else f"radial stock allowance {a.turning_stock_allowance_mm:g} mm — the CAD says "
+            "nothing about the bar this is turned from and no bar size was given, so the number "
+            "of passes rests on this figure"
+        ),
         f"approach allowance {a.turning_approach_mm:g} mm",
         f"spindle limited to {a.min_spindle_rpm:g}–{a.max_spindle_rpm:g} rpm",
     ]
@@ -553,6 +832,9 @@ def _turning(
         "resolved_feed_rate_mm_per_min": round(feed_rate, 3),
         "passes": float(passes),
     }
+    if stock_diameter_mm is not None:
+        parameters["turning_stock_diameter_mm"] = stock_diameter_mm
+        return cycle, "turning_time_from_bar_v1", evidence, assumptions, parameters
     return cycle, "turning_time_baseline_v1", evidence, assumptions, parameters
 
 
@@ -576,8 +858,14 @@ def estimate_operation_time(
     suggestion_confidence: Confidence | None = None,
     assumptions: TimeAssumptions | None = None,
     profile=None,
+    drilling_steps: list[float] | None = None,
+    stock_diameter_mm: float | None = None,
 ) -> OperationTimeEstimate:
     """Estimate setup and cycle time for one operation. Deterministic.
+
+    For drilling, `drilling_steps` times a sequence the engineer chose;
+    omitted, the drilling rule's own sequence is timed. Either way every
+    sequence on offer is returned in `drilling_options` with its time.
 
     Takes the *normalized* description of an operation rather than a CAD file or
     a shape: recognition has already run, and re-deriving geometry here would
@@ -626,10 +914,20 @@ def estimate_operation_time(
             profile,
         )
 
+    drilling_fields: dict = {}
     if process == "drilling":
-        outcome = _drilling(dimensions, feature_subtype, a)
+        outcome = _drilling(dimensions, feature_subtype, a, drilling_steps)
+        options = drilling_options(dimensions, feature_subtype, a)
+        chosen = (
+            [round(step, 3) for step in drilling_steps]
+            if drilling_steps is not None
+            else next((option.steps for option in options if option.suggested), [])
+        )
+        drilling_fields = {"drilling_steps": chosen, "drilling_options": options}
+    elif process == "turning" and (feature_type or "").lower() == "plane":
+        outcome = _facing(dimensions, a)
     elif process == "turning":
-        outcome = _turning(dimensions, a)
+        outcome = _turning(dimensions, a, stock_diameter_mm)
     else:
         outcome = _milling(dimensions, feature_type, a)
 
@@ -668,6 +966,7 @@ def estimate_operation_time(
         ],
         is_illustrative=a.is_illustrative,
         parameters=parameters,
+        **drilling_fields,
         **_provenance(profile),
     )
 
@@ -699,6 +998,9 @@ def estimate_for_suggestion(
 
 __all__ = [
     "DEFAULT_ASSUMPTIONS",
+    "DrillingOption",
+    "drilling_options",
+    "drilling_steps",
     "METHOD_CONFIDENCE_CEILING",
     "NEEDS_INPUT_NOTE",
     "OperationTimeEstimate",
@@ -729,6 +1031,13 @@ class OperationTimeInput(BaseModel):
     confidence: Confidence | None = Field(
         default=None, description="The operation suggestion's confidence, which caps the time's."
     )
+    drilling_steps: list[float] | None = Field(
+        default=None,
+        description=(
+            "Drilling only: the drill diameters the engineer chose, smallest first, ending at the "
+            "hole's own diameter. Omit to time the drilling rule's sequence."
+        ),
+    )
 
 
 class OperationTimeRequest(BaseModel):
@@ -743,6 +1052,14 @@ class OperationTimeRequest(BaseModel):
     )
     assumptions: TimeAssumptions | None = Field(
         default=None, description="Omit to use the illustrative baseline."
+    )
+    stock_diameter_mm: float | None = Field(
+        default=None,
+        gt=0,
+        description=(
+            "The bar a turned part is cut from. Turning passes are then worked out from the bar "
+            "down to each diameter; omitted, a fixed radial allowance is used."
+        ),
     )
     operations: list[OperationTimeInput] = Field(default_factory=list)
 
@@ -792,6 +1109,8 @@ def estimate_operations(request: OperationTimeRequest, *, profile=None) -> Opera
                 suggestion_confidence=operation.confidence,
                 assumptions=request.assumptions,
                 profile=profile,
+                drilling_steps=operation.drilling_steps,
+                stock_diameter_mm=request.stock_diameter_mm,
             ),
         )
         for index, operation in enumerate(request.operations, start=1)

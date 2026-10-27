@@ -45,6 +45,7 @@ function blankDraft() {
       scrap_rate_percent: 0,
       tooling_cost_per_batch: 0,
     },
+    stage_rates: [],
   };
 }
 
@@ -207,6 +208,13 @@ async function startNewVersion(rateSetId) {
       labor_rate_per_hour: rate.labor_rate_per_hour,
     })),
     additional_costs: { ...previous.additional_costs },
+    stage_rates: Object.entries(previous.stage_rates || {}).map(([stage, rate]) => ({
+      stage,
+      unit_basis: rate.unit_basis || "",
+      unit_rate: rate.unit_rate ?? "",
+      batch_charge: rate.batch_charge ?? "",
+      note: rate.note || "",
+    })),
   };
 
   $("editor-title").textContent = `New version of ${previous.name}`;
@@ -224,6 +232,7 @@ function openEditor() {
   writeDraftToForm();
   renderMaterials();
   renderOperations();
+  renderStageRates();
   showStep("general");
 }
 
@@ -309,6 +318,7 @@ function readFormIntoDraft() {
   };
   readMaterialRows();
   readOperationRows();
+  readStageRateRows();
 }
 
 // Blank must not silently become 0 — it is a missing answer, not a zero rate.
@@ -406,6 +416,96 @@ $("add-process").addEventListener("click", () => {
   renderOperations();
 });
 
+// ------------------------------------------------------------------ stage rates
+
+// The stages a stage rate can be published for: every route stage no machining
+// time model prices, read from `/process-routes` (via process.js) so this file
+// keeps no stage list of its own.
+let stageCatalog = [];
+
+async function loadStageCatalog() {
+  if (stageCatalog.length || typeof loadProcessRoutes !== "function") return stageCatalog;
+  try {
+    const catalog = await loadProcessRoutes();
+    const seen = new Map();
+    catalog.routes.forEach((route) =>
+      route.stages.forEach((stage) => {
+        if (!stage.cost_model_available && !seen.has(stage.stage)) seen.set(stage.stage, stage.label);
+      })
+    );
+    stageCatalog = [...seen].map(([stage, label]) => ({ stage, label }));
+  } catch (error) {
+    showError(error.message);
+  }
+  return stageCatalog;
+}
+
+// The table is rendered after the stage catalog arrives, which is a round
+// trip. Until it has been rendered for the current draft, reading it back
+// would replace the draft's stage rates with an empty table, so it is not read.
+let stageRowsRendered = false;
+
+async function renderStageRates() {
+  stageRowsRendered = false;
+  await loadStageCatalog();
+  if (!setup.draft) return;
+  const option = (value, label, selected) =>
+    `<option value="${escapeHtml(value)}"${selected ? " selected" : ""}>${escapeHtml(label)}</option>`;
+  $("stage-rates-body").innerHTML = setup.draft.stage_rates
+    .map(
+      (rate, index) => `<tr>
+        <td><select class="s-stage">${option("", "Choose…", !rate.stage)}${stageCatalog
+          .map((entry) => option(entry.stage, entry.label, entry.stage === rate.stage))
+          .join("")}</select></td>
+        <td><select class="s-basis">${option("", "No unit rate", !rate.unit_basis)}${option(
+          "per_kg",
+          "per kg",
+          rate.unit_basis === "per_kg"
+        )}${option("per_piece", "per piece", rate.unit_basis === "per_piece")}</select></td>
+        <td><input class="s-rate" type="number" step="any" value="${rate.unit_rate ?? ""}"></td>
+        <td><input class="s-batch" type="number" step="any" value="${rate.batch_charge ?? ""}" placeholder="none"></td>
+        <td><input class="s-note" value="${escapeHtml(rate.note || "")}" placeholder="e.g. Foundry quote Q-112, includes metal"></td>
+        <td><button type="button" class="secondary tiny" data-remove-stage="${index}">Remove</button></td>
+      </tr>`
+    )
+    .join("");
+  stageRowsRendered = true;
+  $("stage-rates-body")
+    .querySelectorAll("button[data-remove-stage]")
+    .forEach((button) =>
+      button.addEventListener("click", () => {
+        readStageRateRows();
+        setup.draft.stage_rates.splice(Number(button.dataset.removeStage), 1);
+        renderStageRates();
+      })
+    );
+}
+
+// A blank unit rate is "no unit rate", and a blank batch charge is "no batch
+// charge" — both stated by the row, never filled in with a number.
+function readStageRateRows() {
+  const rows = [...$("stage-rates-body").querySelectorAll("tr")];
+  if (!setup.draft || !stageRowsRendered) return;
+  setup.draft.stage_rates = rows.map((row) => ({
+    stage: row.querySelector(".s-stage").value,
+    unit_basis: row.querySelector(".s-basis").value,
+    unit_rate: row.querySelector(".s-rate").value.trim() === "" ? "" : numberOrNaN(row.querySelector(".s-rate").value),
+    batch_charge: row.querySelector(".s-batch").value.trim() === "" ? "" : numberOrNaN(row.querySelector(".s-batch").value),
+    note: row.querySelector(".s-note").value.trim(),
+  }));
+}
+
+$("add-stage-rate").addEventListener("click", async () => {
+  readStageRateRows();
+  setup.draft.stage_rates.push({ stage: "", unit_basis: "", unit_rate: "", batch_charge: "", note: "" });
+  await renderStageRates();
+});
+
+function stageLabel(stageId) {
+  const match = stageCatalog.find((entry) => entry.stage === stageId);
+  return match ? match.label : stageId;
+}
+
 // Reading the rows before splicing keeps edits the user has made to *other*
 // rows from being lost when one row is removed.
 function bindRemoval(bodyId, remove) {
@@ -496,6 +596,22 @@ function validateStep(step) {
       if (!(operation.labor_rate_per_hour > 0))
         problems.push(`${row}: labour rate per hour must be greater than zero.`);
     });
+
+    const seenStages = new Map();
+    (draft.stage_rates || []).forEach((rate, index) => {
+      const row = `Stage rate row ${index + 1}`;
+      if (!rate.stage) problems.push(`${row}: choose a stage.`);
+      else if (seenStages.has(rate.stage))
+        problems.push(`${row}: "${stageLabel(rate.stage)}" duplicates row ${seenStages.get(rate.stage) + 1}.`);
+      else seenStages.set(rate.stage, index);
+      const hasRate = rate.unit_rate !== "";
+      const hasBatch = rate.batch_charge !== "" && rate.batch_charge !== 0;
+      if (rate.unit_basis && !hasRate) problems.push(`${row}: a ${rate.unit_basis === "per_kg" ? "per-kg" : "per-piece"} basis needs a unit rate.`);
+      if (hasRate && !rate.unit_basis) problems.push(`${row}: choose what the unit rate is per (per kg or per piece).`);
+      if (hasRate && !(rate.unit_rate > 0)) problems.push(`${row}: unit rate must be greater than zero.`);
+      if (rate.batch_charge !== "" && !(rate.batch_charge >= 0)) problems.push(`${row}: batch charge cannot be negative.`);
+      if (!hasRate && !hasBatch) problems.push(`${row}: enter a unit rate, a batch charge, or both.`);
+    });
   }
 
   if (step === "additional") {
@@ -543,6 +659,16 @@ function draftToRateSet() {
       labor_rate_per_hour: operation.labor_rate_per_hour,
     };
   });
+  // Stage rates keyed by stage id. An absent unit rate is left out rather than
+  // sent as zero, and an absent batch charge is sent as no charge.
+  const stage_rates = {};
+  (draft.stage_rates || []).forEach((rate) => {
+    stage_rates[rate.stage] = {
+      ...(rate.unit_basis ? { unit_basis: rate.unit_basis, unit_rate: rate.unit_rate } : {}),
+      batch_charge: rate.batch_charge === "" ? 0 : rate.batch_charge,
+      note: rate.note,
+    };
+  });
   return {
     rate_set_id: draft.rate_set_id,
     name: draft.name,
@@ -553,6 +679,7 @@ function draftToRateSet() {
     materials,
     operations,
     additional_costs: draft.additional_costs,
+    stage_rates,
   };
 }
 
@@ -603,6 +730,20 @@ async function renderReview() {
                     <td>${money2(o.labor_rate_per_hour)}</td></tr>`
           )
           .join("") || `<tr><td colspan="3" class="muted">No processes.</td></tr>`
+      }</tbody>
+    </table>
+
+    <table class="editor-table review-table">
+      <thead><tr><th>Route stage</th><th>Unit rate</th><th>Batch charge</th><th>Note</th></tr></thead>
+      <tbody>${
+        (draft.stage_rates || [])
+          .map(
+            (s) => `<tr><td>${escapeHtml(stageLabel(s.stage))}</td>
+                    <td>${s.unit_basis ? `${money2(s.unit_rate)} ${s.unit_basis === "per_kg" ? "per kg" : "per piece"}` : "—"}</td>
+                    <td>${s.batch_charge === "" || s.batch_charge === 0 ? "—" : money2(s.batch_charge)}</td>
+                    <td>${escapeHtml(s.note || "")}</td></tr>`
+          )
+          .join("") || `<tr><td colspan="4" class="muted">No stage rates. Routes with a non-machining stage cannot be priced with this profile.</td></tr>`
       }</tbody>
     </table>
 

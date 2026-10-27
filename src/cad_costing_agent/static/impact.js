@@ -96,6 +96,13 @@ function assumptionGroups(a) {
 
   const material = group("Material", [
     row("Material", a.material),
+    // Named beside the part's own mass, never in its place.
+    row(
+      "Costed from",
+      a.material_basis === "bar_stock" && a.stock_mass_kg != null
+        ? `${a.stock_description || "the stock it is cut from"} — ${number(a.stock_mass_kg, 4)} kg per part`
+        : null
+    ),
     row("Density", a.density_kg_m3 == null ? null : `${number(a.density_kg_m3, 0)} kg/m³`),
     row("Cost per kg", a.material_cost_per_kg == null ? null
       : money(a.material_cost_per_kg, a.currency)),
@@ -343,6 +350,8 @@ function sideBySideAssumptions(comparison) {
       ["material", "Material"],
       ["density_kg_m3", "Density (kg/m³)", num(0)],
       ["material_cost_per_kg", "Cost per kg", num(4)],
+      ["material_basis", "Costed from"],
+      ["stock_mass_kg", "Stock mass (kg)", num(4)],
     ]) +
     section("Costing profile", [
       ["rate_set_id", "Profile"],

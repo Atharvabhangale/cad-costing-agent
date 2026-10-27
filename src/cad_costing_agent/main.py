@@ -20,7 +20,16 @@ from cad_costing_agent.estimates import (
     compare_estimates,
     extract_assumptions,
 )
+from cad_costing_agent.cost_actuals import (
+    ActualCostInput,
+    ActualCostRecord,
+    CostVariance,
+    EstimateFigures,
+    compute_variance,
+    figures_from_estimate,
+)
 from cad_costing_agent.repository import (
+    CostActualRepository,
     EstimateRepository,
     IssuedQuotation,
     QuotationRepository,
@@ -112,9 +121,16 @@ from cad_costing_agent.operation_suggestions import (
     UserAction,
     suggest_operations,
 )
+from cad_costing_agent.raw_stock import BarStock, propose_bar_stock, record_stock_decision
+from cad_costing_agent.stage_costing import (
+    StageInput,
+    material_supplying_stage,
+    price_stages,
+)
 from cad_costing_agent.process_classification import (
     FAMILY_LABELS,
     NOT_ASSESSED,
+    STAGES,
     ManufacturingFamily,
     ProcessClassification,
     ProcessRoute,
@@ -155,6 +171,7 @@ from cad_costing_agent.rate_sets import (
     RateSetSummary,
     RateSetValidation,
     RateSetVersionCreate,
+    resolve_material,
     resolve_operation,
 )
 
@@ -234,12 +251,36 @@ def rates(session: Session = Depends(get_session)) -> list[RateSetSummary]:
     return RateSetRepository(session).list()
 
 
+def _stage_rate_problems(rate_set: RateSet) -> list[str]:
+    """Stage-rate keys that are not a non-machining route stage.
+
+    Checked here because the route catalog lives in `process_classification`,
+    which the rate set module may not import. A machining stage is priced by
+    the hour under `operations`, so a stage rate for one would be a second,
+    contradictory price.
+    """
+    problems = []
+    for key in rate_set.stage_rates:
+        if key not in STAGES:
+            known = ", ".join(sorted(k for k, (_, process) in STAGES.items() if process is None))
+            problems.append(f"Unknown route stage '{key}' in stage rates. Stages: {known}.")
+        elif STAGES[key][1] is not None:
+            problems.append(
+                f"'{key}' is a machining stage, priced by the hour under processes; it cannot "
+                "also have a stage rate."
+            )
+    return problems
+
+
 def _create_rate_set(rate_set: RateSet, session: Session) -> RateSet:
     """Persist one new rate set version, then return it as stored.
 
     Shared by both creation endpoints so the validation, the duplicate rule and
     the read-back live in exactly one place.
     """
+    problems = _stage_rate_problems(rate_set)
+    if problems:
+        raise HTTPException(status_code=422, detail=" ".join(problems))
     repository = RateSetRepository(session)
     try:
         repository.add(rate_set)
@@ -283,6 +324,8 @@ def validate_rate_set(
             "published, and a published version can never be changed. Choose a higher "
             "version number."
         )
+    stage_problems = _stage_rate_problems(rate_set)
+    messages.extend(stage_problems)
     if not rate_set.materials:
         messages.append("This profile prices no materials, so no part can be costed with it.")
     if not rate_set.operations:
@@ -297,7 +340,7 @@ def validate_rate_set(
         )
 
     return RateSetValidation(
-        valid=not already_exists,
+        valid=not already_exists and not stage_problems,
         rate_set_id=rate_set.rate_set_id,
         name=rate_set.name,
         version=rate_set.version,
@@ -692,6 +735,123 @@ def quotation(
         issued_at=issued.issued_at,
     )
     return IssuedQuotationResult(issued=issued, quotation=document)
+
+
+# ------------------------------------------------------------------ actual costs
+#
+# A client's real cost, recorded against an estimate and compared with it. The
+# comparison is `cost_actuals.compute_variance`, which imports no calculator and
+# no repository; it is handed the stored estimate as a plain carrier built here.
+# Recording an actual changes no estimate, and nothing in costing reads them.
+
+
+class ActualCostEntry(BaseModel):
+    record: ActualCostRecord
+    is_current: bool = Field(description="False once a later record has corrected this one.")
+    superseded_by: str | None = None
+    variance: CostVariance
+
+
+class EstimateActuals(BaseModel):
+    estimate_id: str
+    estimate_kind: str
+    currency: str
+    estimate_quantity: int
+    entries: list[ActualCostEntry]
+
+
+def _figures_of(estimate: StoredEstimate) -> EstimateFigures:
+    return figures_from_estimate(
+        estimate_id=estimate.estimate_id,
+        source=estimate.source,
+        quantity=estimate.quantity,
+        currency=estimate.currency,
+        total_material_cost=estimate.total_material_cost,
+        total_operation_cost=estimate.total_operation_cost,
+        total_additional_cost=estimate.total_additional_cost,
+        total_part_cost=estimate.total_part_cost,
+        result_snapshot=estimate.result_snapshot,
+    )
+
+
+def _stored_estimate(session: Session, estimate_id: str) -> StoredEstimate:
+    try:
+        return EstimateRepository(session).get(estimate_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+def _entries(figures: EstimateFigures, records: list[ActualCostRecord]) -> list[ActualCostEntry]:
+    superseded_by = {
+        record.supersedes_actual_id: record.actual_id
+        for record in records
+        if record.supersedes_actual_id is not None
+    }
+    return [
+        ActualCostEntry(
+            record=record,
+            is_current=record.actual_id not in superseded_by,
+            superseded_by=superseded_by.get(record.actual_id),
+            variance=compute_variance(figures, record),
+        )
+        for record in records
+    ]
+
+
+@app.post("/estimates/{estimate_id}/actuals", response_model=ActualCostEntry, status_code=201)
+def record_actual_cost(
+    estimate_id: str,
+    entry: ActualCostInput,
+    session: Session = Depends(get_session),
+) -> ActualCostEntry:
+    """Record a client's actual cost against an estimate, and compare the two.
+
+    Only the total is required. A breakdown category left out is reported as not
+    supplied, never as zero. A per-batch cost must state its batch quantity, and
+    an actual in a different currency from the estimate is refused rather than
+    converted.
+
+    Nothing is edited: to correct a record, send a new one with
+    `supersedes_actual_id` naming it. The estimate itself is never changed.
+    """
+    figures = _figures_of(_stored_estimate(session, estimate_id))
+    if entry.currency != figures.currency:
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                f"This estimate is in {figures.currency} and the actual is in {entry.currency}. "
+                "Currencies are never converted; record the actual in the estimate's currency."
+            ),
+        )
+    repository = CostActualRepository(session)
+    try:
+        record = repository.record(estimate_id, entry)
+    except LookupError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    session.commit()
+    entries = _entries(figures, repository.for_estimate(estimate_id))
+    return next(item for item in entries if item.record.actual_id == record.actual_id)
+
+
+@app.get("/estimates/{estimate_id}/actuals", response_model=EstimateActuals)
+def estimate_actual_costs(
+    estimate_id: str, session: Session = Depends(get_session)
+) -> EstimateActuals:
+    """Every actual recorded against an estimate, oldest first, each with its variance.
+
+    A corrected record is still listed, marked not current, with the id of the
+    record that replaced it.
+    """
+    figures = _figures_of(_stored_estimate(session, estimate_id))
+    return EstimateActuals(
+        estimate_id=estimate_id,
+        estimate_kind=figures.kind,
+        currency=figures.currency,
+        estimate_quantity=figures.quantity,
+        entries=_entries(figures, CostActualRepository(session).for_estimate(estimate_id)),
+    )
 
 
 # ------------------------------------------------------------------ feedback
@@ -2286,6 +2446,13 @@ class OperationSuggestionResponse(OperationSuggestionResult):
     """
 
     process_classification: ProcessClassification
+    raw_stock: BarStock | None = Field(
+        default=None,
+        description=(
+            "For a body of revolution: the bar it would be turned from, proposed for a person to "
+            "confirm. Null for any other part. Changes no cost until confirmed."
+        ),
+    )
 
 
 @app.post("/cad/operations/suggest", response_model=OperationSuggestionResponse)
@@ -2369,7 +2536,33 @@ async def cad_suggest_operations(
     return OperationSuggestionResponse(
         **suggestions.model_dump(),
         process_classification=classify_process(recognition, suggestions),
+        raw_stock=propose_bar_stock(list(recognition.features)),
     )
+
+
+class StockDecisionRequest(BaseModel):
+    stock: BarStock
+    action: str = Field(description="'confirm', 'edit' (with a diameter and/or length) or 'withdraw'.")
+    diameter_mm: float | None = None
+    length_mm: float | None = None
+
+
+@app.post("/cad/stock/decide", response_model=BarStock)
+def decide_stock(request: StockDecisionRequest) -> BarStock:
+    """Confirm the proposed bar, enter the bar actually used, or withdraw.
+
+    Persists nothing on its own: the bar travels with the cost request and is
+    stored on the estimate it produced. The proposal is never changed.
+    """
+    try:
+        return record_stock_decision(
+            request.stock,
+            request.action,
+            diameter_mm=request.diameter_mm,
+            length_mm=request.length_mm,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
 # ------------------------------------------------------- manufacturing process
@@ -2812,13 +3005,29 @@ async def cost_cad_part(
             "'operation_requirements'."
         ),
     ),
+    raw_stock: str | None = Form(
+        None,
+        description=(
+            "Optional JSON-encoded BarStock from /cad/operations/suggest, carrying any decision "
+            "from /cad/stock/decide. When confirmed, material is costed from the bar's volume "
+            "instead of the finished part's; unconfirmed, it is recorded and changes nothing."
+        ),
+    ),
     process_classification: str | None = Form(
         None,
         description=(
             "Optional JSON-encoded ProcessClassification from /cad/operations/suggest, carrying "
-            "any decision from /cad/process/decide. Recorded on the estimate. A route the "
-            "existing costing cannot price, or one marked unknown, is refused with 422 rather "
-            "than priced as machining."
+            "any decision from /cad/process/decide. Recorded on the estimate. A decided route's "
+            "non-machining stages are priced from the rate set's stage rates; a route marked "
+            "unknown, or an unreviewed recommendation needing stage rates, is refused with 422."
+        ),
+    ),
+    stage_inputs: str | None = Form(
+        None,
+        description=(
+            "Optional JSON object keyed by route stage id, e.g. {\"casting\": {\"mass_kg\": "
+            "2.4}}: the mass, per part, that a per-kg stage rate is charged on. Entered by a "
+            "person and recorded on the estimate; never derived from the CAD mass."
         ),
     ),
     session: Session = Depends(get_session),
@@ -2850,32 +3059,6 @@ async def cost_cad_part(
             raise ValueError(f"'operation_requirements' must be valid JSON: {exc}") from exc
         requirement_models = _REQUIREMENTS_LIST_ADAPTER.validate_python(requirements_data)
 
-        # A manufacturing plan is the richer way to say the same thing, so the
-        # two are mutually exclusive: accepting both would leave it ambiguous
-        # which one priced the part.
-        plan: ManufacturingPlan | None = None
-        time_profile_snapshot: dict | None = None
-        if manufacturing_plan is not None:
-            if requirement_models:
-                raise ValueError(
-                    "Send either 'manufacturing_plan' or 'operation_requirements', not both — "
-                    "otherwise which one produced the cost is ambiguous."
-                )
-            try:
-                plan_data = json.loads(manufacturing_plan)
-            except json.JSONDecodeError as exc:
-                raise ValueError(f"'manufacturing_plan' must be valid JSON: {exc}") from exc
-            plan = ManufacturingPlan.model_validate(plan_data)
-            # Snapshot whichever profiles the plan's predictions were made under,
-            # taken from the plan itself rather than from a separate field that
-            # could disagree with it. Captured whole, so publishing a later
-            # version can never change what this estimate says it assumed.
-            time_profile_snapshot = _snapshot_time_profiles(plan, session)
-            # Only operations carrying a time the engineer committed to. The
-            # rest are left out rather than defaulted, and are recorded below so
-            # the omission is visible in the stored estimate.
-            requirement_models = plan.to_operation_requirements(quantity)
-
         # The route is checked before anything is priced. Every costing path
         # here is machining arithmetic, so a route with a stage it cannot price
         # is refused whole: pricing only its machined stages would present part
@@ -2898,12 +3081,64 @@ async def cost_cad_part(
                         "decision_status": classification.decision_status,
                         "family": classification.family.value,
                         "route": route.label if route is not None else None,
-                        "unsupported_stages": classification.unsupported_stages,
+                        "stage_rate_stages": classification.stage_rate_stages,
                     },
                 )
+
+        # A manufacturing plan is the richer way to say the same thing, so the
+        # two are mutually exclusive: accepting both would leave it ambiguous
+        # which one priced the part.
+        plan: ManufacturingPlan | None = None
+        time_profile_snapshot: dict | None = None
+        if manufacturing_plan is not None:
+            if requirement_models:
+                raise ValueError(
+                    "Send either 'manufacturing_plan' or 'operation_requirements', not both — "
+                    "otherwise which one produced the cost is ambiguous."
+                )
+            try:
+                plan_data = json.loads(manufacturing_plan)
+            except json.JSONDecodeError as exc:
+                raise ValueError(f"'manufacturing_plan' must be valid JSON: {exc}") from exc
+            plan = ManufacturingPlan.model_validate(plan_data)
+            # The route the plan is costed under comes from the classification,
+            # recomputed here, never from what the browser says it applied —
+            # so the operations priced and the route recorded cannot disagree.
+            if classification is not None:
+                plan = plan.model_copy(
+                    update={
+                        "route_processes": classification.plan_processes,
+                        "as_formed_feature_types": classification.as_formed_feature_types,
+                    }
+                )
+            # Snapshot whichever profiles the plan's predictions were made under,
+            # taken from the plan itself rather than from a separate field that
+            # could disagree with it. Captured whole, so publishing a later
+            # version can never change what this estimate says it assumed.
+            time_profile_snapshot = _snapshot_time_profiles(plan, session)
+            # Only operations carrying a time the engineer committed to, and in
+            # the chosen route. The rest are left out rather than defaulted, and
+            # are recorded below so the omission is visible in the stored estimate.
+            requirement_models = plan.to_operation_requirements(quantity)
+
+        if classification is not None:
             route_differences = plan_route_differences(
                 classification, [requirement.process_type for requirement in requirement_models]
             )
+
+        # A bar counts only once a person confirmed it; an unconfirmed proposal
+        # is recorded but material is costed from the finished part as before.
+        stock: BarStock | None = None
+        if raw_stock is not None:
+            try:
+                stock = BarStock.model_validate_json(raw_stock)
+            except ValidationError as exc:
+                raise ValueError(f"'raw_stock' is not valid: {exc}") from exc
+            if stock.confirmed and not stock.fits_part:
+                raise ValueError(
+                    f"The confirmed bar (Ø{stock.diameter_mm:g} × {stock.length_mm:g} mm) is "
+                    "smaller than the part, so material cannot be costed from it."
+                )
 
         # Supplying any additional-cost field replaces the rate set's additional
         # costs wholesale; supplying none leaves them to the rate set.
@@ -2921,6 +3156,65 @@ async def cost_cad_part(
             if rate_set_id is not None
             else None
         )
+
+        # A decided route's non-machining stages are priced from the rate set's
+        # stage rates — every one of them, or the estimate is refused with each
+        # stage's reason. Which stages those are comes from the route catalog by
+        # stage id, not from what the payload says about itself.
+        stage_input_values: dict = {}
+        if stage_inputs is not None:
+            try:
+                stage_input_values = json.loads(stage_inputs)
+            except json.JSONDecodeError as exc:
+                raise ValueError(f"'stage_inputs' must be valid JSON: {exc}") from exc
+            if not isinstance(stage_input_values, dict):
+                raise ValueError("'stage_inputs' must be an object keyed by route stage id.")
+        stage_lines = []
+        material_supplied_by: str | None = None
+        if classification is not None and classification.costing_status == "stage_rates_required":
+            route_ids = [stage.stage for stage in classification.route.stages]
+            to_price = [
+                StageInput(
+                    stage=stage.stage,
+                    label=STAGES[stage.stage][0] if stage.stage in STAGES else stage.label,
+                    mass_kg=(stage_input_values.get(stage.stage) or {}).get("mass_kg"),
+                )
+                for stage in classification.route.stages
+                if stage.stage not in STAGES or STAGES[stage.stage][1] is None
+            ]
+            finished = calculate_mass_from_geometry(
+                geometry,
+                material,
+                source_unit,
+                material=(
+                    resolve_material(resolved_rate_set, material)
+                    if resolved_rate_set is not None
+                    else None
+                ),
+            )
+            pricing = price_stages(
+                to_price,
+                resolved_rate_set,
+                quantity,
+                material_stage=material_supplying_stage(route_ids),
+                finished_mass_kg=finished.mass_kg,
+            )
+            if not pricing.priceable:
+                raise HTTPException(
+                    status_code=422,
+                    detail={
+                        "error": "route_stages_not_priceable",
+                        "message": (
+                            "No estimate was produced: "
+                            + " ".join(problem.detail for problem in pricing.problems)
+                        ),
+                        "route": classification.route.label,
+                        "stages": [problem.model_dump() for problem in pricing.problems],
+                    },
+                )
+            stage_lines = pricing.lines
+            material_supplied_by = pricing.material_supplied_by
+
         result = calculate_cad_part_cost(
             geometry=geometry,
             material_name=material,
@@ -2934,6 +3228,11 @@ async def cost_cad_part(
             rate_set_id=rate_set_id,
             rate_set_version=rate_set_version,
             rate_set=resolved_rate_set,
+            material_stock_volume_mm3=(
+                stock.volume_mm3 if stock is not None and stock.confirmed else None
+            ),
+            stage_costs=stage_lines,
+            material_supplied_by=material_supplied_by,
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -2991,6 +3290,10 @@ async def cost_cad_part(
                 if classification is not None
                 else {}
             ),
+            # The proposed bar and the engineer's answer, only when one was sent.
+            **({"raw_stock": stock.model_dump(mode="json")} if stock is not None else {}),
+            # The masses a person entered for per-kg stages, as sent.
+            **({"stage_inputs": stage_input_values} if stage_inputs is not None else {}),
         },
         result_snapshot=result.model_dump(mode="json"),
         # The manufacturing plan is recorded whole, alongside one feedback row
@@ -3010,6 +3313,27 @@ async def cost_cad_part(
                 "uncosted_operation_ids": [
                     operation.operation_id for operation in plan.uncosted_operations()
                 ],
+                # Present only when a route was decided, so a snapshot made
+                # without one keeps its old shape.
+                **(
+                    {
+                        "out_of_route_operation_ids": [
+                            operation.operation_id
+                            for operation in plan.out_of_route_operations()
+                        ]
+                    }
+                    if plan.route_processes is not None
+                    else {}
+                ),
+                **(
+                    {
+                        "as_formed_operation_ids": [
+                            operation.operation_id for operation in plan.as_formed_operations()
+                        ]
+                    }
+                    if plan.as_formed_feature_types is not None
+                    else {}
+                ),
                 "note": (
                     "Operations without a committed cycle time were left out of the cost "
                     "rather than defaulted. The system's own suggestions and time estimates "

@@ -18,7 +18,7 @@ uvicorn cad_costing_agent.main:app --reload
 # whatever it is pointed at.
 CAD_COSTING_DATABASE_URL=sqlite:///./scratch.db uvicorn cad_costing_agent.main:app --port 8710
 
-# Tests (1845 collected: 1844 pass, 1 skip; full run about 5-10 min)
+# Tests (2021 collected: 2020 pass, 1 skip; full run about 5-12 min)
 pytest
 pytest tests/test_operation_suggestions.py                          # one file
 pytest tests/test_features.py::test_a_through_hole_is_found_with_its_diameter_depth_and_axis
@@ -239,18 +239,95 @@ around saying so.
   additive and purchased are listed in `not_assessed` and can only be chosen by a person.
   Do not add a rule for one without a recognizer that produces evidence for it.
 - **Thin evidence is `unknown`**, with `needs_information`. Accepting it is refused.
-- **Costability is a computed field**, recomputed from the route's stages on the server. Only
-  stages whose process type is `milling`, `drilling` or `turning` have a cost model.
-  `/cost/cad-part` refuses a blocking route with `422 process_route_not_costable` *before*
-  pricing, and stores nothing. Never price the machined stages of a mixed route as the whole.
+- **Costability is a computed field**, recomputed from the route's stages on the server, by
+  stage id against `STAGES` — never from the payload's `process_type`. Stages whose process
+  type is `milling`, `drilling` or `turning` are priced by the hour; every other stage
+  (`stage_rate_stages`) is priced from the rate set's stage rates (`stage_costing.py`, below).
+  `costing_status` is `stage_rates_required` for such a route; `blocks_costing` holds only for
+  a route marked unknown or an *unreviewed* recommendation needing stage rates, and
+  `/cost/cad-part` refuses those with `422 process_route_not_costable`. Never price the
+  machined stages of a mixed route as the whole.
 - **An unreviewed `unknown` does not block costing**; an engineer's `unknown` does. Sending no
   classification must stay byte-for-byte the old behaviour — the snapshot keys are absent, not
   null.
 - **It imports `features.model` and `operation_suggestions`; only `main.py` imports it.** A
-  route stage never becomes an operation: the plan is not edited to match a route, and
-  disagreements are recorded in `process_route_differences` only.
+  route stage never becomes an operation — a casting or bending stage is a line in the
+  route strip, never a `PlannedOperation`, because it has no rate.
+- **A decided route regroups the plan; it never edits it.** `plan_processes` (computed, `None`
+  until someone decides) becomes `ManufacturingPlan.route_processes`; `in_route` keeps an
+  operation whose process is outside it in the plan, unchanged, but out of
+  `to_operation_requirements`, out of `uncosted_operations` (it is excluded, not missing a
+  time) and listed in `out_of_route_operations`. `/cost/cad-part` sets `route_processes`
+  from the classification itself and ignores the browser's copy. `route_processes = None`
+  must stay the pre-route behaviour exactly — assembly component plans never get one.
+  `plan.js`'s `inRoute` mirrors `in_route`; change one, change both.
 - **The UI decides nothing.** `process.js` renders the server's object, takes the route list
   from `/process-routes`, and sends every decision through `/cad/process/decide`.
+
+### A non-machining stage is priced from a rate someone published, or not at all
+
+`stage_costing.py` prices a decided route's casting, forging, sheet, finishing, purchase
+(every non-machining) stages from `RateSet.stage_rates`: per kg or per piece, plus an
+optional one-off batch charge (pattern, die).
+
+- **Every stage or none.** A stage with no rate, or a per-kg stage with no entered mass,
+  makes `/cost/cad-part` answer `422 route_stages_not_priceable` with a reason per stage,
+  and nothing is stored.
+- **The per-kg mass is entered (`stage_inputs`), never derived.** The finished CAD mass is
+  never used in its place; for a material-supplying stage a mass below the part's is
+  refused. `mass` stays the finished part's own.
+- **A route that starts with casting, forging, moulding, an additive build or a purchase
+  does not charge material again** (`MATERIAL_SUPPLYING_STAGES`): `material_charged` is
+  false, `total_material_cost` is 0 with `material_note` saying which stage carries it. A
+  confirmed bar on such a route is a contradiction and is refused (400).
+- **Stage costs join the direct cost base**, so overhead and scrap apply to them as to
+  material. `stage_costs` is empty and `total_stage_cost` 0 for every other estimate.
+- **It imports `money` and `rate_sets` only**; stage ids reach it as strings from `main.py`.
+  `rate_sets.py` may not import `process_classification`, so stage-rate keys are checked
+  against `STAGES` in `main.py` (`_stage_rate_problems`) at publish and validate.
+- **No seeded rate set has stage rates**, and none should be added to a seeded version: it
+  would make a fresh database disagree with an existing one. Client rates are published.
+- The comparison (`estimates.decompose`) reads a material not charged at a zero rate and
+  attributes stage changes as `route_stage`; the quotation adds a `route_stages` line only
+  when there are stages.
+
+### What reaches the cost is one test, and a cast blank is not machined all over
+
+- `ManufacturingPlan.counts_toward_cost` decides whether an operation is costed: active, in
+  the route, not as formed, with a committed time. Costing, the time summary and the feedback
+  record's `costed` all read it. Do not test `operation.costable` alone anywhere that means
+  "was costed" — that is how the feedback came to call out-of-route operations costed.
+- `as_formed_feature_types` exists only for a *decided* route that casts or forges and then
+  machines; it defaults the blank's blends (fillet, chamfer) to as formed. Never extend the
+  default to faces or holes from geometry alone — which faces are machined is a drawing
+  question. `user_machined` is the engineer's override, `None` meaning "the default".
+- `plan.js`'s `isAsFormed` mirrors `is_as_formed`; change one, change both. The assumptions
+  and quotation report the finished part's `mass_kg` and the bar separately
+  (`material_basis`, `stock_description`, `stock_mass_kg`); never fill `mass_kg` from the
+  material line when material came from stock.
+
+### A turned part's material is its bar, once a person says so
+
+- `features/rotational.py` is the only rotational test; the suggestions, the classifier and
+  `raw_stock` all call it. Do not reintroduce a copy.
+- `raw_stock.propose_bar_stock` proposes; `record_stock_decision` records the engineer's bar
+  beside it. An **unconfirmed** bar changes no cost. A confirmed one reaches costing only as a
+  volume (`material_stock_volume_mm3`); `mass` must stay the finished part's own, and the bar's
+  is `stock_mass`. Never present a bar volume as the part's.
+- Turning estimates use the *proposed* bar (`stock_diameter_mm`), so they stay system
+  estimates; a different bar is flagged as making them stale, never silently re-estimated.
+
+### A large hole is drilled smallest first, and the choice of sequence is the engineer's
+
+- `drilling_steps` (threshold 13, pilot 6, ratio 2.5 — illustrative `TimeAssumptions`, no
+  standard behind them) decides the *suggested* sequence. Holes at or below the threshold
+  stay one pass and keep `drilling_time_baseline_v1`; do not change that path.
+- Every option offered carries its own system-computed time in `drilling_options`. A choice
+  goes to `user_drilling_steps`; `system_drilling_steps` and `system_suggested_cycle_time`
+  are never overwritten. Choosing changes no time until the estimate is accepted again, and
+  a sequence the system did not offer has no system time.
+- `system_cycle_for_choice` (backend) and `systemCycleForChoice` (`plan.js`) are the one
+  resolution of which time a chosen sequence uses; keep them identical.
 
 ### A manufacturing plan belongs to a component, never to an assembly
 
@@ -288,6 +365,24 @@ with **no operations and no setups of its own** — keep it that way.
   is re-read through `plan.js`'s `finalCycle`/`setupTime`, because a server-computed
   status goes stale on the first edit — and a fourth copy of the three-branch rule
   would drift from `manufacturing_plan`, `plan.js` and `quotation.py`.
+
+### An actual cost is a recorded fact, never an input
+
+`cost_actuals.py` compares a client's stated cost with an estimate, per unit.
+
+- **It imports `money` only, and only `main.py` and `repository.py` import it.**
+  The test parses imports with `ast`: the table is also named `cost_actuals`, so a
+  substring grep matches the ORM model and the migration.
+- **Not supplied is not zero.** Only the total is required; an absent category is
+  `not_supplied`. `actuals.js` sends a blank field as `null` — keep it that way.
+- **The basis is never guessed.** `cost_basis` has no default; a per-batch cost
+  without `batch_quantity` is refused. A different batch size is a warning, never
+  an adjustment.
+- **An assembly row stores `0.0` where the roll-up had no total.** Read
+  `is_complete` / `is_aggregatable` / `production_total_cost` from the snapshot
+  (`figures_from_estimate` does), and compare an assembly on its total only.
+- **Immutable.** No update or delete in `CostActualRepository`; a correction names
+  `supersedes_actual_id`, which is unique so the chain stays one line.
 
 ### A quotation presents an estimate; it never calculates one
 
@@ -566,6 +661,7 @@ setup.js      rate-set authoring (money)
 timesetup.js  time-profile authoring (duration)
 impact.js     the assumptions panel and "Why did this change?"
 feedback.js   the feedback and correction analytics panel
+actuals.js    actual costs and their variance, in the History detail
 assembly.js   the component tree, the bill of materials, the classification
               panel, the component manufacturing plans, their detail views,
               and the roll-up
@@ -652,6 +748,11 @@ all come from `/cad/formats` and the imported document's capability report — `
 perfectly analysable IGES file.
 
 ### Tests
+
+**Two classic scripts must never declare the same top-level function.** They share one
+global scope and the later declaration silently wins: `feedback.js`'s `renderOperations`
+replaced the rate-set editor's, so opening the editor threw before its processes table was
+drawn — unnoticed from Step 29 until Iteration 3. `test_ui.py` now fails on any duplicate.
 
 `tests/conftest.py` gives every test its own freshly-seeded in-memory SQLite database via an
 autouse fixture and `app.dependency_overrides`, so estimates written by one test are invisible to

@@ -284,8 +284,11 @@ def test_a_chosen_multi_stage_route_reports_each_stage_and_its_cost_model():
         classified("block_with_counterbore"), UserAction.EDITED, route_id="casting_machining"
     )
     assert stage_ids(c.route) == ["casting", "milling", "drilling"]
-    assert c.unsupported_stages == ["Casting"]
+    assert c.stage_rate_stages == ["Casting"]
     assert [stage.cost_model_available for stage in c.route.stages] == [False, True, True]
+    # Decided, so it is priced from stage rates at costing time rather than refused here.
+    assert c.costing_status == "stage_rates_required"
+    assert c.blocks_costing is False
 
 
 # --- 6. the engineer's answer sits beside the recommendation ------------------
@@ -365,9 +368,17 @@ def _estimate_count() -> int:
 
 
 @pytest.mark.parametrize(
-    "route_id", ["casting_machining", "sheet_cutting_bending", "purchased", "unknown"]
+    "route_id, error",
+    [
+        # The seeded rate set has no stage rates, so a decided route with a
+        # non-machining stage cannot be priced; a route marked unknown never can.
+        ("casting_machining", "route_stages_not_priceable"),
+        ("sheet_cutting_bending", "route_stages_not_priceable"),
+        ("purchased", "route_stages_not_priceable"),
+        ("unknown", "process_route_not_costable"),
+    ],
 )
-def test_a_route_the_costing_cannot_price_is_refused_and_nothing_is_stored(route_id):
+def test_a_route_the_costing_cannot_price_is_refused_and_nothing_is_stored(route_id, error):
     name = "block_with_counterbore"
     classification = decide(suggested(name)["process_classification"], "edited", route_id).json()
     before = _estimate_count()
@@ -376,8 +387,7 @@ def test_a_route_the_costing_cannot_price_is_refused_and_nothing_is_stored(route
 
     assert response.status_code == 422
     detail = response.json()["detail"]
-    assert detail["error"] == "process_route_not_costable"
-    assert detail["costing_status"] in ("cost_model_not_available", "route_unknown")
+    assert detail["error"] == error
     assert _estimate_count() == before
 
 
@@ -398,7 +408,11 @@ def test_a_browser_cannot_declare_its_own_route_costable():
     ).json()
     classification["blocks_costing"] = False
     classification["costing_status"] = "machining_supported"
-    classification["unsupported_stages"] = []
+    classification["stage_rate_stages"] = []
+    # Nor by claiming the casting stage is machined: the catalog decides by stage id.
+    for stage in classification["user_route"]["stages"]:
+        stage["process_type"] = "milling"
+        stage["cost_model_available"] = True
 
     assert cost("block_with_counterbore", classification=classification).status_code == 422
 
@@ -435,6 +449,7 @@ def test_the_suggestions_themselves_are_unchanged_by_classification():
     served = suggested(name)
     served.pop("elapsed_ms")
     served.pop("process_classification")
+    served.pop("raw_stock")
     assert served == direct
 
 
@@ -539,7 +554,11 @@ def test_the_classifier_imports_no_costing_and_only_main_imports_it():
         for module in _imports(PACKAGE / "process_classification.py")
         if module.startswith("cad_costing_agent")
     }
-    assert own == {"cad_costing_agent.features.model", "cad_costing_agent.operation_suggestions"}
+    assert own == {
+        "cad_costing_agent.features.model",
+        "cad_costing_agent.features.rotational",
+        "cad_costing_agent.operation_suggestions",
+    }
 
     readers = {
         path.name
@@ -562,3 +581,243 @@ def test_a_surface_mode_iges_export_is_weaker_evidence_and_says_why_in_its_own_t
     assert "trimmed surfaces" in exact.detail and "polygons" not in exact.detail
     assert from_surfaces.system_confidence is Confidence.LOW
     assert signal(classify_process(solid, suggest_operations(solid)), "exact_geometry").observed is True
+
+
+# --- 11. a decided route regroups the plan -----------------------------------
+#
+# The plan_with_boss_and_bores part suggests milling, turning (the boss) and
+# drilling, so a route that leaves one process out has something to leave out.
+
+BOSS = "plate_with_boss_and_bores"
+
+
+@pytest.mark.parametrize(
+    ("name", "route_id", "expected"),
+    [
+        (BOSS, None, None),
+        (BOSS, "milling_drilling", ["milling", "drilling"]),
+        (BOSS, "casting_machining", ["milling", "drilling"]),
+        (BOSS, "turning_drilling", ["turning", "drilling"]),
+        (BOSS, "sheet_cutting_bending", []),
+        (BOSS, "purchased", []),
+        (BOSS, "unknown", []),
+        ("plain_block", None, None),
+    ],
+)
+def test_plan_processes_follow_the_decided_route_and_nothing_else(name, route_id, expected):
+    c = classified(name)
+    if route_id is not None:
+        c = record_route_decision(c, UserAction.EDITED, route_id=route_id)
+    assert c.plan_processes == expected
+
+
+def test_an_accepted_recommendation_sets_the_plan_processes_too():
+    c = record_route_decision(classified(BOSS), UserAction.ACCEPTED)
+    assert c.plan_processes == ["milling", "drilling"]
+
+
+def _types(requirements) -> set[str]:
+    return {requirement.process_type for requirement in requirements}
+
+
+def test_with_no_route_every_operation_counts_exactly_as_before():
+    plan = committed_plan(BOSS)
+    assert plan.route_processes is None
+    assert _types(plan.to_operation_requirements(1)) == {"milling", "turning", "drilling"}
+    assert plan.out_of_route_operations() == []
+    assert plan.time_summary().out_of_route_operation_ids == []
+
+
+def test_operations_outside_the_route_are_kept_but_not_costed_or_called_missing():
+    plan = committed_plan(BOSS)
+    routed = plan.model_copy(update={"route_processes": ["milling", "drilling"]})
+
+    turning = [o.operation_id for o in plan.active if o.operation_type == "turning"]
+    assert turning
+    assert _types(routed.to_operation_requirements(1)) == {"milling", "drilling"}
+    assert [o.operation_id for o in routed.out_of_route_operations()] == turning
+    assert routed.uncosted_operations() == []
+    assert routed.time_summary().out_of_route_operation_ids == turning
+    # Kept whole: nothing about the operation itself changed.
+    assert [o.model_dump() for o in routed.operations] == [o.model_dump() for o in plan.operations]
+
+
+def test_an_empty_route_costs_no_operation_and_switching_back_restores_all():
+    plan = committed_plan(BOSS)
+    empty = plan.model_copy(update={"route_processes": []})
+    assert empty.to_operation_requirements(1) == []
+    assert len(empty.out_of_route_operations()) == len(plan.active)
+
+    restored = empty.model_copy(update={"route_processes": None})
+    assert restored.to_operation_requirements(1) == plan.to_operation_requirements(1)
+
+
+def test_changing_an_operations_process_into_the_route_brings_it_back():
+    plan = committed_plan(BOSS).model_copy(update={"route_processes": ["milling", "drilling"]})
+    turning = next(o for o in plan.active if o.operation_type == "turning")
+    moved = plan.replacing(turning.with_operation_type("milling").with_times(cycle_time_minutes=3.0))
+    assert moved.out_of_route_operations() == []
+    assert turning.operation_id in {r.operation_id for r in moved.to_operation_requirements(1)}
+
+
+def test_a_setups_time_is_still_charged_once_when_its_first_operation_is_out_of_route():
+    plan = committed_plan(BOSS)
+    plan = plan.replacing_setup(plan.setups[0].with_setup_time(10.0))
+    first = plan.ordered[0]
+    routed = plan.model_copy(
+        update={"route_processes": [p for p in ("milling", "turning", "drilling") if p != first.operation_type]}
+    )
+    requirements = routed.to_operation_requirements(1)
+    assert first.operation_id not in {r.operation_id for r in requirements}
+    assert sum(r.setup_time_minutes for r in requirements) == 10.0
+
+
+def test_a_decided_route_decides_which_operations_are_costed_through_the_api():
+    plan = committed_plan(BOSS)
+    accepted = decide(suggested(BOSS)["process_classification"], "accepted").json()
+    assert accepted["plan_processes"] == ["milling", "drilling"]
+
+    routed = cost(BOSS, plan=plan, classification=accepted)
+    # The same plan with its turning lines removed by hand, and no route at all.
+    by_hand = plan
+    for operation in plan.active:
+        if operation.operation_type == "turning":
+            by_hand = by_hand.replacing(operation.rejected())
+    manual = cost(BOSS, plan=by_hand)
+
+    assert routed.status_code == manual.status_code == 200
+    assert routed.json()["part_cost"]["total_part_cost"] == manual.json()["part_cost"]["total_part_cost"]
+    stored = client.get(f"/estimates/{routed.json()['estimate_id']}").json()
+    turning = [o.operation_id for o in plan.active if o.operation_type == "turning"]
+    assert stored["plan_snapshot"]["out_of_route_operation_ids"] == turning
+    assert stored["plan_snapshot"]["plan"]["route_processes"] == ["milling", "drilling"]
+
+
+def test_the_server_applies_the_route_from_the_classification_not_the_browser():
+    plan = committed_plan(BOSS)
+    accepted = decide(suggested(BOSS)["process_classification"], "accepted").json()
+    honest = cost(BOSS, plan=plan, classification=accepted)
+    # A plan claiming a different route is costed under the classification's route.
+    claimed = cost(
+        BOSS, plan=plan.model_copy(update={"route_processes": ["turning"]}), classification=accepted
+    )
+    assert honest.json()["part_cost"]["total_part_cost"] == claimed.json()["part_cost"]["total_part_cost"]
+
+
+def test_an_unreviewed_recommendation_leaves_the_plan_alone():
+    plan = committed_plan(BOSS)
+    pending = suggested(BOSS)["process_classification"]
+    assert pending["plan_processes"] is None
+    with_route = cost(BOSS, plan=plan, classification=pending)
+    without = cost(BOSS, plan=plan)
+    assert with_route.json()["part_cost"]["total_part_cost"] == without.json()["part_cost"]["total_part_cost"]
+    stored = client.get(f"/estimates/{without.json()['estimate_id']}").json()
+    assert "out_of_route_operation_ids" not in stored["plan_snapshot"]
+
+
+def test_the_browser_plan_builder_copies_the_route_to_the_server():
+    source = (PACKAGE / "static" / "plan.js").read_text(encoding="utf-8")
+    payload = source[source.index("function planPayload()"):]
+    assert "route_processes: routeProcesses()" in payload
+
+
+# --- 12. a cast or forged blank leaves its blends as formed -------------------
+#
+# Choosing "Casting followed by CNC machining" used to change nothing in the
+# plan: milling and drilling are in the route, so every fillet stayed a milling
+# line to be removed by hand.
+
+from cad_costing_agent.operation_feedback import feedback_from_plan  # noqa: E402
+
+FILLETED = "block_with_fillet"
+
+
+@pytest.mark.parametrize(
+    ("route_id", "expected", "label"),
+    [
+        ("casting_machining", ["fillet", "chamfer"], "As cast"),
+        ("forging_machining", ["fillet", "chamfer"], "As forged"),
+        ("milling_drilling", None, None),
+        ("casting", None, None),  # nothing is machined: the route alone leaves it out
+        ("sheet_cutting_bending", None, None),
+    ],
+)
+def test_only_a_cast_or_forged_then_machined_route_leaves_features_as_formed(route_id, expected, label):
+    c = record_route_decision(classified(BOSS), UserAction.EDITED, route_id=route_id)
+    assert c.as_formed_feature_types == expected
+    assert c.as_formed_label == label
+
+
+def test_an_unreviewed_recommendation_leaves_nothing_as_formed():
+    assert classified(BOSS).as_formed_feature_types is None
+
+
+def filleted_plan(route_id: str = "casting_machining"):
+    c = record_route_decision(classified(FILLETED), UserAction.EDITED, route_id=route_id)
+    plan = committed_plan(FILLETED)
+    return plan.model_copy(
+        update={"route_processes": c.plan_processes, "as_formed_feature_types": c.as_formed_feature_types}
+    )
+
+
+def test_a_casting_route_leaves_the_fillet_as_cast_and_keeps_it():
+    plan = filleted_plan()
+    fillet = next(o for o in plan.active if o.feature_type == "fillet")
+    assert plan.is_as_formed(fillet)
+    assert [o.operation_id for o in plan.as_formed_operations()] == [fillet.operation_id]
+    assert fillet.operation_id not in {r.operation_id for r in plan.to_operation_requirements(1)}
+    assert fillet.operation_id not in {o.operation_id for o in plan.uncosted_operations()}
+    assert plan.time_summary().as_formed_operation_ids == [fillet.operation_id]
+    # Faces stay machined by default: the geometry cannot tell a datum from a cast wall.
+    assert any(o.feature_type == "plane" for o in plan.active if plan.counts_toward_cost(o))
+
+
+def test_the_engineer_can_machine_a_blend_or_leave_a_face_as_cast():
+    plan = filleted_plan()
+    fillet = next(o for o in plan.active if o.feature_type == "fillet")
+    face = next(o for o in plan.active if o.feature_type == "plane")
+    plan = plan.replacing(fillet.model_copy(update={"user_machined": True}))
+    plan = plan.replacing(face.model_copy(update={"user_machined": False}))
+    costed = {r.operation_id for r in plan.to_operation_requirements(1)}
+    assert fillet.operation_id in costed
+    assert face.operation_id not in costed
+    assert face.operation_id in {o.operation_id for o in plan.as_formed_operations()}
+
+
+def test_on_a_machining_route_nothing_is_left_as_formed_whatever_a_row_says():
+    plan = filleted_plan("milling_drilling")
+    face = next(o for o in plan.active if o.feature_type == "plane")
+    plan = plan.replacing(face.model_copy(update={"user_machined": False}))
+    assert plan.as_formed_operations() == []
+    assert face.operation_id in {r.operation_id for r in plan.to_operation_requirements(1)}
+
+
+def test_the_preview_reports_what_was_left_as_formed():
+    plan = filleted_plan()
+    response = client.post(
+        "/operations/plan-cost-preview?rate_set_id=poc-default&quantity=1",
+        json=plan.model_dump(mode="json"),
+    )
+    assert response.status_code == 200, response.text
+    assert len(response.json()["time"]["as_formed_operation_ids"]) == 1
+
+
+def test_feedback_records_what_the_plan_actually_costed():
+    """It used to say `costed: true` for operations the route or the blank left out."""
+    route_out = committed_plan(BOSS).model_copy(update={"route_processes": ["milling", "drilling"]})
+    for record in feedback_from_plan(route_out):
+        operation = route_out.get(record.operation_id)
+        assert record.costed == route_out.counts_toward_cost(operation)
+    assert not all(record.costed for record in feedback_from_plan(route_out))
+
+    as_cast = filleted_plan()
+    fillet = next(o for o in as_cast.active if o.feature_type == "fillet")
+    record = next(r for r in feedback_from_plan(as_cast) if r.operation_id == fillet.operation_id)
+    assert record.costed is False
+
+
+def test_the_browser_mirrors_and_sends_the_as_formed_default():
+    source = (PACKAGE / "static" / "plan.js").read_text(encoding="utf-8")
+    payload = source[source.index("function planPayload()"):]
+    assert "as_formed_feature_types: asFormedTypes()" in payload
+    assert "function isAsFormed(operation)" in source
