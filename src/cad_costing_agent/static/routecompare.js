@@ -72,10 +72,37 @@ function routeCompareLeftOut(row) {
 function routeCompareStatus(row) {
   if (row.status === "priced") return `<span class="pill pill-ok">priced</span>`;
   const reason = row.refusal ? row.refusal.message : "Could not be priced.";
+  // A stage refused only for want of the mass it is charged on can be priced
+  // here: the mass is typed by the person (never taken from the CAD), kept in
+  // the same `state.stageInputs` the route card and the cost request use.
+  const needsMass = ((row.refusal && row.refusal.stages) || []).filter(
+    (problem) => problem.code === "needs_mass"
+  );
+  const inputs = needsMass
+    .map((problem) => {
+      const entered = ((state.stageInputs || {})[problem.stage] || {}).mass_kg;
+      return (
+        `<label class="route-mass">${escapeHtml(problem.label)} blank, kg per part ` +
+        `<input type="number" min="0" step="any" class="route-mass-input" ` +
+        `data-stage="${escapeHtml(problem.stage)}" value="${entered ?? ""}" placeholder="e.g. 4.5"></label>`
+      );
+    })
+    .join("");
   return (
     `<span class="pill pill-off">not priced</span>` +
-    `<div class="hint">${escapeHtml(reason)}</div>`
+    `<div class="hint">${escapeHtml(reason)}</div>` +
+    (inputs
+      ? `${inputs}<button type="button" class="secondary tiny route-recompare">Price with this mass</button>`
+      : "")
   );
+}
+
+// How many of the plan's operations have no committed time, read from the
+// server's rows. Machining is left out of every total until someone accepts or
+// enters those times; this says so where the totals are, with the one action
+// that fixes it.
+function routeCompareUntimed(comparison) {
+  return comparison.routes.find((row) => row.status === "priced" && row.operations_not_timed);
 }
 
 function routeCompareIsChosen(row) {
@@ -122,8 +149,19 @@ function renderRouteComparison() {
       );
     })
     .join("");
+  const untimed = routeCompareUntimed(comparison);
+  const canAccept = !$("use-all-estimates").classList.contains("hidden");
   host.innerHTML =
     `<p class="warning-inline">${escapeHtml(comparison.note)}</p>` +
+    (untimed
+      ? `<p class="warning">Machining is not in these totals: ${untimed.operations_not_timed} operation(s) ` +
+        `have no committed time, so "Operations" reads ₹0.00. ` +
+        (canAccept
+          ? `<button type="button" class="tiny route-accept-times">Use all estimated times and compare again</button> ` +
+            `— the same as "Use all estimated times" in the operations table; you can change any time afterwards.`
+          : `Enter or accept their times in the operations table, then compare again.`) +
+        `</p>`
+      : "") +
     `<table class="ops route-compare"><thead><tr>` +
     `<th>Route</th><th>Why listed</th><th>Status</th><th>Total</th><th>Per unit</th>` +
     `<th>Material</th><th>Operations</th><th>Stage rates</th><th>Plan coverage</th><th></th>` +
@@ -134,6 +172,29 @@ function renderRouteComparison() {
     button.addEventListener("click", async () => {
       await decideProcess("edited", button.dataset.route);
       renderRouteComparison();
+    })
+  );
+  // Blank is "not entered", never 0. Every row showing the same stage shares one
+  // value, as the route card does.
+  host.querySelectorAll("input.route-mass-input").forEach((input) =>
+    input.addEventListener("input", () => {
+      state.stageInputs = state.stageInputs || {};
+      const raw = input.value.trim();
+      if (raw === "") delete state.stageInputs[input.dataset.stage];
+      else state.stageInputs[input.dataset.stage] = { mass_kg: Number(raw) };
+      host.querySelectorAll(`input.route-mass-input[data-stage="${input.dataset.stage}"]`).forEach((other) => {
+        if (other !== input) other.value = raw;
+      });
+      if (typeof renderStageInputs === "function") renderStageInputs();
+    })
+  );
+  host.querySelectorAll("button.route-recompare").forEach((button) =>
+    button.addEventListener("click", compareRoutes)
+  );
+  host.querySelectorAll("button.route-accept-times").forEach((button) =>
+    button.addEventListener("click", () => {
+      $("use-all-estimates").click();
+      compareRoutes();
     })
   );
 }
