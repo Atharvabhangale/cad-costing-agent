@@ -764,3 +764,7 @@ table.mini.actual-variance td.num, table.mini.actual-variance th.num { padding-l
 .route-compare .route-mass { display: flex; flex-wrap: wrap; align-items: center; gap: 4px; font-size: 12px; margin-top: 4px; }
 .route-compare .route-mass input { width: 6.5em; padding: 2px 4px; }
 .route-compare .route-mass .pill { display: inline-block; width: auto; }
+
+/* Operations the chosen route leaves out: folded away until asked for, dimmed when shown. */
+#ops-body.parked-collapsed tr[data-parked] { display: none; }
+#ops-body tr[data-parked] { opacity: 0.55; }

@@ -215,8 +215,11 @@ function renderStageInputs() {
       // Blank is "not entered", never 0.
       if (raw === "") delete state.stageInputs[input.dataset.stage];
       else state.stageInputs[input.dataset.stage] = { mass_kg: Number(raw) };
+      if (typeof renderPlanRoute === "function") renderPlanRoute();
     })
   );
+  // The plan's route strip shows the same rates and masses.
+  if (typeof renderPlanRoute === "function") renderPlanRoute();
 }
 
 async function decideProcess(action, routeId) {

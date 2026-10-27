@@ -487,13 +487,20 @@ function renderPlan() {
   // they were, times and edits included.
   const outside = outOfRouteOperations();
   if (outside.length) {
+    // Folded away by default: they are not part of the chosen route, and shown
+    // in full they made the plan look as if choosing a route had changed nothing.
+    // Still in the page and one click from view, never removed.
     rows.push(
-      `<tr class="setup-empty"><td colspan="8"><strong>Not in this route</strong> — ` +
+      `<tr class="setup-empty parked-head"><td colspan="8"><strong>Not in this route</strong> — ` +
         `${outside.length} operation${outside.length === 1 ? "" : "s"} kept but not costed, ` +
         `because the chosen route does not include their process. Switch the route back, or ` +
-        `change a row's process to one the route includes, to bring it back.</td></tr>`
+        `change a row's process to one the route includes, to bring it back. ` +
+        `<button type="button" class="secondary tiny" id="toggle-parked">` +
+        `${state.showParked ? "Hide" : "Show"} ${outside.length}</button></td></tr>`
     );
-    outside.forEach((operation) => rows.push(planRow(operation)));
+    outside.forEach((operation) =>
+      rows.push(planRow(operation).replace(/<tr\b/g, '<tr data-parked="1"'))
+    );
   }
 
   // On a cast or forged route, what the blank leaves as formed: kept below and
@@ -511,6 +518,14 @@ function renderPlan() {
   }
 
   body.innerHTML = rows.join("");
+  body.classList.toggle("parked-collapsed", !state.showParked);
+  const toggle = $("toggle-parked");
+  if (toggle) {
+    toggle.addEventListener("click", () => {
+      state.showParked = !state.showParked;
+      renderPlan();
+    });
+  }
   renderPlanRoute();
   wirePlanRows();
   wireSetupRows();
@@ -560,16 +575,41 @@ function renderPlanRoute() {
   const items = stages.map((stage) => {
     if (!stage.process_type) {
       const formed = asFormedTypes() !== null && stage === stages[0] ? asFormedOperations().length : 0;
+      // The rate this stage will be priced at, read from the selected rate set
+      // as published, and the mass it is charged on. Nothing is worked out here.
+      const rateSet = state.rateSet;
+      const rate = rateSet && rateSet.stage_rates ? rateSet.stage_rates[stage.stage] : null;
+      const currency = rateSet ? rateSet.currency : "INR";
+      let priced;
+      if (!rate) {
+        priced = `<span class="warning-inline">no rate in ${
+          rateSet ? `${escapeHtml(rateSet.name)} v${escapeHtml(rateSet.version)}` : "the selected rate set"
+        } — this route cannot be costed until one is published</span>`;
+      } else {
+        const parts = [];
+        if (rate.unit_rate !== null && rate.unit_rate !== undefined) {
+          parts.push(`${money(rate.unit_rate, currency)} ${rate.unit_basis === "per_kg" ? "per kg" : "per piece"}`);
+        }
+        if (rate.batch_charge) parts.push(`${money(rate.batch_charge, currency)} per batch`);
+        const entered = ((state.stageInputs || {})[stage.stage] || {}).mass_kg;
+        const mass =
+          rate.unit_basis === "per_kg"
+            ? entered !== undefined
+              ? ` · on ${number(entered, 3)} kg per part (entered)`
+              : " · on the part's mass from the CAD model unless you enter one on the route card"
+            : "";
+        priced = `<span class="muted">${parts.join(" + ")}${mass}</span>`;
+      }
       return (
         `<li>${escapeHtml(stage.label)} <span class="pill pill-off">priced from stage rates</span> ` +
-        `<span class="muted">not an operation — needs a rate in the rate set` +
-        (formed ? ` · leaves ${formed} feature${formed === 1 ? "" : "s"} unmachined below` : "") +
-        `</span></li>`
+        priced +
+        (formed ? ` <span class="muted">· leaves ${formed} feature${formed === 1 ? "" : "s"} unmachined below</span>` : "") +
+        `</li>`
       );
     }
     const count = counted.filter((operation) => effectiveType(operation) === stage.process_type).length;
     return (
-      `<li>${escapeHtml(stage.label)} <span class="pill pill-ok">cost model available</span> ` +
+      `<li>${escapeHtml(stage.label)} <span class="pill pill-ok">machining — hourly rates</span> ` +
       (count
         ? `<span class="muted">${count} operation${count === 1 ? "" : "s"} below</span>`
         : `<span class="muted">no operations yet — add one with + Add operation</span>`) +
