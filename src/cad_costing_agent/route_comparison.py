@@ -119,6 +119,22 @@ class RouteComparisonRow(BaseModel):
     operations_not_timed: int | None = None
     operations_out_of_route: int | None = None
     operations_as_formed: int | None = None
+    # Per-kg stages as priced: the mass used and where it came from, so the page
+    # can show it for editing without working anything out itself.
+    stage_masses: list["StageMassView"] = Field(default_factory=list)
+
+
+class StageMassView(BaseModel):
+    stage: str
+    label: str
+    mass_kg: float
+    mass_source: str | None = Field(
+        default=None, description="'entered' or 'cad_finished_mass'."
+    )
+    mass_note: str = ""
+
+
+RouteComparisonRow.model_rebuild()
 
 
 class RouteComparison(BaseModel):

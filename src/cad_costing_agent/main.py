@@ -3174,6 +3174,10 @@ def price_cad_part(
                 quantity,
                 material_stage=material_supplying_stage(route_ids),
                 finished_mass_kg=finished.mass_kg,
+                route_machines=any(
+                    stage_id in STAGES and STAGES[stage_id][1] is not None
+                    for stage_id in route_ids
+                ),
             )
             if not pricing.priceable:
                 raise HTTPException(
@@ -3305,8 +3309,9 @@ async def cost_cad_part(
         None,
         description=(
             "Optional JSON object keyed by route stage id, e.g. {\"casting\": {\"mass_kg\": "
-            "2.4}}: the mass, per part, that a per-kg stage rate is charged on. Entered by a "
-            "person and recorded on the estimate; never derived from the CAD mass."
+            "2.4}}: the mass, per part, that a per-kg stage rate is charged on, recorded on the "
+            "estimate. A per-kg stage with none entered is charged on the finished part's CAD "
+            "mass, labelled as such."
         ),
     ),
     session: Session = Depends(get_session),
@@ -3480,6 +3485,7 @@ from cad_costing_agent.route_comparison import (  # noqa: E402
     RouteComparisonRow,
     RouteRefusal,
     RouteStageSummary,
+    StageMassView,
     refusal_from_detail,
     select_route_ids,
 )
@@ -3634,6 +3640,17 @@ async def compare_routes(
                     None if plan is None else len(plan.out_of_route_operations())
                 ),
                 operations_as_formed=None if plan is None else len(plan.as_formed_operations()),
+                stage_masses=[
+                    StageMassView(
+                        stage=line.stage,
+                        label=line.label,
+                        mass_kg=line.mass_kg,
+                        mass_source=line.mass_source,
+                        mass_note=line.mass_note,
+                    )
+                    for line in cost.stage_costs
+                    if line.mass_kg is not None
+                ],
             )
         )
 

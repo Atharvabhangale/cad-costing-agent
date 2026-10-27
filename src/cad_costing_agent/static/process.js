@@ -197,7 +197,7 @@ function renderStageInputs() {
         rate.unit_basis === "per_kg"
           ? `<label>Mass charged on, kg per part
                <input type="number" step="any" min="0" class="stage-mass" data-stage="${escapeHtml(stage.stage)}"
-                 value="${entered ?? ""}" placeholder="required"></label>`
+                 value="${entered ?? ""}" placeholder="from CAD unless entered"></label>`
           : "";
       return `<tr><th>${escapeHtml(stage.label)}</th>
         <td>${parts.join(" + ")}${rate.note ? `<div class="hint">${escapeHtml(rate.note)}</div>` : ""}</td>
@@ -206,8 +206,9 @@ function renderStageInputs() {
     .join("");
   host.innerHTML =
     `<table class="mini stage-rates"><tbody>${rows}</tbody></table>` +
-    `<p class="hint">For a casting or forging, the mass is the blank's weight; the finished part's ` +
-    `CAD mass is never used in its place.</p>`;
+    `<p class="hint">Left blank, a per-kg stage is charged on the finished part's mass from the CAD ` +
+    `model, and the estimate says so. A casting or forging machined afterwards is heavier than ` +
+    `that by the material removed — enter the blank's weight to correct it.</p>`;
   host.querySelectorAll("input.stage-mass").forEach((input) =>
     input.addEventListener("input", () => {
       const raw = input.value.trim();

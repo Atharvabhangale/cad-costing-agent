@@ -108,14 +108,55 @@ def test_a_per_piece_stage_ignores_mass():
     assert pricing.lines[0].mass_kg is None
 
 
-def test_a_per_kg_stage_without_a_mass_is_refused_not_defaulted():
+def test_a_per_kg_stage_with_no_entered_and_no_cad_mass_is_refused_not_defaulted():
     pricing = price_stages(
         [StageInput(stage="casting", label="Casting")], rate_set(casting=CASTING), quantity=5
     )
     assert not pricing.priceable
     assert pricing.problems[0].code == "needs_mass"
-    assert "not used in its place" in pricing.problems[0].detail
+    assert "no mass was entered or measured" in pricing.problems[0].detail
     assert pricing.lines == [] and pricing.total == 0.0
+
+
+def test_with_no_entered_mass_the_cad_finished_mass_is_used_and_labelled():
+    pricing = price_stages(
+        [StageInput(stage="casting", label="Casting")],
+        rate_set(casting=CASTING),
+        quantity=5,
+        material_stage="casting",
+        finished_mass_kg=2.5,
+    )
+    line = pricing.lines[0]
+    assert line.mass_kg == 2.5
+    assert line.mass_source == "cad_finished_mass"
+    assert line.total_cost == pytest.approx(120.0 * 2.5 * 5 + 15000.0)
+    # Made as formed: the CAD mass is the right figure, so no "heavier" warning.
+    assert "heavier" not in line.mass_note
+
+
+def test_a_cad_mass_on_a_route_that_machines_afterwards_says_the_blank_is_heavier():
+    line = price_stages(
+        [StageInput(stage="casting", label="Casting")],
+        rate_set(casting=CASTING),
+        quantity=1,
+        material_stage="casting",
+        finished_mass_kg=2.5,
+        route_machines=True,
+    ).lines[0]
+    assert line.mass_source == "cad_finished_mass"
+    assert "heavier" in line.mass_note and "does not record" in line.mass_note
+
+
+def test_an_entered_mass_wins_over_the_cad_mass_and_is_labelled_entered():
+    line = price_stages(
+        [StageInput(stage="casting", label="Casting", mass_kg=3.0)],
+        rate_set(casting=CASTING),
+        quantity=1,
+        material_stage="casting",
+        finished_mass_kg=2.5,
+    ).lines[0]
+    assert line.mass_kg == 3.0
+    assert line.mass_source == "entered"
 
 
 def test_a_blank_lighter_than_the_finished_part_is_refused():
@@ -326,15 +367,16 @@ def test_the_entered_mass_is_recorded_with_the_estimate(client_rates):
     assert stored["total_material_cost"] == 0.0
 
 
-def test_a_casting_route_without_the_blank_mass_is_refused_and_nothing_is_stored(client_rates):
-    before = estimate_count()
+def test_a_casting_route_without_an_entered_mass_is_priced_on_the_cad_mass(client_rates):
     response = cost(classification=classification_for("casting_machining"))
 
-    assert response.status_code == 422
-    detail = response.json()["detail"]
-    assert detail["error"] == "route_stages_not_priceable"
-    assert [stage["code"] for stage in detail["stages"]] == ["needs_mass"]
-    assert estimate_count() == before
+    assert response.status_code == 200, response.text
+    body = response.json()
+    [line] = body["part_cost"]["stage_costs"]
+    assert line["mass_source"] == "cad_finished_mass"
+    assert line["mass_kg"] == pytest.approx(body["mass"]["mass_kg"])
+    # Casting followed by machining: the real blank is heavier, and it says so.
+    assert "heavier" in line["mass_note"]
 
 
 def test_a_blank_lighter_than_the_part_is_refused_at_the_endpoint(client_rates):

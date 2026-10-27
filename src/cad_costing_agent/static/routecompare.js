@@ -97,6 +97,26 @@ function routeCompareStatus(row) {
   );
 }
 
+// The mass each per-kg stage was priced on, as the server reports it — from the
+// CAD model unless someone entered one — shown in an editable box. Leaving it as
+// it is changes nothing; typing a value records it as entered.
+function routeCompareMasses(row) {
+  if (row.status !== "priced" || !(row.stage_masses || []).length) return "";
+  return (
+    row.stage_masses
+      .map(
+        (mass) =>
+          `<label class="route-mass">${escapeHtml(mass.label)}, kg per part ` +
+          `<input type="number" min="0" step="any" class="route-mass-input" ` +
+          `data-stage="${escapeHtml(mass.stage)}" value="${escapeHtml(number(mass.mass_kg, 3))}">` +
+          `<span class="pill ${mass.mass_source === "entered" ? "pill-sys" : "pill-off"}">` +
+          `${mass.mass_source === "entered" ? "entered" : "from CAD"}</span></label>` +
+          `<div class="hint">${escapeHtml(mass.mass_note)}</div>`
+      )
+      .join("") + `<button type="button" class="secondary tiny route-recompare">Re-price</button>`
+  );
+}
+
 // How many of the plan's operations have no committed time, read from the
 // server's rows. Machining is left out of every total until someone accepts or
 // enters those times; this says so where the totals are, with the one action
@@ -138,7 +158,7 @@ function renderRouteComparison() {
         `<td>${routeCompareFigure(row, row.per_unit_cost)}</td>` +
         `<td>${routeCompareFigure(row, row.total_material_cost)}</td>` +
         `<td>${routeCompareFigure(row, row.total_operation_cost)}</td>` +
-        `<td>${routeCompareFigure(row, row.total_stage_cost)}</td>` +
+        `<td>${routeCompareFigure(row, row.total_stage_cost)}${routeCompareMasses(row)}</td>` +
         `<td>${escapeHtml(routeCompareLeftOut(row))}</td>` +
         `<td>${
           chosen

@@ -292,9 +292,11 @@ stage — sheet cutting, bending, casting, forging, welding, additive, moulding,
   `stage_rates` on `POST /rates`): a unit rate **per kg** or **per piece**, and/or a one-off
   **batch charge** such as a pattern or a die, with a note on where it came from. Keys are stage
   ids; a machining or unknown stage id is refused (422). No seeded rate set has any.
-- A **per-kg** stage is charged on a mass someone enters for it, per part — on the route card,
-  or as `stage_inputs` on `/cost/cad-part`, e.g. `{"casting": {"mass_kg": 2.5}}`. The finished
-  CAD mass is never used in its place, and a cast or forged blank lighter than the part is refused.
+- A **per-kg** stage is charged on the mass entered for it, per part — on the route card, in the
+  route comparison, or as `stage_inputs` on `/cost/cad-part`, e.g. `{"casting": {"mass_kg": 2.5}}`
+  — or, when none is entered, on the **finished part's mass from the CAD model**, shown as "from
+  CAD" and editable. For a casting or forging machined afterwards the real blank is heavier, and
+  the estimate says so. An entered blank lighter than the part is refused.
 - `total_cost = unit_rate × (mass_kg if per kg) × quantity + batch_charge`, per stage. Stage costs
   are direct cost, so overhead and scrap apply to them.
 - A route that **starts with casting, forging, moulding, an additive build or a purchase** takes

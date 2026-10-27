@@ -103,12 +103,16 @@ def test_with_stage_rates_and_a_mass_the_casting_routes_are_priced_too():
     assert rows["milling_drilling"]["total_stage_cost"] == 0.0
 
 
-def test_a_per_kg_stage_with_no_entered_mass_is_refused_not_defaulted():
+def test_a_per_kg_stage_with_no_entered_mass_is_priced_on_the_cad_mass_and_says_so():
     assert publish(STAGE_RATES).status_code == 201
     rows = by_id(compare(rate_set_id="client-shop").json())
-    assert rows["casting"]["status"] == "refused"
-    assert rows["casting"]["refusal"]["stages"][0]["code"] == "needs_mass"
+    assert rows["casting"]["status"] == "priced"
+    [mass] = rows["casting"]["stage_masses"]
+    assert mass["stage"] == "casting"
+    assert mass["mass_source"] == "cad_finished_mass"
+    assert mass["mass_kg"] > 0
     assert rows["milling_drilling"]["status"] == "priced"
+    assert rows["milling_drilling"]["stage_masses"] == []
 
 
 def test_a_row_says_what_its_cost_leaves_out_of_the_plan():

@@ -759,3 +759,8 @@ table.mini.actual-variance td.num, table.mini.actual-variance th.num { padding-l
 /* Advisory design-for-manufacturing flags. */
 .dfm-flags { list-style: none; margin: 10px 0 0; padding: 0; display: grid; gap: 10px; }
 .dfm-flag { border: 1px solid var(--line); border-left: 3px solid var(--warn-line); border-radius: 6px; padding: 10px 12px; display: grid; gap: 4px; font-size: 13.5px; }
+
+/* Route comparison: a stage's mass box stays compact, its source tag inline. */
+.route-compare .route-mass { display: flex; flex-wrap: wrap; align-items: center; gap: 4px; font-size: 12px; margin-top: 4px; }
+.route-compare .route-mass input { width: 6.5em; padding: 2px 4px; }
+.route-compare .route-mass .pill { display: inline-block; width: auto; }

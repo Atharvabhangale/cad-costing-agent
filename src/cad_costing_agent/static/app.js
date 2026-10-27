@@ -841,7 +841,8 @@ function renderResult(response) {
           `${escapeHtml(line.label)}: ${money(line.total_cost, currency)}` +
           (line.unit_basis === "per_kg"
             ? ` (${money(line.unit_rate, currency)}/kg × ${number(line.mass_kg, 3)} kg × ${line.quantity}` +
-              `${line.batch_charge ? ` + ${money(line.batch_charge, currency)} per batch` : ""})`
+              `${line.batch_charge ? ` + ${money(line.batch_charge, currency)} per batch` : ""})` +
+              (line.mass_note ? ` — ${escapeHtml(line.mass_note)}` : "")
             : line.unit_basis === "per_piece"
               ? ` (${money(line.unit_rate, currency)} × ${line.quantity}` +
                 `${line.batch_charge ? ` + ${money(line.batch_charge, currency)} per batch` : ""})`

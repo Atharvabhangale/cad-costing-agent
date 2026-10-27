@@ -275,9 +275,12 @@ optional one-off batch charge (pattern, die).
 - **Every stage or none.** A stage with no rate, or a per-kg stage with no entered mass,
   makes `/cost/cad-part` answer `422 route_stages_not_priceable` with a reason per stage,
   and nothing is stored.
-- **The per-kg mass is entered (`stage_inputs`), never derived.** The finished CAD mass is
-  never used in its place; for a material-supplying stage a mass below the part's is
-  refused. `mass` stays the finished part's own.
+- **The per-kg mass is the engineer's (`stage_inputs`) or, if none was entered, the finished
+  part's CAD mass** (volume x density) — a derivation, labelled `mass_source:
+  "cad_finished_mass"` with a `mass_note`, and editable. Never add a hidden allowance to it:
+  on a route that machines afterwards the note says the real blank is heavier by material the
+  CAD does not record. An *entered* blank lighter than the part is refused. `mass` stays the
+  finished part's own. (Changed at the user's request after Iteration 4; it was "entered only".)
 - **A route that starts with casting, forging, moulding, an additive build or a purchase
   does not charge material again** (`MATERIAL_SUPPLYING_STAGES`): `material_charged` is
   false, `total_material_cost` is 0 with `material_note` saying which stage carries it. A

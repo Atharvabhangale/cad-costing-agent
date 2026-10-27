@@ -16,12 +16,14 @@ problem with its reason; the caller refuses the whole estimate. Pricing the
 stages that can be priced and leaving the rest out would present part of the
 cost as all of it — the same rule the route classification applies.
 
-The mass a per-kg rate applies to is entered by a person, per stage, and is
-recorded with the estimate. The finished CAD mass is never used in its place: a
-casting is heavier than the part machined from it, and the difference is what a
-foundry charges for. For a stage that supplies the material, a mass below the
-finished part's is refused, because no blank is lighter than the part cut from
-it.
+The mass a per-kg rate applies to is the one a person entered for that stage,
+or — when none was entered — the finished part's own mass from the CAD model
+(its measured volume x the material's density). Each line records which
+(`mass_source`) and why (`mass_note`). The CAD mass is right for a part made as
+formed; for a casting or forging machined afterwards the blank is heavier by
+material the CAD file does not record, and the note says so rather than adding
+a hidden allowance. An entered blank lighter than the finished part is refused,
+because no blank is lighter than the part made from it.
 
 Material
 --------
@@ -74,7 +76,10 @@ class StageInput(BaseModel):
         default=None,
         gt=0,
         allow_inf_nan=False,
-        description="Per part. Entered by a person for a per-kg stage; never derived.",
+        description=(
+            "Per part, entered by a person. When absent, a per-kg stage uses the finished part's "
+            "CAD mass and labels it."
+        ),
     )
 
 
@@ -92,6 +97,11 @@ class StageCostLine(BaseModel):
     supplies_material: bool = False
     rate_note: str = ""
     formula: str = STAGE_COST_FORMULA
+    # For a per-kg stage: where the mass came from — 'entered' by a person, or
+    # 'cad_finished_mass' (the CAD part's own volume x density, used when none
+    # was entered) — and what that means for this route.
+    mass_source: str | None = None
+    mass_note: str = ""
 
 
 class StageProblem(BaseModel):
@@ -128,12 +138,15 @@ def price_stages(
     *,
     material_stage: str | None = None,
     finished_mass_kg: float | None = None,
+    route_machines: bool = False,
 ) -> StagePricing:
     """Price every stage, or report why each one that cannot be priced cannot be.
 
     `material_stage` is the stage id whose rate includes the material (see
-    `material_supplying_stage`); `finished_mass_kg` is the CAD part's own mass,
-    used only to refuse a blank lighter than the part.
+    `material_supplying_stage`). `finished_mass_kg` is the CAD part's own mass:
+    a per-kg stage with no entered mass is charged on it, labelled as such, and
+    an entered blank lighter than it is refused. `route_machines` says the route
+    machines the part afterwards, so a blank's real weight is above the CAD mass.
     """
     if quantity < 1:
         raise ValueError(f"quantity must be at least 1, got {quantity}.")
@@ -172,27 +185,50 @@ def price_stages(
             continue
 
         unit_cost: float | None = None
+        mass_kg = stage.mass_kg
+        mass_source: str | None = None
+        mass_note = ""
         if rate.unit_rate is not None:
             if rate.unit_basis == PER_KG:
-                if stage.mass_kg is None:
+                if mass_kg is not None:
+                    mass_source = "entered"
+                    mass_note = "Mass entered by the engineer."
+                elif finished_mass_kg is not None:
+                    # Derived, not invented: the finished part's own CAD volume x
+                    # density. It is the right figure for a part made as formed;
+                    # for one machined afterwards the real blank is heavier, by
+                    # material the CAD file does not record, and the note says so.
+                    mass_kg = finished_mass_kg
+                    mass_source = "cad_finished_mass"
+                    mass_note = f"Mass from the CAD model: the finished part, {finished_mass_kg:.4g} kg."
+                    if supplies_material and route_machines:
+                        mass_note += (
+                            " This route machines the part afterwards, so the blank is heavier "
+                            "by the material removed, which the CAD file does not record. Enter "
+                            "the blank's weight to correct it."
+                        )
+                    else:
+                        mass_note += " Edit it if the mass charged on differs."
+                else:
                     problems.append(
                         StageProblem(
                             stage=stage.stage,
                             label=stage.label,
                             code="needs_mass",
                             detail=(
-                                f"{stage.label} is priced per kg. Enter the mass it is charged "
-                                "on, per part — for a casting or forging, the blank's weight. "
-                                "The finished CAD mass is not used in its place."
+                                f"{stage.label} is priced per kg, and no mass was entered or "
+                                "measured from the CAD model. Enter the mass it is charged on, "
+                                "per part."
                             ),
                         )
                     )
                     continue
                 if (
-                    supplies_material
+                    mass_source == "entered"
+                    and supplies_material
                     and finished_mass_kg is not None
-                    and stage.mass_kg < finished_mass_kg
-                    and not math.isclose(stage.mass_kg, finished_mass_kg, rel_tol=1e-9)
+                    and mass_kg < finished_mass_kg
+                    and not math.isclose(mass_kg, finished_mass_kg, rel_tol=1e-9)
                 ):
                     problems.append(
                         StageProblem(
@@ -200,14 +236,14 @@ def price_stages(
                             label=stage.label,
                             code="needs_mass",
                             detail=(
-                                f"The {stage.label.lower()} mass entered ({stage.mass_kg:g} kg) "
+                                f"The {stage.label.lower()} mass entered ({mass_kg:g} kg) "
                                 f"is less than the finished part ({finished_mass_kg:.4g} kg). A "
                                 "blank cannot be lighter than the part made from it."
                             ),
                         )
                     )
                     continue
-                unit_cost = rate.unit_rate * stage.mass_kg
+                unit_cost = rate.unit_rate * mass_kg
             else:
                 unit_cost = rate.unit_rate
 
@@ -218,7 +254,9 @@ def price_stages(
                 label=stage.label,
                 unit_basis=rate.unit_basis,
                 unit_rate=rate.unit_rate,
-                mass_kg=stage.mass_kg if rate.unit_basis == PER_KG else None,
+                mass_kg=mass_kg if rate.unit_basis == PER_KG else None,
+                mass_source=mass_source,
+                mass_note=mass_note,
                 quantity=quantity,
                 unit_cost_per_part=unit_cost,
                 run_cost=run_cost,

@@ -1291,9 +1291,11 @@ reads as having none.
 - **Every stage or none.** A stage with no rate in the selected rate set, or a per-kg stage with
   no mass, returns a problem; `/cost/cad-part` refuses with `422 route_stages_not_priceable`
   naming each stage and stores nothing.
-- **The mass is entered, per stage, per part** (`stage_inputs`), and recorded on the estimate.
-  The finished CAD mass is never substituted. For a material-supplying stage a mass below the
-  finished part's is refused.
+- **The mass is the engineer's, per stage, per part** (`stage_inputs`, recorded on the
+  estimate), **or else the finished part's CAD mass**, labelled `cad_finished_mass` with a note.
+  That is exact for a part made as formed; for one machined afterwards the note says the blank
+  is heavier by material the CAD does not record — no allowance is invented. An entered blank
+  lighter than the finished part is refused.
 - **Material is not charged twice.** A route whose first stage is casting, forging, moulding,
   an additive build or a purchase gets its material from that stage's rate:
   `material_charged = false`, `total_material_cost = 0`, and `material_note` names the stage.
