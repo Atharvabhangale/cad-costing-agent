@@ -755,3 +755,7 @@ table.mini.actual-variance th { width: auto; }
 table.mini.actual-variance th:first-child { width: 34%; }
 table.mini.actual-variance td.num, table.mini.actual-variance th.num { padding-left: 12px; }
 .actual-note { margin: 4px 0; font-size: 13px; }
+
+/* Advisory design-for-manufacturing flags. */
+.dfm-flags { list-style: none; margin: 10px 0 0; padding: 0; display: grid; gap: 10px; }
+.dfm-flag { border: 1px solid var(--line); border-left: 3px solid var(--warn-line); border-radius: 6px; padding: 10px 12px; display: grid; gap: 4px; font-size: 13.5px; }

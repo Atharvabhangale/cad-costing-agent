@@ -77,6 +77,22 @@ class TimeProfileRow(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime, default=_utc_now)
 
 
+class DfmProfileRow(Base):
+    """One immutable version of a set of DFM thresholds (advisory flags only)."""
+
+    __tablename__ = "dfm_profiles"
+    __table_args__ = (UniqueConstraint("dfm_profile_id", "version", name="uq_dfm_profile_identity"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    dfm_profile_id: Mapped[str] = mapped_column(String(64), index=True)
+    version: Mapped[str] = mapped_column(String(32))
+    name: Mapped[str] = mapped_column(String(128))
+    description: Mapped[str] = mapped_column(String(512), default="")
+    is_illustrative: Mapped[bool] = mapped_column(Boolean, default=True)
+    rules: Mapped[list] = mapped_column(JSON)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=_utc_now)
+
+
 class EstimateRow(Base):
     """A completed estimate, kept for audit.
 

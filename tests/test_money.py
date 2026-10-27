@@ -413,6 +413,7 @@ def _pre_currency_engine():
         connection.execute(text("DROP TABLE IF EXISTS time_profiles"))
         connection.execute(text("DROP TABLE IF EXISTS quotations"))
         connection.execute(text("DROP TABLE IF EXISTS cost_actuals"))
+        connection.execute(text("DROP TABLE IF EXISTS dfm_profiles"))
         connection.execute(text("UPDATE alembic_version SET version_num = '0001'"))
     return engine
 
