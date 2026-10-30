@@ -1325,6 +1325,18 @@ Non-machining stages never become `PlannedOperation`s — they have no hourly ra
 in the route strip and as display rows of the operations table in route order
 (`plan.js`'s `routeStageRows`), priced from stage rates and outside every time total.
 
+**Timed welding.** Welding is the one stage with a time model, so the engineer may price it
+by time instead (`stage_inputs.welding.pricing = "timed"`; `stage_costing.TIMEABLE_STAGES`).
+`/cost/cad-part` then leaves the stage out of `price_stages` and adds `welding` to the plan's
+`route_processes`, so the welds the engineer adds — operations with a typed `WeldSpec`
+(fillet/butt, MIG/TIG, length, size) — are costed at the rate set's hourly `welding` rate,
+and the stage rate is not charged as well. Weld time is `ceil(size / mm_per_pass)` passes ×
+length / travel speed, divided by an arc-on factor, from `welding_*` time assumptions that
+default to None: the seeded profile times no weld, and a profile that publishes them does. A
+timed stage with no committed weld time is refused (`422 timed_stage_not_costed`) rather than
+priced at zero. A weld line records `system_time_operation_type = "welding"` and no
+`system_suggested_operation`, because the system estimated its time but never proposed it.
+
 ### Processing time, the plan, and the feedback record
 
 **What reaches the cost is one test.** `ManufacturingPlan.counts_toward_cost` — active, in the

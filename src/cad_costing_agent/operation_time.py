@@ -65,6 +65,15 @@ finished by following it.
     passes    = ceil(stock_allowance / depth_of_cut)
     cycle     = passes · (length + approach) / feed_rate
 
+**Welding** — one weld an engineer described, since no weld is detected from CAD::
+
+    passes = ceil(size / mm_per_pass)          (size: fillet leg, or butt plate thickness)
+    arc    = length · passes / travel_speed    (travel speed for the weld process)
+    cycle  = arc / arc_on_factor               (handling, cleaning between passes)
+
+Its parameters default to *absent*: a profile with none says so and the time is
+entered by hand, rather than a built-in figure pretending to be a welding shop.
+
 Setup time is a flat per-process figure, and is per *operation line* rather than
 per physical setup — six drilled holes listed separately carry six setups. That
 is stated in the assumptions rather than being quietly consolidated, because
@@ -76,6 +85,7 @@ from __future__ import annotations
 
 import math
 from enum import Enum
+from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
@@ -104,6 +114,28 @@ class TimeStatus(str, Enum):
 
     ESTIMATED = "estimated"
     NEEDS_USER_INPUT = "needs_user_input"
+
+
+class WeldSpec(BaseModel):
+    """One weld as the engineer described it. Nothing here comes from the CAD.
+
+    A weld is not a recognized feature — a STEP solid of a fabrication does not
+    say where its welds are — so every figure is typed by a person, and a
+    missing one leaves the weld needing input rather than taking a default.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    weld_type: Literal["fillet", "butt"] = "fillet"
+    process: Literal["mig", "tig"] = "mig"
+    length_mm: float | None = Field(default=None, gt=0, le=1_000_000.0, allow_inf_nan=False)
+    size_mm: float | None = Field(
+        default=None,
+        gt=0,
+        le=500.0,
+        allow_inf_nan=False,
+        description="Fillet leg length, or the plate thickness of a butt weld.",
+    )
 
 
 class TimeAssumptions(BaseModel):
@@ -188,6 +220,28 @@ class TimeAssumptions(BaseModel):
         description="Axial material taken off an end face or shoulder when it is faced.",
     )
     turning_setup_minutes: float = Field(default=12.0, ge=0, le=10000.0)
+
+    # --- welding ---
+    #
+    # None by default, unlike everything above: the built-in baseline describes
+    # a machining shop, and no welding figure is assumed on its behalf. A
+    # profile that leaves these out estimates no weld; one that publishes them
+    # does, under its own name and version.
+    welding_mig_travel_speed_mm_per_min: float | None = Field(default=None, gt=0, le=5000.0)
+    welding_tig_travel_speed_mm_per_min: float | None = Field(default=None, gt=0, le=5000.0)
+    welding_mm_per_pass: float | None = Field(
+        default=None,
+        gt=0,
+        le=50.0,
+        description="Weld size one pass deposits; a larger leg or thicker butt needs more passes.",
+    )
+    welding_arc_on_factor: float | None = Field(
+        default=None,
+        gt=0,
+        le=1.0,
+        description="Fraction of welding time the arc is on; the rest is handling and cleaning.",
+    )
+    welding_setup_minutes: float | None = Field(default=None, ge=0, le=10000.0)
 
     # --- shared spindle limits ---
     #
@@ -838,10 +892,71 @@ def _turning(
     return cycle, "turning_time_baseline_v1", evidence, assumptions, parameters
 
 
+_WELDING_PARAMETERS = (
+    "welding_mm_per_pass",
+    "welding_arc_on_factor",
+    "welding_setup_minutes",
+)
+
+
+def _welding(weld: WeldSpec | None, a: TimeAssumptions):
+    """Arc time for one described weld, or the reason none can be given."""
+    speed_field = f"welding_{weld.process if weld else 'mig'}_travel_speed_mm_per_min"
+    absent = [name for name in (speed_field, *_WELDING_PARAMETERS) if getattr(a, name) is None]
+    if absent:
+        return _needs_input(
+            "This time profile has no welding parameters ("
+            + ", ".join(absent)
+            + "), so no weld time is estimated. Select a profile that publishes them, or enter "
+            "the time.",
+            absent,
+            a.is_illustrative,
+        )
+    missing = []
+    if weld is None or weld.length_mm is None:
+        missing.append("weld_length_mm")
+    if weld is None or weld.size_mm is None:
+        missing.append("weld_size_mm")
+    if missing:
+        return _needs_input(
+            "A weld's time needs its length and size, and neither can be read from the CAD "
+            "model. Enter them on the weld.",
+            missing,
+            a.is_illustrative,
+        )
+
+    speed = getattr(a, speed_field)
+    passes = max(1, math.ceil(round(weld.size_mm / a.welding_mm_per_pass, 9)))
+    arc = weld.length_mm * passes / speed
+    cycle = arc / a.welding_arc_on_factor
+    size_name = "leg" if weld.weld_type == "fillet" else "plate thickness"
+    evidence = [
+        f"{weld.weld_type} weld, {weld.process.upper()}, {weld.length_mm:g} mm long, "
+        f"{size_name} {weld.size_mm:g} mm — entered by the engineer, not read from the CAD",
+    ]
+    assumptions = [
+        f"{passes} pass(es) = ceil({weld.size_mm:g} mm / {a.welding_mm_per_pass:g} mm per pass)",
+        f"travel speed {speed:g} mm/min ({weld.process.upper()})",
+        f"arc time {arc:.2f} min = {weld.length_mm:g} × {passes} / {speed:g}",
+        f"arc-on factor {a.welding_arc_on_factor:g}: cycle = arc time / factor",
+    ]
+    parameters = {
+        speed_field: speed,
+        "welding_mm_per_pass": a.welding_mm_per_pass,
+        "welding_arc_on_factor": a.welding_arc_on_factor,
+        "welding_setup_minutes": a.welding_setup_minutes,
+        "weld_length_mm": weld.length_mm,
+        "weld_size_mm": weld.size_mm,
+        "weld_passes": float(passes),
+    }
+    return cycle, "welding_time_baseline_v1", evidence, assumptions, parameters
+
+
 _SETUP_MINUTES = {
     "drilling": lambda a: a.drilling_setup_minutes,
     "milling": lambda a: a.milling_setup_minutes,
     "turning": lambda a: a.turning_setup_minutes,
+    "welding": lambda a: a.welding_setup_minutes,
 }
 
 
@@ -860,8 +975,12 @@ def estimate_operation_time(
     profile=None,
     drilling_steps: list[float] | None = None,
     stock_diameter_mm: float | None = None,
+    weld: WeldSpec | None = None,
 ) -> OperationTimeEstimate:
     """Estimate setup and cycle time for one operation. Deterministic.
+
+    For welding, `weld` is the engineer's description of the weld; nothing
+    about a weld is read from the geometry.
 
     For drilling, `drilling_steps` times a sequence the engineer chose;
     omitted, the drilling rule's own sequence is timed. Either way every
@@ -924,6 +1043,8 @@ def estimate_operation_time(
             else next((option.steps for option in options if option.suggested), [])
         )
         drilling_fields = {"drilling_steps": chosen, "drilling_options": options}
+    elif process == "welding":
+        outcome = _welding(weld, a)
     elif process == "turning" and (feature_type or "").lower() == "plane":
         outcome = _facing(dimensions, a)
     elif process == "turning":
@@ -955,7 +1076,10 @@ def estimate_operation_time(
         confidence=confidence,
         method=method,
         reason=(
-            f"{process.capitalize()} time derived from the feature's own dimensions and the "
+            "Welding time derived from the weld the engineer described and the profile's welding "
+            "parameters."
+            if process == "welding"
+            else f"{process.capitalize()} time derived from the feature's own dimensions and the "
             "configured cutting parameters."
         ),
         evidence=evidence,
@@ -1006,6 +1130,7 @@ __all__ = [
     "OperationTimeEstimate",
     "TimeAssumptions",
     "TimeStatus",
+    "WeldSpec",
     "estimate_for_suggestion",
     "estimate_operation_time",
 ]
@@ -1037,6 +1162,9 @@ class OperationTimeInput(BaseModel):
             "Drilling only: the drill diameters the engineer chose, smallest first, ending at the "
             "hole's own diameter. Omit to time the drilling rule's sequence."
         ),
+    )
+    weld: WeldSpec | None = Field(
+        default=None, description="Welding only: the weld as the engineer described it."
     )
 
 
@@ -1111,6 +1239,7 @@ def estimate_operations(request: OperationTimeRequest, *, profile=None) -> Opera
                 profile=profile,
                 drilling_steps=operation.drilling_steps,
                 stock_diameter_mm=request.stock_diameter_mm,
+                weld=operation.weld,
             ),
         )
         for index, operation in enumerate(request.operations, start=1)

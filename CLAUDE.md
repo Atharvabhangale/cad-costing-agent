@@ -255,7 +255,9 @@ around saying so.
 - **It imports `features.model` and `operation_suggestions`; only `main.py` imports it.** A
   route stage never becomes an operation — a casting or bending stage is a line in the
   route strip and a display row in the operations table (`routeStageRows`, no `plan-row`
-  class), never a `PlannedOperation`, because it has no hourly rate.
+  class), never a `PlannedOperation`, because it has no hourly rate. The one exception is a
+  *timeable* stage the engineer chose to price by time (welding, below): the stage stays a
+  display row, and its welds are ordinary operations the engineer adds.
 - **A decided route regroups the plan; it never edits it.** `plan_processes` (computed, `None`
   until someone decides) becomes `ManufacturingPlan.route_processes`; `in_route` keeps an
   operation whose process is outside it in the plan, unchanged, but out of
@@ -300,6 +302,20 @@ optional one-off batch charge (pattern, die).
   against `STAGES` in `main.py` (`_stage_rate_problems`) at publish and validate.
 - **No seeded rate set has stage rates**, and none should be added to a seeded version: it
   would make a fresh database disagree with an existing one. Client rates are published.
+- **Welding may be priced by time instead** (`TIMEABLE_STAGES = {"welding": "welding"}`, the
+  only stage with a time model). `stage_inputs[stage].pricing = "timed"` takes the stage out
+  of `price_stages` and adds its process to `route_processes`, so it is charged once — by its
+  weld operations at the rate set's hourly `welding` rate — and never also by the stage rate.
+  A timed stage with no committed weld time is `422 timed_stage_not_costed`, never zero; any
+  other stage asked to be timed is a 400. Absent `pricing` is the stage rate, byte-for-byte.
+- **A weld is typed, never detected.** `PlannedOperation.weld` (`WeldSpec`: type, MIG/TIG,
+  length, size) is the engineer's; a weld line has `system_suggested_operation = None` (no
+  rule proposed it) and `system_time_operation_type = "welding"`, which `estimated_for` reads
+  so its system time can apply. Describing the weld again re-estimates it and clears the
+  acceptance (`with_weld`; `plan.js`'s `estimateWeld`). The `welding_*` `TimeAssumptions`
+  default to **None** — the seeded profile times no weld; `illustrative-welding-2026` is
+  published by `scripts/publish_illustrative_welding_time_profile.py`. `plan.js`'s
+  `TIMED_STAGE_PROCESSES` and `estimatedFor` mirror the backend; a test holds each.
 - The comparison (`estimates.decompose`) reads a material not charged at a zero rate and
   attributes stage changes as `route_stage`; the quotation adds a `route_stages` line only
   when there are stages.

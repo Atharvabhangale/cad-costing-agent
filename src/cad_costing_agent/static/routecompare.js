@@ -198,10 +198,8 @@ function renderRouteComparison() {
   // value, as the route card does.
   host.querySelectorAll("input.route-mass-input").forEach((input) =>
     input.addEventListener("input", () => {
-      state.stageInputs = state.stageInputs || {};
       const raw = input.value.trim();
-      if (raw === "") delete state.stageInputs[input.dataset.stage];
-      else state.stageInputs[input.dataset.stage] = { mass_kg: Number(raw) };
+      setStageInput(input.dataset.stage, "mass_kg", raw === "" ? null : Number(raw));
       host.querySelectorAll(`input.route-mass-input[data-stage="${input.dataset.stage}"]`).forEach((other) => {
         if (other !== input) other.value = raw;
       });

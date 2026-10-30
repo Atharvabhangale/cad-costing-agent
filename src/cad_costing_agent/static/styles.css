@@ -401,6 +401,9 @@ input.needs-input { border-color: var(--warn-line); background: var(--warn-bg); 
 .op-cell select.op-process { flex: 0 0 auto; max-width: 130px; }
 table.ops.plan .op-cell input.op-name { flex: 1 1 auto; min-width: 0; width: auto; margin-top: 0; }
 .op-cell .was { flex: 0 0 auto; }
+/* A weld's description sits in the Feature column: type, process, length, size. */
+.weld-cell select.weld-field { flex: 0 0 auto; width: auto; min-width: 74px; margin-top: 0; }
+.weld-cell input.weld-num { flex: 0 0 auto; width: 84px; margin-top: 0; }
 
 /* Give the width back to the columns that carry the answer. */
 table.ops.plan th:nth-child(1), table.ops.plan td:nth-child(1) { width: 1%; }

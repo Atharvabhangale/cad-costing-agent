@@ -62,6 +62,43 @@ MATERIAL_SUPPLYING_STAGES = frozenset(
     {"casting", "forging", "moulding", "additive_build", "purchase"}
 )
 
+# Stages an engineer may choose to price by time instead of by stage rate, and
+# the hourly process type their operations are costed as. Only welding: it is
+# the one stage with a time model (`operation_time`'s weld formula). A timed
+# stage is left out of `price_stages` — its cost comes from its operations —
+# so it can never be charged twice.
+TIMEABLE_STAGES = {"welding": "welding"}
+STAGE_RATE_PRICING = "stage_rate"
+TIMED_PRICING = "timed"
+
+
+def timed_stages(stage_input_values: dict, route_stage_ids: list[str]) -> dict[str, str]:
+    """Stage id → process type for every stage of this route the engineer chose to time.
+
+    Reads each stage's `pricing` from the stage inputs. Absent is the stage rate.
+    A stage not in this route is ignored (it belongs to a route being compared,
+    not this one); asking to time a stage that has no time model is refused.
+    """
+    timed: dict[str, str] = {}
+    for stage_id, values in (stage_input_values or {}).items():
+        pricing = (values or {}).get("pricing", STAGE_RATE_PRICING) if isinstance(values, dict) else None
+        if pricing not in (STAGE_RATE_PRICING, TIMED_PRICING):
+            raise ValueError(
+                f"Stage '{stage_id}' pricing must be '{STAGE_RATE_PRICING}' or '{TIMED_PRICING}'."
+            )
+        if pricing != TIMED_PRICING:
+            continue
+        if stage_id not in TIMEABLE_STAGES:
+            raise ValueError(
+                f"Stage '{stage_id}' cannot be priced by time: only "
+                + ", ".join(sorted(TIMEABLE_STAGES))
+                + " has a time model. It is priced from its stage rate."
+            )
+        if stage_id in route_stage_ids:
+            timed[stage_id] = TIMEABLE_STAGES[stage_id]
+    return timed
+
+
 STAGE_COST_FORMULA = (
     "total_cost = unit_rate x (mass_kg if per_kg else 1) x quantity + batch_charge"
 )

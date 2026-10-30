@@ -529,6 +529,31 @@ def test_route_stages_are_rows_of_the_plan_but_never_operations():
     assert "stageRows.before" in render and "stageRows.after" in render
 
 
+def test_the_browsers_timeable_stages_mirror_the_backends():
+    """plan.js decides which stages offer time pricing; the server decides which
+    it accepts. If the two lists drift, the UI offers a choice the server refuses."""
+    from cad_costing_agent.stage_costing import TIMEABLE_STAGES
+
+    source = (STATIC_PATH / "plan.js").read_text(encoding="utf-8")
+    declared = re.search(r"const TIMED_STAGE_PROCESSES = (\{[^}]*\});", source).group(1)
+    mirrored = dict(re.findall(r"(\w+): \"(\w+)\"", declared))
+    assert mirrored == TIMEABLE_STAGES
+
+
+def test_a_weld_lines_time_resolves_like_the_backends():
+    """estimatedFor mirrors PlannedOperation.estimated_for: the suggested process,
+    else the one a weld's time was estimated for — and nothing else."""
+    source = (STATIC_PATH / "plan.js").read_text(encoding="utf-8")
+    body = source.split("function estimatedFor(operation)", 1)[1].split("\nfunction ", 1)[0]
+    assert "system_suggested_operation || operation.system_time_operation_type" in body
+    applies = source.split("function systemTimeApplies(operation)", 1)[1].split("\nfunction ", 1)[0]
+    assert "estimatedFor(operation)" in applies
+    # Describing a weld again drops the earlier acceptance, as with_weld does.
+    weld = source.split("async function estimateWeld(operation)", 1)[1].split("\nfunction ", 1)[0]
+    assert "operation.system_time_accepted = false" in weld
+    assert 'operation.system_time_operation_type = "welding"' in weld
+
+
 def test_ui_contains_no_costing_arithmetic():
     """Costing stays in the backend; the page only formats what it is given."""
     app_js = (STATIC_PATH / "app.js").read_text(encoding="utf-8")

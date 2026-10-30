@@ -136,6 +136,7 @@ from cad_costing_agent.stage_costing import (
     StageInput,
     material_supplying_stage,
     price_stages,
+    timed_stages,
 )
 from cad_costing_agent.process_classification import (
     FAMILY_LABELS,
@@ -3061,6 +3062,22 @@ def price_cad_part(
                     },
                 )
 
+        # What a person entered per route stage: a mass, and for a timeable stage
+        # (welding) whether it is priced by time instead of by its stage rate.
+        stage_input_values: dict = {}
+        if stage_inputs is not None:
+            try:
+                stage_input_values = json.loads(stage_inputs)
+            except json.JSONDecodeError as exc:
+                raise ValueError(f"'stage_inputs' must be valid JSON: {exc}") from exc
+            if not isinstance(stage_input_values, dict):
+                raise ValueError("'stage_inputs' must be an object keyed by route stage id.")
+        timed: dict[str, str] = {}
+        if classification is not None and classification.route is not None:
+            timed = timed_stages(
+                stage_input_values, [stage.stage for stage in classification.route.stages]
+            )
+
         # A manufacturing plan is the richer way to say the same thing, so the
         # two are mutually exclusive: accepting both would leave it ambiguous
         # which one priced the part.
@@ -3081,9 +3098,16 @@ def price_cad_part(
             # recomputed here, never from what the browser says it applied —
             # so the operations priced and the route recorded cannot disagree.
             if classification is not None:
+                route_processes = classification.plan_processes
+                if route_processes is not None:
+                    # A stage priced by time is costed through its operations,
+                    # so its process belongs to the route like a machining stage.
+                    route_processes = route_processes + [
+                        process for process in timed.values() if process not in route_processes
+                    ]
                 plan = plan.model_copy(
                     update={
-                        "route_processes": classification.plan_processes,
+                        "route_processes": route_processes,
                         "as_formed_feature_types": classification.as_formed_feature_types,
                     }
                 )
@@ -3099,7 +3123,30 @@ def price_cad_part(
 
         if classification is not None:
             route_differences = plan_route_differences(
-                classification, [requirement.process_type for requirement in requirement_models]
+                classification,
+                [requirement.process_type for requirement in requirement_models],
+                timed_processes=timed.values(),
+            )
+
+        # A stage priced by time has no stage-rate line, so with no costed
+        # operation of its process it would cost nothing at all. Refused instead.
+        costed_processes = {requirement.process_type for requirement in requirement_models}
+        untimed = [
+            stage_id for stage_id, process in timed.items() if process not in costed_processes
+        ]
+        if untimed:
+            labels = ", ".join(STAGES[stage_id][0] for stage_id in untimed)
+            raise HTTPException(
+                status_code=422,
+                detail={
+                    "error": "timed_stage_not_costed",
+                    "message": (
+                        f"No estimate was produced: {labels} is priced by time, and the plan has "
+                        "no operation of it with a committed time. Add the welds and accept or "
+                        "enter their times, or price it from its stage rate."
+                    ),
+                    "stages": untimed,
+                },
             )
 
         # A bar counts only once a person confirmed it; an unconfirmed proposal
@@ -3137,14 +3184,6 @@ def price_cad_part(
         # stage rates — every one of them, or the estimate is refused with each
         # stage's reason. Which stages those are comes from the route catalog by
         # stage id, not from what the payload says about itself.
-        stage_input_values: dict = {}
-        if stage_inputs is not None:
-            try:
-                stage_input_values = json.loads(stage_inputs)
-            except json.JSONDecodeError as exc:
-                raise ValueError(f"'stage_inputs' must be valid JSON: {exc}") from exc
-            if not isinstance(stage_input_values, dict):
-                raise ValueError("'stage_inputs' must be an object keyed by route stage id.")
         stage_lines = []
         material_supplied_by: str | None = None
         if classification is not None and classification.costing_status == "stage_rates_required":
@@ -3156,7 +3195,8 @@ def price_cad_part(
                     mass_kg=(stage_input_values.get(stage.stage) or {}).get("mass_kg"),
                 )
                 for stage in classification.route.stages
-                if stage.stage not in STAGES or STAGES[stage.stage][1] is None
+                if (stage.stage not in STAGES or STAGES[stage.stage][1] is None)
+                and stage.stage not in timed
             ]
             finished = calculate_mass_from_geometry(
                 geometry,

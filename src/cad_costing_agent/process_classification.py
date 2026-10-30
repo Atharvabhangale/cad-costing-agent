@@ -1211,17 +1211,22 @@ def record_route_decision(
 
 
 def plan_route_differences(
-    classification: ProcessClassification, plan_processes: Collection[str]
+    classification: ProcessClassification,
+    plan_processes: Collection[str],
+    timed_processes: Collection[str] = (),
 ) -> list[str]:
     """Where the operations being costed disagree with the effective route.
 
     Reported, never corrected: the plan and the route are both the engineer's,
-    and which one is wrong is theirs to say.
+    and which one is wrong is theirs to say. `timed_processes` are the process
+    types of stages the engineer chose to price by time (welding), which the
+    route then includes as operations.
     """
     route = classification.route
     if route is None or not route.stages:
         return []
     route_processes = {stage.process_type for stage in route.stages if stage.process_type}
+    route_processes |= set(timed_processes)
     used = {process.strip().lower() for process in plan_processes}
     notes = [
         f"The plan costs {process} operations, which the route '{route.label}' does not include."

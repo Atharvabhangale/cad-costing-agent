@@ -856,6 +856,47 @@ all. One test added. Suite: **1,760 passing**, 1 skipped.
   (1,722 collected, 1 skipped). One file added, `static/estimateflow.js`. **No
   Python file changed, no endpoint, no schema, no migration.**
 
+### Welding priced by time (Iteration B)
+
+Following the research into aPriori and Teamcenter Product Cost Management, welding can now
+be costed the way those tools cost it: as operations with a time and an hourly rate, instead
+of one per-piece stage rate. On the route card, the welding stage's *Priced by* choice
+switches to "weld time × hourly rate"; its stage row then carries **+ Add weld**, and each
+weld is a row where the engineer types type (fillet/butt), process (MIG/TIG), length and leg
+or plate size — no weld is detected from CAD. The server estimates its time under the
+selected profile (passes = ceil(size / mm per pass); arc = length × passes / travel speed;
+cycle = arc / arc-on factor), and as with every estimate nothing is costed until it is
+accepted or typed. The welding stage is then left out of stage pricing, so it is charged
+once. A timed stage with no committed weld is refused (422 `timed_stage_not_costed`); asking
+to time any other stage is a 400; sending no choice is the stage-rate behaviour unchanged.
+The `welding_*` time parameters default to *absent*, so the seeded `poc-baseline-time` still
+describes a machining shop and times no weld. Only welding is timeable; cutting, fit-up and
+weld grinding stay on stage rates.
+
+Illustrative data, published by script and never seeded: `illustrative-india-2026` **v1.3.0**
+adds an hourly `welding` rate (machine ₹250/h from a built-up MIG-cell estimate — set,
+power, wire, gas, tips — and labour ₹90/h, the same skilled-minimum basis; ESTIMATED), and
+`scripts/publish_illustrative_welding_time_profile.py` publishes `illustrative-welding-2026`
+(the baseline's 26 machining parameters unchanged plus MIG 300 mm/min, TIG 100 mm/min,
+6 mm per pass, arc-on 0.45, setup 15 min; ESTIMATED). On the scratch database it is
+**v1.0.1**: a v1.0.0 published while the server still predated the welding fields was stored
+without them and, being immutable, stays there unused; the script now reads the server's
+schema first and refuses instead.
+
+Verified live in headless Chrome on `model1_1.stp`, 10 off, India rates v1.3.0, welding
+profile v1.0.1, cutting + welding route:
+
+| Welding priced by | Stages | Operations | Total |
+|---|---|---|---|
+| stage rate | cutting 250 + fit-up 400 + welding 1,000 + grinding 500 = 2,150 | none | ₹3,920.31 |
+| time, nothing timed yet | — refused: "Welding / joining is priced by time, and the plan has no operation of it with a committed time" | | |
+| time, one 600 mm × 8 mm MIG fillet, estimate accepted | cutting 250 + fit-up 400 + grinding 500 = 1,150 | welding: 2 passes, 4.00 min arc / 0.45 = **8.89 min**, setup 10 = ₹545.43 | ₹3,365.74 |
+
+With only the length entered the weld said it was missing `weld_size_mm` and had no time.
+Not done: the setup's own time is the plan's existing estimate (10 min, the largest machining
+baseline when the plan was built), not the weld's 15 min — the engineer types it if the weld
+fixture differs; and a weld added beside 31 parked operations is numbered after them.
+
 ### Route stages shown as rows of the operations table
 
 Asked why a decided cutting + welding route showed none of its steps among the operations,

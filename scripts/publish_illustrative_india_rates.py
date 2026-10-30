@@ -1,6 +1,8 @@
 """Publish an ILLUSTRATIVE India rate set through the ordinary API.
 
     python scripts\\publish_illustrative_india_rates.py --base-url http://127.0.0.1:8001
+    python scripts\\publish_illustrative_india_rates.py --version 1.2.0   # an earlier version
+    python scripts\\publish_illustrative_india_rates.py --dry-run         # print, publish nothing
 
 Nothing here is client data. The figures were gathered from public web pages on
 2026-10-27 — mostly marketplace asking prices and trade-index summaries read
@@ -17,7 +19,13 @@ v1.1.0 adds those estimates (pattern, die and mould charges, forging, moulding,
 drilling, grinding, and a demo-only purchased-part price) on top of v1.0.0, which
 left them out. v1.2.0 adds the route steps the catalog now prices separately (fettling,
 trimming, deburring, fit-up, weld finishing, degating, support removal), all ESTIMATED.
-Rate set versions are immutable, so earlier versions stay as published.
+v1.3.0 adds a `welding` hourly rate (an illustrative MIG welding cell) to `operations`,
+so welding can be costed as a timed operation rather than only as the flat per-piece
+stage rate; the weld time itself comes from a time profile, published separately by
+scripts\\publish_illustrative_welding_time_profile.py. Everything else is v1.2.0 unchanged.
+Rate set versions are immutable, so earlier versions stay as published. `--version`
+selects which of v1.2.0 / v1.3.0 this script publishes (default: the latest, v1.3.0);
+v1.0.0 and v1.1.0 were published by earlier revisions of this script and are not rebuilt.
 
 The rate set is published with is_illustrative = true, which keeps the app's
 "illustrative rates" warning on every estimate made with it. Publishing goes
@@ -26,12 +34,13 @@ refused (409) and never overwritten.
 """
 
 import argparse
+import copy
 import json
 import sys
 import urllib.error
 import urllib.request
 
-RATE_SET = {
+RATE_SET_V1_2_0 = {
     "rate_set_id": "illustrative-india-2026",
     "name": "Illustrative India rates (web research, Oct 2026)",
     "version": "1.2.0",
@@ -228,14 +237,48 @@ RATE_SET = {
     },
 }
 
+# v1.3.0 = v1.2.0 + a `welding` hourly rate. Built from v1.2.0 so the two cannot drift.
+RATE_SET_V1_3_0 = copy.deepcopy(RATE_SET_V1_2_0)
+RATE_SET_V1_3_0["version"] = "1.3.0"
+RATE_SET_V1_3_0["description"] = (
+    RATE_SET_V1_2_0["description"]
+    + " v1.3.0 adds an hourly `welding` rate (ESTIMATED MIG cell) so a weld can be costed as a "
+    "timed operation."
+)
+RATE_SET_V1_3_0["operations"]["welding"] = {
+    # ESTIMATED (assistant, demo only): no published Indian MIG-cell hourly rate was found
+    # (only per-metre and per-piece welding prices, already used for the `welding` stage rate).
+    # Machine rate is built up for a ~400 A MIG set, per hour of the job:
+    #   set depreciation + maintenance ~30, power ~40, wire (~0.7 kg/h deposited x ~110/kg) ~80,
+    #   shielding gas ~70, tips/nozzles/liners ~10  =  ~230, rounded up to 250.
+    # Labour is the same statutory skilled minimum wage basis as the other operations (90/h);
+    # a certified welder is often paid more, so treat 90 as a floor.
+    "machine_rate_per_hour": 250.0,
+    "labor_rate_per_hour": 90.0,
+}
+
+RATE_SETS = {"1.2.0": RATE_SET_V1_2_0, "1.3.0": RATE_SET_V1_3_0}
+LATEST_VERSION = "1.3.0"
+
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--base-url", default="http://127.0.0.1:8001")
+    parser.add_argument(
+        "--version",
+        choices=sorted(RATE_SETS),
+        default=LATEST_VERSION,
+        help=f"which version to publish (default {LATEST_VERSION})",
+    )
+    parser.add_argument("--dry-run", action="store_true", help="print the rate set, publish nothing")
     args = parser.parse_args()
+    rate_set = RATE_SETS[args.version]
+    if args.dry_run:
+        print(json.dumps(rate_set, indent=2))
+        return 0
     request = urllib.request.Request(
         f"{args.base_url.rstrip('/')}/rates",
-        data=json.dumps(RATE_SET).encode(),
+        data=json.dumps(rate_set).encode(),
         headers={"Content-Type": "application/json"},
         method="POST",
     )

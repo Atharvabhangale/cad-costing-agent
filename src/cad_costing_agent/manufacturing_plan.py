@@ -72,6 +72,7 @@ from cad_costing_agent.operation_time import (
     OperationTimeEstimate,
     TimeAssumptions,
     TimeStatus,
+    WeldSpec,
     estimate_for_suggestion,
     estimate_operation_time,
 )
@@ -392,6 +393,13 @@ class PlannedOperation(BaseModel):
         default_factory=dict,
         description="The parameter values that actually entered this operation's calculation.",
     )
+    system_time_operation_type: str | None = Field(
+        default=None,
+        description=(
+            "The process a system time was estimated for on a line no rule proposed — a weld the "
+            "engineer added and described. None: the time is for `system_suggested_operation`."
+        ),
+    )
     system_time_status: TimeStatus = TimeStatus.NEEDS_USER_INPUT
     system_time_reason: str = ""
     system_time_evidence: list[str] = Field(default_factory=list)
@@ -436,6 +444,12 @@ class PlannedOperation(BaseModel):
         ),
     )
 
+    # --- welding: the weld as the engineer described it, never read from CAD ---
+    weld: WeldSpec | None = Field(
+        default=None,
+        description="Welding lines only. A system weld time is estimated from these figures.",
+    )
+
     # ---------------------------------------------------------------- derived
 
     @property
@@ -477,6 +491,12 @@ class PlannedOperation(BaseModel):
         )
 
     @property
+    def estimated_for(self) -> str | None:
+        """The process the system's time is for: the suggested one, or — on a line
+        no rule proposed — the one recorded when its time was estimated."""
+        return self.system_suggested_operation or self.system_time_operation_type
+
+    @property
     def system_time_applies(self) -> bool:
         """Whether the system's estimate is still for the process now selected.
 
@@ -485,9 +505,9 @@ class PlannedOperation(BaseModel):
         """
         if self.system_time_status is not TimeStatus.ESTIMATED:
             return False
-        if self.system_suggested_operation is None:
+        if self.estimated_for is None:
             return False
-        if self.operation_type != self.system_suggested_operation:
+        if self.operation_type != self.estimated_for:
             return False
         # A drilling sequence the system never timed has no system time.
         return self.system_cycle_for_choice is not None
@@ -564,7 +584,7 @@ class PlannedOperation(BaseModel):
             return "This operation has no process, so it cannot be costed."
         if self.system_time_status is TimeStatus.ESTIMATED and not self.system_time_applies:
             return (
-                f"The estimated time was for {self.system_suggested_operation}, but this "
+                f"The estimated time was for {self.estimated_for}, but this "
                 f"operation is now {self.operation_type}. Enter a time for the process you chose."
             )
         return NOT_COSTED_WITHOUT_TIME
@@ -652,6 +672,21 @@ class PlannedOperation(BaseModel):
                 "system_time_missing": list(estimate.missing),
                 "system_drilling_steps": list(estimate.drilling_steps),
                 "system_drilling_options": list(estimate.drilling_options),
+            }
+        )
+
+    def with_weld(self, weld: WeldSpec, estimate: OperationTimeEstimate) -> "PlannedOperation":
+        """Record the weld the engineer described and the system's time for it.
+
+        The time depends on the engineer's own figures, so describing the weld
+        again re-estimates it — and clears any earlier acceptance, because what
+        was accepted was the time for a weld that is no longer the one described.
+        """
+        return self.with_estimate(estimate).model_copy(
+            update={
+                "weld": weld,
+                "system_time_operation_type": "welding",
+                "system_time_accepted": False,
             }
         )
 

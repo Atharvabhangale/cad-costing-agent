@@ -865,6 +865,19 @@
         </div>
       </div>
       <div class="card">
+        <h3>Welding</h3>
+        <p class="hint">Blank by default: no welding figure is assumed. Leave these empty and a
+          weld's time has to be entered by hand; fill them in and welds are timed from their
+          length and size.</p>
+        <div class="grid3">
+          <label>MIG travel speed (mm/min) <input id="t-weld-mig" data-param="welding_mig_travel_speed_mm_per_min" type="number" step="any"></label>
+          <label>TIG travel speed (mm/min) <input id="t-weld-tig" data-param="welding_tig_travel_speed_mm_per_min" type="number" step="any"></label>
+          <label>Weld size per pass (mm) <input id="t-weld-pass" data-param="welding_mm_per_pass" type="number" step="any"></label>
+          <label>Arc-on factor (0–1) <input id="t-weld-arc" data-param="welding_arc_on_factor" type="number" step="any"></label>
+          <label>Setup (min) <input id="t-weld-setup" data-param="welding_setup_minutes" type="number" step="any"></label>
+        </div>
+      </div>
+      <div class="card">
         <h3>Spindle limits — shared by every process</h3>
         <div class="grid3">
           <label>Minimum spindle (rpm) <input id="t-rpm-min" data-param="min_spindle_rpm" type="number" step="any"></label>

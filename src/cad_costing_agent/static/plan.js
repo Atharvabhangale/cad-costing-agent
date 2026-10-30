@@ -146,12 +146,7 @@ async function buildPlanFromSuggestions(result) {
   $("ops-note").textContent = "Estimating times…";
   // Times are estimated under the selected published profile, so every
   // prediction can name the assumptions that produced it.
-  const params = new URLSearchParams();
-  if ($("time_profile_id").value) params.set("time_profile_id", $("time_profile_id").value);
-  if ($("time_profile_version").value) {
-    params.set("time_profile_version", $("time_profile_version").value);
-  }
-  const query = params.toString() ? `?${params}` : "";
+  const query = timeProfileQuery();
 
   let times;
   try {
@@ -185,24 +180,7 @@ async function buildPlanFromSuggestions(result) {
   const byId = new Map(times.estimates.map((entry) => [entry.operation_id, entry.estimate]));
   operations.forEach((operation) => {
     const estimate = byId.get(operation.operation_id);
-    if (!estimate) return;
-    operation.system_suggested_setup_time = estimate.setup_time_minutes;
-    operation.system_suggested_cycle_time = estimate.cycle_time_minutes;
-    operation.system_time_method = estimate.method;
-    operation.system_time_confidence = estimate.confidence;
-    operation.system_time_status = estimate.time_status;
-    operation.system_time_reason = estimate.reason;
-    operation.system_time_evidence = estimate.evidence || [];
-    operation.system_time_assumptions = estimate.assumptions || [];
-    operation.system_time_missing = estimate.missing || [];
-    operation.system_time_profile_id = estimate.time_profile_id;
-    operation.system_time_profile_version = estimate.time_profile_version;
-    operation.system_time_profile_name = estimate.time_profile_name;
-    operation.system_time_parameters = estimate.parameters || {};
-    // How the hole is drilled, and the alternatives with their own times.
-    // Copied explicitly: a field this builder drops never reaches the server.
-    operation.system_drilling_steps = estimate.drilling_steps || [];
-    operation.system_drilling_options = estimate.drilling_options || [];
+    if (estimate) applyEstimate(operation, estimate);
   });
 
   const baselines = operations
@@ -219,15 +197,151 @@ async function buildPlanFromSuggestions(result) {
   renderPlan();
 }
 
+// The system's time estimate written onto a row, the way PlannedOperation's
+// `with_estimate` does. Copied field by field: a field this builder drops never
+// reaches the server.
+function applyEstimate(operation, estimate) {
+  operation.system_suggested_setup_time = estimate.setup_time_minutes;
+  operation.system_suggested_cycle_time = estimate.cycle_time_minutes;
+  operation.system_time_method = estimate.method;
+  operation.system_time_confidence = estimate.confidence;
+  operation.system_time_status = estimate.time_status;
+  operation.system_time_reason = estimate.reason;
+  operation.system_time_evidence = estimate.evidence || [];
+  operation.system_time_assumptions = estimate.assumptions || [];
+  operation.system_time_missing = estimate.missing || [];
+  operation.system_time_profile_id = estimate.time_profile_id;
+  operation.system_time_profile_version = estimate.time_profile_version;
+  operation.system_time_profile_name = estimate.time_profile_name;
+  operation.system_time_parameters = estimate.parameters || {};
+  // How the hole is drilled, and the alternatives with their own times.
+  operation.system_drilling_steps = estimate.drilling_steps || [];
+  operation.system_drilling_options = estimate.drilling_options || [];
+}
+
+function timeProfileQuery() {
+  const params = new URLSearchParams();
+  if ($("time_profile_id").value) params.set("time_profile_id", $("time_profile_id").value);
+  if ($("time_profile_version").value) params.set("time_profile_version", $("time_profile_version").value);
+  return params.toString() ? `?${params}` : "";
+}
+
+// ------------------------------------------------------------------ welding
+// A weld is not a recognized feature: the engineer adds it and types its
+// length and size. Its time is the server's (`/operations/estimate-time`, under
+// the selected time profile), and describing the weld again re-estimates it and
+// clears any acceptance — what PlannedOperation.with_weld does.
+
+async function estimateWeld(operation) {
+  let times;
+  try {
+    times = await api(`/operations/estimate-time${timeProfileQuery()}`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        units: "mm",
+        operations: [{ operation_id: operation.operation_id, operation_type: "welding", weld: operation.weld }],
+      }),
+    });
+  } catch (error) {
+    showError(error.message);
+    return;
+  }
+  applyEstimate(operation, times.estimates[0].estimate);
+  operation.system_time_operation_type = "welding";
+  operation.system_time_accepted = false;
+  if (!state.plan.time_profile_id) {
+    state.plan.time_profile_id = times.time_profile_id;
+    state.plan.time_profile_version = times.time_profile_version;
+    state.plan.time_profile_name = times.time_profile_name;
+  }
+  renderPlan();
+}
+
+function addWeld() {
+  if (!state.plan) {
+    state.plan = {
+      setups: [], operations: [], units: "mm", source_filename: "",
+      route_processes: decidedRouteProcesses(), as_formed_feature_types: decidedAsFormedTypes(),
+    };
+  }
+  if (!state.plan.setups || !state.plan.setups.length) $("add-setup").click();
+  manualCounter += 1;
+  const target = setupsOf()[setupsOf().length - 1];
+  const weld = {
+    operation_id: `OP-WELD-${manualCounter}`,
+    sequence_position: operationsInSetup(target.setup_id).length + 1,
+    system_setup_id: target.setup_id,
+    user_setup_id: null,
+    feature_ids: [],
+    feature_label: "",
+    operation_name: `Weld ${manualCounter}`,
+    origin: "user",
+    user_action: ACT.ADDED,
+    system_suggested_operation: null,
+    system_suggestion_confidence: null,
+    system_suggestion_rule: null,
+    system_time_status: "needs_user_input",
+    system_time_reason: "Enter the weld's length and size to estimate its time.",
+    system_time_evidence: [],
+    system_time_assumptions: [],
+    system_time_missing: [],
+    system_time_operation_type: null,
+    user_operation_type: "welding",
+    user_setup_time: null,
+    user_cycle_time: null,
+    system_time_accepted: false,
+    source_faces: [],
+    source_facets: [],
+    dimensions: {},
+    weld: { weld_type: "fillet", process: "mig", length_mm: null, size_mm: null },
+  };
+  state.plan.operations.push(weld);
+  renumber();
+  renderPlan();
+}
+
+// The weld's own description in place of a feature link: no weld is read from
+// the CAD, so every figure here is typed.
+function weldCell(operation) {
+  const id = escapeHtml(operation.operation_id);
+  const w = operation.weld || {};
+  const choice = (field, options) =>
+    `<select class="weld-field" data-id="${id}" data-field="${field}">` +
+    options
+      .map(([value, label]) => `<option value="${value}"${w[field] === value ? " selected" : ""}>${label}</option>`)
+      .join("") +
+    `</select>`;
+  const number = (field, placeholder, title) =>
+    `<input class="weld-field weld-num" type="number" min="0" step="any" data-id="${id}" data-field="${field}" ` +
+    `value="${w[field] ?? ""}" placeholder="${placeholder}" title="${title}">`;
+  return (
+    `<div class="op-cell weld-cell">` +
+    choice("weld_type", [["fillet", "Fillet"], ["butt", "Butt"]]) +
+    choice("process", [["mig", "MIG"], ["tig", "TIG"]]) +
+    number("length_mm", "length mm", "Weld length, mm — typed, not read from the CAD") +
+    number("size_mm", w.weld_type === "butt" ? "plate mm" : "leg mm",
+      w.weld_type === "butt" ? "Plate thickness, mm" : "Fillet leg length, mm") +
+    `</div>`
+  );
+}
+
 // ------------------------------------------------------------------ resolving
 // The same three-branch resolution the backend applies, so what the table shows
 // and what gets costed cannot disagree.
 
+// The process the system's time is for: the suggested one, or — on a line no
+// rule proposed, such as a weld the engineer added — the one recorded when its
+// time was estimated. Mirrors PlannedOperation.estimated_for.
+function estimatedFor(operation) {
+  return operation.system_suggested_operation || operation.system_time_operation_type || null;
+}
+
 function systemTimeApplies(operation) {
   return (
     operation.system_time_status === "estimated" &&
-    operation.system_suggested_operation != null &&
-    effectiveType(operation) === operation.system_suggested_operation &&
+    estimatedFor(operation) != null &&
+    effectiveType(operation) === estimatedFor(operation) &&
     systemCycleForChoice(operation) != null
   );
 }
@@ -339,12 +453,46 @@ function asFormedLabel() {
 // What a freshly created part plan should start with: the route the engineer
 // has decided, if any. A component plan opened from an assembly never takes the
 // single part's route.
+// Stages an engineer may price by time instead of by stage rate, and the hourly
+// process their operations are costed as. Mirrors `stage_costing.TIMEABLE_STAGES`
+// (a test holds the two equal); the server refuses any other stage anyway.
+const TIMED_STAGE_PROCESSES = { welding: "welding" };
+
+function stagePricing(stageId) {
+  return ((state.stageInputs || {})[stageId] || {}).pricing === "timed" ? "timed" : "stage_rate";
+}
+
+// One stage's inputs are a mass and a pricing choice; changing one keeps the
+// other. A stage with neither is removed, so "not entered" is never sent as 0.
+function setStageInput(stageId, field, value) {
+  state.stageInputs = state.stageInputs || {};
+  const next = { ...(state.stageInputs[stageId] || {}) };
+  if (value === null || value === undefined) delete next[field];
+  else next[field] = value;
+  if (Object.keys(next).length) state.stageInputs[stageId] = next;
+  else delete state.stageInputs[stageId];
+}
+
+// The decided route's stages the engineer chose to price by time.
+function timedStages() {
+  const classification = state.processClassification;
+  const stages = classification && classification.route ? classification.route.stages : [];
+  return stages.filter((stage) => TIMED_STAGE_PROCESSES[stage.stage] && stagePricing(stage.stage) === "timed");
+}
+
 function decidedRouteProcesses() {
   const classification = state.processClassification;
   if (state.planComponentId || !classification || !Array.isArray(classification.plan_processes)) {
     return null;
   }
-  return [...classification.plan_processes];
+  // A timed stage is costed through its operations, so its process is in the
+  // route like a machining stage's — what /cost/cad-part applies on the server.
+  const processes = [...classification.plan_processes];
+  timedStages().forEach((stage) => {
+    const process = TIMED_STAGE_PROCESSES[stage.stage];
+    if (!processes.includes(process)) processes.push(process);
+  });
+  return processes;
 }
 
 function routeProcesses() {
@@ -526,6 +674,7 @@ function renderPlan() {
 
   body.innerHTML = rows.join("");
   body.classList.toggle("parked-collapsed", !state.showParked);
+  body.querySelectorAll("button.add-weld").forEach((button) => button.addEventListener("click", addWeld));
   const toggle = $("toggle-parked");
   if (toggle) {
     toggle.addEventListener("click", () => {
@@ -600,21 +749,29 @@ function routeStageRows() {
     return null;
   }
   const stages = classification.route.stages;
-  const firstMachining = stages.findIndex((stage) => stage.process_type);
+  const timed = (stage) => !stage.process_type && stagePricing(stage.stage) === "timed" && TIMED_STAGE_PROCESSES[stage.stage];
+  // Operations are listed where the route's first operation-costed stage is: a
+  // machining stage, or a stage the engineer chose to price by time.
+  const firstOperations = stages.findIndex((stage) => stage.process_type || timed(stage));
   const row = (stage) => {
     const position = stages.indexOf(stage) + 1;
+    const band = timed(stage)
+      ? `<span class="pill pill-ok">priced by time — its welds are operations below</span>` +
+        `<button type="button" class="secondary tiny add-weld">+ Add weld</button>`
+      : `<span class="pill pill-off">route stage — stage rate, no time</span>${stageRateText(stage)}`;
     return (
       `<tr class="setup-empty route-stage-row" data-stage="${escapeHtml(stage.stage)}"><td colspan="8">` +
       `<div class="setup-band"><span class="seq-cell">Step ${position} of ${stages.length}</span>` +
-      `<strong>${escapeHtml(stage.label)}</strong>` +
-      `<span class="pill pill-off">route stage — stage rate, no time</span>` +
-      `${stageRateText(stage)}</div></td></tr>`
+      `<strong>${escapeHtml(stage.label)}</strong>${band}</div></td></tr>`
     );
   };
-  const split = firstMachining === -1 ? stages.length : firstMachining;
+  // A timed stage heads its own operations, so it goes above them.
+  let cut = firstOperations === -1 ? stages.length : firstOperations;
+  if (cut < stages.length && timed(stages[cut])) cut += 1;
+  const shown = (stage) => !stage.process_type;
   return {
-    before: stages.slice(0, split).filter((stage) => !stage.process_type).map(row),
-    after: stages.slice(split).filter((stage) => !stage.process_type).map(row),
+    before: stages.slice(0, cut).filter(shown).map(row),
+    after: stages.slice(cut).filter(shown).map(row),
   };
 }
 
@@ -635,6 +792,14 @@ function renderPlanRoute() {
   const stages = route ? route.stages : [];
   const counted = activeOperations();
   const items = stages.map((stage) => {
+    if (!stage.process_type && TIMED_STAGE_PROCESSES[stage.stage] && stagePricing(stage.stage) === "timed") {
+      const process = TIMED_STAGE_PROCESSES[stage.stage];
+      const count = counted.filter((operation) => effectiveType(operation) === process).length;
+      return (
+        `<li>${escapeHtml(stage.label)} <span class="pill pill-ok">priced by time — hourly rate</span> ` +
+        `<span class="muted">${count ? `${count} weld${count === 1 ? "" : "s"} below` : "no welds yet — use + Add weld"}</span></li>`
+      );
+    }
     if (!stage.process_type) {
       const formed = asFormedTypes() !== null && stage === stages[0] ? asFormedOperations().length : 0;
       return (
@@ -847,7 +1012,7 @@ function planRow(operation) {
     `</select>` +
     `<input class="op-name" data-id="${id}" value="${escapeHtml(operation.operation_name)}"` +
     ` title="${escapeHtml(operation.operation_name)}">` +
-    (edited
+    (edited && operation.system_suggested_operation
       ? `<span class="was">was ${escapeHtml(operation.system_suggested_operation)}</span>`
       : "") +
     drillingChoice(operation) +
@@ -860,10 +1025,13 @@ function planRow(operation) {
       `${escapeHtml(operation.system_time_confidence)}</span>`
     : `<span class="muted">—</span>`;
 
-  const featureCell = operation.feature_ids.length
-    ? `<span class="mono feature-link" data-feature="${escapeHtml(operation.feature_ids[0])}">` +
-      `${escapeHtml(operation.feature_ids[0])}</span>`
-    : `<span class="muted">—</span>`;
+  const featureCell =
+    chosen === "welding" && operation.weld
+      ? weldCell(operation)
+      : operation.feature_ids.length
+        ? `<span class="mono feature-link" data-feature="${escapeHtml(operation.feature_ids[0])}">` +
+          `${escapeHtml(operation.feature_ids[0])}</span>`
+        : `<span class="muted">—</span>`;
 
   return `<tr class="plan-row" data-id="${id}">
       <td class="num seq-cell">${operation.sequence_position}
@@ -1065,6 +1233,10 @@ function wirePlanRows() {
         // The estimate was for the old process and must not carry over.
         operation.system_time_accepted = false;
       }
+      // A line turned into a weld is described like one, starting blank.
+      if (chosen === "welding" && !operation.weld) {
+        operation.weld = { weld_type: "fillet", process: "mig", length_mm: null, size_mm: null };
+      }
       renderPlan();
     })
   );
@@ -1109,6 +1281,18 @@ function wirePlanRows() {
   body.querySelectorAll(".op-name").forEach((input) =>
     input.addEventListener("input", () => {
       operationById(input.dataset.id).operation_name = input.value;
+    })
+  );
+
+  // Describing a weld re-estimates its time on the server; a blank length or
+  // size is "not entered", and the estimate then says what is missing.
+  body.querySelectorAll(".weld-field").forEach((field) =>
+    field.addEventListener("change", () => {
+      const operation = operationById(field.dataset.id);
+      const raw = field.value.trim();
+      const value = field.classList.contains("weld-num") ? (raw === "" ? null : Number(raw)) : raw;
+      operation.weld = { ...operation.weld, [field.dataset.field]: value };
+      estimateWeld(operation);
     })
   );
 

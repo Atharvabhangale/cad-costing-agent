@@ -152,7 +152,8 @@ async function renderProcessClassification(classification) {
   // `plan_processes`; null until someone decides. Never applied to a component
   // plan opened from an assembly.
   if (state.plan && !state.planComponentId) {
-    state.plan.route_processes = Array.isArray(c.plan_processes) ? [...c.plan_processes] : null;
+    // The decided route's processes, plus any stage priced by time (plan.js).
+    state.plan.route_processes = decidedRouteProcesses();
     // On a cast or forged route, the blank's blends are left as formed by
     // default (the backend's `as_formed_feature_types`); null on any other.
     state.plan.as_formed_feature_types = Array.isArray(c.as_formed_feature_types)
@@ -193,15 +194,25 @@ function renderStageInputs() {
       }
       if (rate.batch_charge) parts.push(`${money(rate.batch_charge, currency)} per batch`);
       const entered = (state.stageInputs[stage.stage] || {}).mass_kg;
+      const timed = stagePricing(stage.stage) === "timed";
       const input =
-        rate.unit_basis === "per_kg"
+        rate.unit_basis === "per_kg" && !timed
           ? `<label>Mass charged on, kg per part
                <input type="number" step="any" min="0" class="stage-mass" data-stage="${escapeHtml(stage.stage)}"
                  value="${entered ?? ""}" placeholder="from CAD unless entered"></label>`
           : "";
+      // A stage with a time model can be priced by time instead: its welds are
+      // then operations in the plan, costed at the rate set's hourly rate.
+      const pricing = TIMED_STAGE_PROCESSES[stage.stage]
+        ? `<label>Priced by <select class="stage-pricing" data-stage="${escapeHtml(stage.stage)}">
+             <option value="stage_rate"${timed ? "" : " selected"}>this stage rate</option>
+             <option value="timed"${timed ? " selected" : ""}>weld time × hourly rate</option>
+           </select></label>`
+        : "";
       return `<tr><th>${escapeHtml(stage.label)}</th>
-        <td>${parts.join(" + ")}${rate.note ? `<div class="hint">${escapeHtml(rate.note)}</div>` : ""}</td>
-        <td>${input}</td></tr>`;
+        <td>${timed ? `<span class="muted">not used — priced by weld time</span>` : parts.join(" + ")}${
+          rate.note && !timed ? `<div class="hint">${escapeHtml(rate.note)}</div>` : ""}</td>
+        <td>${pricing}${input}</td></tr>`;
     })
     .join("");
   host.innerHTML =
@@ -213,9 +224,19 @@ function renderStageInputs() {
     input.addEventListener("input", () => {
       const raw = input.value.trim();
       // Blank is "not entered", never 0.
-      if (raw === "") delete state.stageInputs[input.dataset.stage];
-      else state.stageInputs[input.dataset.stage] = { mass_kg: Number(raw) };
+      setStageInput(input.dataset.stage, "mass_kg", raw === "" ? null : Number(raw));
       if (typeof renderPlanRoute === "function") renderPlanRoute();
+    })
+  );
+  // Choosing time pricing puts the stage's process into the route, so its
+  // operations are costed; the stage rate is then not charged (the server
+  // leaves the stage out of stage pricing).
+  host.querySelectorAll("select.stage-pricing").forEach((select) =>
+    select.addEventListener("change", () => {
+      setStageInput(select.dataset.stage, "pricing", select.value === "timed" ? "timed" : null);
+      if (state.plan && !state.planComponentId) state.plan.route_processes = decidedRouteProcesses();
+      renderStageInputs();
+      if (typeof renderPlan === "function") renderPlan();
     })
   );
   // The plan's route strip shows the same rates and masses.
