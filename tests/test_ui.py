@@ -514,6 +514,21 @@ def test_no_two_classic_scripts_declare_the_same_global_function():
     assert duplicates == []
 
 
+def test_route_stages_are_rows_of_the_plan_but_never_operations():
+    """A decided route's cutting, welding or fettling stage is shown in the
+    operations table in route order, but as a stage row: it carries no
+    `plan-row` class (so no handler treats it as an operation), it is built from
+    the classification's stages and never pushed into `state.plan.operations`."""
+    source = (STATIC_PATH / "plan.js").read_text(encoding="utf-8")
+    body = source.split("function routeStageRows()", 1)[1].split("\nfunction ", 1)[0]
+    assert "route-stage-row" in body
+    assert "plan-row" not in body
+    assert "operations.push" not in body
+    assert "classification.route.stages" in body
+    render = source.split("function renderPlan()", 1)[1].split("\nfunction ", 1)[0]
+    assert "stageRows.before" in render and "stageRows.after" in render
+
+
 def test_ui_contains_no_costing_arithmetic():
     """Costing stays in the backend; the page only formats what it is given."""
     app_js = (STATIC_PATH / "app.js").read_text(encoding="utf-8")

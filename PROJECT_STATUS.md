@@ -856,6 +856,28 @@ all. One test added. Suite: **1,760 passing**, 1 skipped.
   (1,722 collected, 1 skipped). One file added, `static/estimateflow.js`. **No
   Python file changed, no endpoint, no schema, no migration.**
 
+### Route stages shown as rows of the operations table
+
+Asked why a decided cutting + welding route showed none of its steps among the operations,
+the answer was the rule that a stage is not an operation: a stage rate prices it, so it has
+no time, no feature and no hourly rate. Research on aPriori, Teamcenter Product Cost
+Management and Costimator (public pages and search snippets; aPriori's help refused direct
+reads) found those tools cost every route step as an operation with a time and a rate —
+aPriori times each weld from its type, length and size. The user chose to show the stages
+in the table now and to plan timed welding as a later iteration.
+
+`plan.js`'s `routeStageRows` adds one row per non-machining stage of a *decided* route, in
+route order — those before the first machining stage above the setups, the rest below —
+each with "Step n of m", the stage rate as published and the mass basis. They are display
+rows: no `plan-row` class, nothing pushed into the plan, so no cost, no setup or cycle total
+and no feedback record changes. On a route with no machining stage an empty setup band is
+no longer shown (it stays in the plan). Verified live in headless Chrome on `model1_1.stp`
+with `illustrative-india-2026` v1.2.0: casting + machining shows Casting and Fettling above
+the setup (20 operations, 11 as cast); sheet cutting + bending shows its three steps; cutting
++ welding its four (₹25, ₹40, ₹100, ₹50 per piece), with the 31 operations parked below and
+still 31 in the plan each time. `tests/test_ui.py` 57 passed; the full suite was not rerun
+for this JavaScript-only change.
+
 ### Routes broken into the steps a shop quotes
 
 At the user's request each non-machining route now carries the steps that follow its forming

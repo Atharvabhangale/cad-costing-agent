@@ -453,8 +453,9 @@ function renderPlan() {
   const body = $("ops-body");
   const operations = activeOperations();
   renderPlanScope();
+  const stageRows = routeStageRows();
 
-  if (!operations.length && !setupsOf().length) {
+  if (!operations.length && !setupsOf().length && !(stageRows && (stageRows.before.length || stageRows.after.length))) {
     body.innerHTML = "";
     $("ops-note").textContent =
       "No operations yet. Suggest them from the recognized features, or add one by hand — " +
@@ -470,9 +471,14 @@ function renderPlan() {
   // how often setup time is charged. A flat list would hide the one thing this
   // table now exists to show.
   const rows = [];
+  if (stageRows) rows.push(...stageRows.before);
+  const machinesNothing = Array.isArray(routeProcesses()) && routeProcesses().length === 0;
   setupsOf().forEach((setup) => {
-    rows.push(setupHeaderRow(setup));
     const members = operationsInSetup(setup.setup_id).filter((o) => inRoute(o) && !isAsFormed(o));
+    // A route with no machining stage holds no setup's work; an empty setup band
+    // there only suggests fixturing nobody does. It stays in the plan, unshown.
+    if (!members.length && machinesNothing) return;
+    rows.push(setupHeaderRow(setup));
     if (!members.length) {
       rows.push(
         `<tr class="setup-empty"><td colspan="8">No operations in this setup yet — move one in,
@@ -481,6 +487,7 @@ function renderPlan() {
     }
     members.forEach((operation) => rows.push(planRow(operation)));
   });
+  if (stageRows) rows.push(...stageRows.after);
 
   // Operations the chosen route leaves out, kept below rather than deleted, so
   // switching the route back — or changing a row's process — restores them as
@@ -556,6 +563,61 @@ function renderPlan() {
   }
 }
 
+// The rate a non-machining stage will be priced at, read from the selected rate
+// set as published, and the mass it is charged on. Nothing is worked out here.
+function stageRateText(stage) {
+  const rateSet = state.rateSet;
+  const rate = rateSet && rateSet.stage_rates ? rateSet.stage_rates[stage.stage] : null;
+  const currency = rateSet ? rateSet.currency : "INR";
+  if (!rate) {
+    return `<span class="warning-inline">no rate in ${
+      rateSet ? `${escapeHtml(rateSet.name)} v${escapeHtml(rateSet.version)}` : "the selected rate set"
+    } — this route cannot be costed until one is published</span>`;
+  }
+  const parts = [];
+  if (rate.unit_rate !== null && rate.unit_rate !== undefined) {
+    parts.push(`${money(rate.unit_rate, currency)} ${rate.unit_basis === "per_kg" ? "per kg" : "per piece"}`);
+  }
+  if (rate.batch_charge) parts.push(`${money(rate.batch_charge, currency)} per batch`);
+  const entered = ((state.stageInputs || {})[stage.stage] || {}).mass_kg;
+  const mass =
+    rate.unit_basis === "per_kg"
+      ? entered !== undefined
+        ? ` · on ${number(entered, 3)} kg per part (entered)`
+        : " · on a mass you enter on the route card, or else the casting/forging blank's or the CAD model's — the estimate says which"
+      : "";
+  return `<span class="muted">${parts.join(" + ")}${mass}</span>`;
+}
+
+// The decided route's non-machining stages, as rows of the table in route
+// order: those before the first machining stage go above the setups, the rest
+// below. They are not operations — a stage rate prices each one, so a row has
+// no setup, no cycle time and no feature, and nothing in it is costed here or
+// counted by the setup and cycle totals. Null when no route is decided.
+function routeStageRows() {
+  const classification = state.processClassification;
+  if (state.planComponentId || routeProcesses() === null || !classification || !classification.route) {
+    return null;
+  }
+  const stages = classification.route.stages;
+  const firstMachining = stages.findIndex((stage) => stage.process_type);
+  const row = (stage) => {
+    const position = stages.indexOf(stage) + 1;
+    return (
+      `<tr class="setup-empty route-stage-row" data-stage="${escapeHtml(stage.stage)}"><td colspan="8">` +
+      `<div class="setup-band"><span class="seq-cell">Step ${position} of ${stages.length}</span>` +
+      `<strong>${escapeHtml(stage.label)}</strong>` +
+      `<span class="pill pill-off">route stage — stage rate, no time</span>` +
+      `${stageRateText(stage)}</div></td></tr>`
+    );
+  };
+  const split = firstMachining === -1 ? stages.length : firstMachining;
+  return {
+    before: stages.slice(0, split).filter((stage) => !stage.process_type).map(row),
+    after: stages.slice(split).filter((stage) => !stage.process_type).map(row),
+  };
+}
+
 // The stages of the engineer's chosen route, in order, above the table. A
 // machining stage says how many operations of its process the plan holds; any
 // other stage says plainly that nothing here can price it. Read from the
@@ -575,34 +637,9 @@ function renderPlanRoute() {
   const items = stages.map((stage) => {
     if (!stage.process_type) {
       const formed = asFormedTypes() !== null && stage === stages[0] ? asFormedOperations().length : 0;
-      // The rate this stage will be priced at, read from the selected rate set
-      // as published, and the mass it is charged on. Nothing is worked out here.
-      const rateSet = state.rateSet;
-      const rate = rateSet && rateSet.stage_rates ? rateSet.stage_rates[stage.stage] : null;
-      const currency = rateSet ? rateSet.currency : "INR";
-      let priced;
-      if (!rate) {
-        priced = `<span class="warning-inline">no rate in ${
-          rateSet ? `${escapeHtml(rateSet.name)} v${escapeHtml(rateSet.version)}` : "the selected rate set"
-        } — this route cannot be costed until one is published</span>`;
-      } else {
-        const parts = [];
-        if (rate.unit_rate !== null && rate.unit_rate !== undefined) {
-          parts.push(`${money(rate.unit_rate, currency)} ${rate.unit_basis === "per_kg" ? "per kg" : "per piece"}`);
-        }
-        if (rate.batch_charge) parts.push(`${money(rate.batch_charge, currency)} per batch`);
-        const entered = ((state.stageInputs || {})[stage.stage] || {}).mass_kg;
-        const mass =
-          rate.unit_basis === "per_kg"
-            ? entered !== undefined
-              ? ` · on ${number(entered, 3)} kg per part (entered)`
-              : " · on a mass you enter on the route card, or else the casting/forging blank's or the CAD model's — the estimate says which"
-            : "";
-        priced = `<span class="muted">${parts.join(" + ")}${mass}</span>`;
-      }
       return (
         `<li>${escapeHtml(stage.label)} <span class="pill pill-off">priced from stage rates</span> ` +
-        priced +
+        stageRateText(stage) +
         (formed ? ` <span class="muted">· leaves ${formed} feature${formed === 1 ? "" : "s"} unmachined below</span>` : "") +
         `</li>`
       );

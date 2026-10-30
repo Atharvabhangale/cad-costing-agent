@@ -254,7 +254,8 @@ around saying so.
   null.
 - **It imports `features.model` and `operation_suggestions`; only `main.py` imports it.** A
   route stage never becomes an operation — a casting or bending stage is a line in the
-  route strip, never a `PlannedOperation`, because it has no rate.
+  route strip and a display row in the operations table (`routeStageRows`, no `plan-row`
+  class), never a `PlannedOperation`, because it has no hourly rate.
 - **A decided route regroups the plan; it never edits it.** `plan_processes` (computed, `None`
   until someone decides) becomes `ManufacturingPlan.route_processes`; `in_route` keeps an
   operation whose process is outside it in the plan, unchanged, but out of

@@ -1321,8 +1321,9 @@ names it. Setup time is still hung on the first *costable, in-route* operation o
 `/cost/cad-part` sets `route_processes` from the classification it was sent, never from the
 browser's copy, so the operations priced and the route recorded cannot disagree. The default
 `None` is the pre-route behaviour exactly, which is why assembly component plans are unaffected.
-Non-machining stages never become `PlannedOperation`s — they have no rate — and are shown only
-in the route strip above the table.
+Non-machining stages never become `PlannedOperation`s — they have no hourly rate — and are shown
+in the route strip and as display rows of the operations table in route order
+(`plan.js`'s `routeStageRows`), priced from stage rates and outside every time total.
 
 ### Processing time, the plan, and the feedback record
 
