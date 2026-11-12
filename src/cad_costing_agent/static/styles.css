@@ -771,3 +771,18 @@ table.mini.actual-variance td.num, table.mini.actual-variance th.num { padding-l
 /* Operations the chosen route leaves out: folded away until asked for, dimmed when shown. */
 #ops-body.parked-collapsed tr[data-parked] { display: none; }
 #ops-body tr[data-parked] { opacity: 0.55; }
+
+/* Matrix preview: rate sets down, quantities across. Shown in the server's order. */
+#matrix-details > summary { cursor: pointer; }
+.matrix-picker { margin: 8px 0; }
+.matrix-pick { display: flex; flex-direction: row; flex-wrap: wrap; align-items: center; gap: 6px; font-size: 13px; margin: 3px 0; color: var(--ink); }
+.matrix-pick input { width: auto; }
+.matrix-scroll { overflow-x: auto; }
+table.matrix-grid { border-collapse: collapse; width: 100%; margin-top: 8px; }
+table.matrix-grid th, table.matrix-grid td { border: 1px solid var(--line); padding: 6px 8px; text-align: left; vertical-align: top; font-size: 13px; }
+table.matrix-grid thead th { font-size: 12px; color: var(--muted); font-weight: 500; }
+.matrix-rate-set { font-weight: 400; min-width: 170px; }
+.matrix-unit { font-weight: 600; white-space: nowrap; }
+.matrix-total { white-space: nowrap; }
+.matrix-refused { max-width: 260px; }
+.matrix-split summary { cursor: pointer; font-size: 12px; color: var(--muted); }
