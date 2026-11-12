@@ -11,7 +11,9 @@ stage-rate behaviour it always was.
 
 from __future__ import annotations
 
+import importlib.util
 import json
+from pathlib import Path
 
 import pytest
 from fastapi.testclient import TestClient
@@ -19,6 +21,7 @@ from fastapi.testclient import TestClient
 from cad_costing_agent.main import app
 from cad_costing_agent.manufacturing_plan import manual_operation
 from cad_costing_agent.operation_time import (
+    OperationTimeEstimate,
     TimeAssumptions,
     TimeStatus,
     WeldSpec,
@@ -275,3 +278,228 @@ def test_the_pricing_choice_is_recorded_with_the_estimate():
     estimate_id = cost(stage_inputs={"welding": {"pricing": "timed"}}).json()["estimate_id"]
     stored = client.get(f"/estimates/{estimate_id}").json()
     assert stored["request_snapshot"]["stage_inputs"] == {"welding": {"pricing": "timed"}}
+
+
+# --- 5. per-weld handling: reposition, clamp and tack -------------------------
+
+REPOSITION = "welding_reposition_minutes_per_weld"
+TACK = "welding_tack_minutes_per_weld"
+HANDLING = {REPOSITION: 0.5, TACK: 1.25}
+
+
+def weld_time(**extra):
+    return estimate_operation_time(
+        operation_type="welding", weld=WELD, assumptions=TimeAssumptions(**WELDING, **extra)
+    )
+
+
+def test_the_handling_parameters_are_absent_by_default_like_every_welding_figure():
+    assert TimeAssumptions().model_dump()[REPOSITION] is None
+    assert TimeAssumptions().model_dump()[TACK] is None
+
+
+def test_per_weld_handling_is_added_to_the_cycle_time_and_never_to_the_setup():
+    estimate = weld_time(**HANDLING)
+    # arc: ceil(8 / 6) = 2 passes; 600 x 2 / 300 = 4 min; / 0.5 = 8 min.
+    # handling: 0.5 + 1.25 = 1.75 min. cycle = 9.75 min. setup stays the profile's 15.
+    assert estimate.cycle_time_minutes == 9.75
+    assert estimate.setup_time_minutes == 15.0
+    assert estimate.total_time_minutes == 24.75
+    assert estimate.method == "welding_time_baseline_v1"
+    assert estimate.parameters[REPOSITION] == 0.5
+    assert estimate.parameters[TACK] == 1.25
+    assert estimate.parameters["weld_arc_cycle_minutes"] == 8.0
+    assert estimate.parameters["weld_passes"] == 2.0
+    assert "repositioning 0.5 min per weld, added to the cycle time (per part, not setup)" in (
+        estimate.assumptions
+    )
+    assert "clamping and tacking 1.25 min per weld, added to the cycle time (per part, not setup)" in (
+        estimate.assumptions
+    )
+    assert "cycle 9.75 min = 4.00 / 0.5 + 0.5 + 1.25" in estimate.assumptions
+
+
+@pytest.mark.parametrize("field, minutes, cycle", [(REPOSITION, 0.5, 8.5), (TACK, 1.25, 9.25)])
+def test_each_handling_parameter_stands_on_its_own(field, minutes, cycle):
+    estimate = weld_time(**{field: minutes})
+    assert estimate.cycle_time_minutes == cycle
+    other = TACK if field == REPOSITION else REPOSITION
+    assert field in estimate.parameters and other not in estimate.parameters
+
+
+def test_handling_is_per_weld_not_per_pass_or_per_millimetre():
+    """A weld three times as long, in two passes, carries the same 1.75 min."""
+    long_weld = WeldSpec(weld_type="fillet", process="mig", length_mm=1800.0, size_mm=8.0)
+    estimate = estimate_operation_time(
+        operation_type="welding", weld=long_weld,
+        assumptions=TimeAssumptions(**WELDING, **HANDLING),
+    )
+    # 1800 x 2 / 300 = 12 min of arc; / 0.5 = 24; + 1.75.
+    assert estimate.cycle_time_minutes == 25.75
+
+
+def test_a_profile_without_handling_gives_exactly_the_earlier_estimate():
+    """None is not zero minutes added: the whole estimate is the one it was."""
+    estimate = weld_time()
+    explicit = weld_time(**{REPOSITION: None, TACK: None})
+    assert estimate.model_dump_json() == explicit.model_dump_json()
+    assert estimate.cycle_time_minutes == 8.0
+    # Exactly the recorded parameters and explanation from before handling existed.
+    assert estimate.parameters == {
+        "welding_mig_travel_speed_mm_per_min": 300.0,
+        "welding_mm_per_pass": 6.0,
+        "welding_arc_on_factor": 0.5,
+        "welding_setup_minutes": 15.0,
+        "weld_length_mm": 600.0,
+        "weld_size_mm": 8.0,
+        "weld_passes": 2.0,
+    }
+    assert estimate.assumptions[:4] == [
+        "2 pass(es) = ceil(8 mm / 6 mm per pass)",
+        "travel speed 300 mm/min (MIG)",
+        "arc time 4.00 min = 600 × 2 / 300",
+        "arc-on factor 0.5: cycle = arc time / factor",
+    ]
+    assert len(estimate.assumptions) == 5  # the four above and the setup line
+    assert not any("per weld" in line for line in estimate.assumptions)
+
+
+def test_handling_alone_does_not_make_a_profile_time_a_weld():
+    """The handling figures add to an arc time; they are not a weld time."""
+    estimate = estimate_operation_time(
+        operation_type="welding", weld=WELD, assumptions=TimeAssumptions(**HANDLING)
+    )
+    assert estimate.time_status is TimeStatus.NEEDS_USER_INPUT
+    assert estimate.cycle_time_minutes is None
+    assert REPOSITION not in estimate.missing and TACK not in estimate.missing
+
+
+def test_a_negative_handling_time_is_refused():
+    with pytest.raises(ValueError):
+        TimeAssumptions(**WELDING, **{REPOSITION: -1.0})
+
+
+def test_handling_changes_no_acceptance_rule():
+    estimate = weld_time(**HANDLING)
+    line = manual_operation(
+        operation_id="OP-WELD-1", sequence_position=1, operation_type="welding",
+        operation_name="Fillet weld, base to upright",
+    ).with_weld(WELD, estimate)
+    # Generating the estimate commits nothing.
+    assert line.system_time_accepted is False
+    assert line.final_cycle_time is None and not line.costable
+    assert line.system_suggested_cycle_time == 9.75
+    assert line.system_time_parameters[REPOSITION] == 0.5
+
+    accepted = line.accepted(use_estimated_time=True)
+    assert accepted.final_cycle_time == 9.75 and accepted.final_setup_time == 15.0
+
+    # Describing the weld again clears the acceptance, as before.
+    again = accepted.with_weld(WELD, estimate)
+    assert again.system_time_accepted is False and again.final_cycle_time is None
+
+
+def publish_handling_profile():
+    baseline = client.get("/time-profiles/poc-baseline-time").json()["assumptions"]
+    body = {
+        "time_profile_id": "weld-handling-time", "name": "Weld handling", "version": "1.0.0",
+        "description": "test", "is_illustrative": True,
+        "assumptions": {**baseline, **WELDING, **HANDLING},
+    }
+    response = client.post("/time-profiles", json=body)
+    assert response.status_code == 201, response.text
+    return response.json()
+
+
+def test_the_estimate_names_the_profile_and_the_snapshot_records_the_handling_parameters():
+    publish_weld_shop()
+    stored_profile = publish_handling_profile()
+    assert stored_profile["assumptions"][REPOSITION] == 0.5
+    assert stored_profile["assumptions"][TACK] == 1.25
+
+    response = client.post(
+        "/operations/estimate-time?time_profile_id=weld-handling-time",
+        json={"operations": [{"operation_id": "W1", "operation_type": "welding",
+                              "weld": WELD.model_dump()}]},
+    )
+    assert response.status_code == 200, response.text
+    estimate = response.json()["estimates"][0]["estimate"]
+    assert estimate["cycle_time_minutes"] == 9.75
+    assert estimate["time_profile_id"] == "weld-handling-time"
+    assert estimate["parameters"][TACK] == 1.25
+
+    line = manual_operation(
+        operation_id="OP-WELD-1", sequence_position=1, operation_type="welding",
+        operation_name="Fillet weld, base to upright",
+    ).with_weld(WELD, OperationTimeEstimate.model_validate(estimate))
+    line = line.accepted(use_estimated_time=True)
+    plan = committed_plan(NAME)
+    plan = plan.model_copy(update={"operations": [*plan.operations, line]})
+    costed = client.post(
+        "/cost/cad-part",
+        files={"file": (f"{NAME}.step", step(NAME), "application/octet-stream")},
+        data={**FORM, "rate_set_id": "weld-shop",
+              "process_classification": json.dumps(classification_for("cutting_welding")),
+              "manufacturing_plan": plan.model_dump_json(),
+              "stage_inputs": json.dumps({"welding": {"pricing": "timed"}})},
+    )
+    assert costed.status_code == 200, costed.text
+    weld = [o for o in costed.json()["part_cost"]["operations"] if o["process_type"] == "welding"]
+    assert weld[0]["cycle_time_minutes"] == 9.75
+
+    stored = client.get(f"/estimates/{costed.json()['estimate_id']}").json()
+    snapshot = stored["time_profile_snapshot"]["profiles"]["weld-handling-time@1.0.0"]
+    assert snapshot["assumptions"][REPOSITION] == 0.5
+    assert snapshot["assumptions"][TACK] == 1.25
+
+
+# --- 6. the illustrative profile's versions -----------------------------------
+
+
+def _publish_script():
+    path = Path(__file__).parents[1] / "scripts" / "publish_illustrative_welding_time_profile.py"
+    spec = importlib.util.spec_from_file_location("publish_illustrative_welding", path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def test_the_illustrative_profile_keeps_its_first_version_and_adds_handling_in_a_new_one():
+    script = _publish_script()
+    baseline = client.get("/time-profiles/poc-baseline-time").json()["assumptions"]
+    first = script.build_profile(baseline, "1.0.0")
+    second = script.build_profile(baseline, "1.1.0")
+
+    # 1.0.0 is what was published before handling existed: no handling figure.
+    assert first["assumptions"][REPOSITION] is None and first["assumptions"][TACK] is None
+    assert first["assumptions"]["welding_arc_on_factor"] == 0.45
+    # 1.1.0 differs from it by the two handling parameters only.
+    differing = {
+        key for key in second["assumptions"] if second["assumptions"][key] != first["assumptions"][key]
+    }
+    assert differing == {REPOSITION, TACK}
+    assert second["is_illustrative"] is True and first["is_illustrative"] is True
+    assert "ESTIMATED" in second["description"] and "no published source" in second["description"]
+
+    for profile in (first, second):
+        assert client.post("/time-profiles", json=profile).status_code == 201
+    # A published version is immutable; the script checks for it instead of posting again.
+    assert client.post("/time-profiles", json=second).status_code == 409
+
+    def cycle(version):
+        response = client.post(
+            f"/operations/estimate-time?time_profile_id={script.PROFILE_ID}"
+            f"&time_profile_version={version}",
+            json={"operations": [{"operation_id": "W1", "operation_type": "welding",
+                                  "weld": WELD.model_dump()}]},
+        )
+        return response.json()["estimates"][0]["estimate"]["cycle_time_minutes"]
+
+    # 600 x 2 / 300 = 4 min of arc; / 0.45 = 8.89. Then + 0.5 + 1.0 = 10.39.
+    assert cycle("1.0.0") == 8.89
+    assert cycle("1.1.0") == 10.39
+
+
+def test_the_seeded_baseline_still_times_no_weld():
+    baseline = client.get("/time-profiles/poc-baseline-time").json()["assumptions"]
+    assert all(baseline[name] is None for name in (*WELDING, REPOSITION, TACK))

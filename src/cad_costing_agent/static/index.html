@@ -875,7 +875,12 @@
           <label>Weld size per pass (mm) <input id="t-weld-pass" data-param="welding_mm_per_pass" type="number" step="any"></label>
           <label>Arc-on factor (0–1) <input id="t-weld-arc" data-param="welding_arc_on_factor" type="number" step="any"></label>
           <label>Setup (min) <input id="t-weld-setup" data-param="welding_setup_minutes" type="number" step="any"></label>
+          <label>Reposition per weld (min) <input id="t-weld-reposition" data-param="welding_reposition_minutes_per_weld" type="number" step="any"></label>
+          <label>Clamp and tack per weld (min) <input id="t-weld-tack" data-param="welding_tack_minutes_per_weld" type="number" step="any"></label>
         </div>
+        <p class="hint">The two per-weld figures are optional on their own: left blank, a weld's
+          time is its arc-derived time alone. Filled in, each is added to every weld's cycle
+          time — once per weld, per part — and never to the setup, which is charged once.</p>
       </div>
       <div class="card">
         <h3>Spindle limits — shared by every process</h3>

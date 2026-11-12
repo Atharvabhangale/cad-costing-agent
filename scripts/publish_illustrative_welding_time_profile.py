@@ -1,24 +1,35 @@
-"""Publish an ILLUSTRATIVE welding time profile through the ordinary API.
+"""Publish the ILLUSTRATIVE welding time profile through the ordinary API.
 
     python scripts\\publish_illustrative_welding_time_profile.py --base-url http://127.0.0.1:8001
     python scripts\\publish_illustrative_welding_time_profile.py --dry-run   # print, publish nothing
 
 Nothing here is client data. The seeded baseline profile (`poc-baseline-time`) describes a
 machining shop and deliberately carries no welding figures, so a weld operation's time is
-"needs input" under it. This script publishes a *new* profile that has two parts:
+"needs input" under it. This script publishes the versions of one profile, each with two parts:
 
   1. the baseline's machining parameters, read from the running server's own
      `poc-baseline-time` and copied unchanged — so an estimate made under this profile times
      milling, drilling and turning exactly as the baseline does; and
-  2. the five welding parameters, each labelled below. None of them has a published source
-     behind it: every one is ESTIMATED — the assistant's own typical-shop figure, added at the
-     user's request "for demo purposes only" — and must be replaced before any real use.
+  2. the welding parameters, each labelled below. None of them has a published source behind
+     it: every one is ESTIMATED — the assistant's own typical-shop figure, added at the user's
+     request "for demo purposes only" — and must be replaced before any real use.
+
+Versions (a published version is immutable, so a change is always a new one):
+
+  1.0.0  the five arc-time parameters: travel speeds, size per pass, arc-on factor, setup.
+  1.1.0  the same five, unchanged, plus two per-weld handling times (reposition, clamp and
+         tack) that are added to each weld's cycle time.
+
+Running it is idempotent. Every version above that the server does not have is published, in
+order; one it already has is left exactly as it is and reported, after checking that its
+welding parameters are the ones listed here. So a database that already holds 1.0.0 gains
+1.1.0 and nothing else, and a fresh one ends up with the same two versions. Earlier estimates
+keep the version they were made under.
 
 The profile is published with is_illustrative = true, which keeps the app's illustrative-time
 warning on every time estimated with it. Publishing goes through POST /time-profiles like any
-other profile; a version that already exists is immutable, so this script refuses to publish it
-again (and the server would answer 409). The seeded baseline is only read, never changed. Weld
-length and size are never read from the CAD model: the engineer types them on the weld.
+other profile. The seeded baseline is only read, never changed. Weld length and size are never
+read from the CAD model: the engineer types them on the weld.
 """
 
 import argparse
@@ -30,16 +41,9 @@ import urllib.request
 BASELINE_ID = "poc-baseline-time"
 
 PROFILE_ID = "illustrative-welding-2026"
-PROFILE_VERSION = "1.0.0"
 PROFILE_NAME = "Illustrative welding + machining (demo, Oct 2026)"
-PROFILE_DESCRIPTION = (
-    "ILLUSTRATIVE, not client data. The machining parameters are the seeded poc-baseline-time "
-    "values copied unchanged; the five welding parameters are ESTIMATED typical manual MIG/TIG "
-    "figures for demo use only. Replace with a shop's own values before treating any time as "
-    "usable."
-)
 
-# The five welding parameters. All ESTIMATED (assistant, demo only): no published source was
+# The five arc-time parameters. All ESTIMATED (assistant, demo only): no published source was
 # used; each is a typical figure for manual welding of mild steel in a small job shop.
 WELDING_PARAMETERS = {
     # ESTIMATED: manual semi-automatic MIG/MAG travel along the joint, roughly 3-6 mm/s
@@ -60,6 +64,42 @@ WELDING_PARAMETERS = {
     "welding_setup_minutes": 15.0,
 }
 
+# The two per-weld handling times added in 1.1.0. Both ESTIMATED (assistant, demo only): no
+# published source was found or used for either number. Each is added once to every weld's
+# cycle time — per weld, per part — and never to the setup.
+#
+# The arc-on factor above is left at 0.45 so that 1.1.0 differs from 1.0.0 by these two lines
+# only. It already allows for handling in proportion to a weld's length; these are fixed per
+# weld. A shop entering its own figures must decide what its arc-on factor already covers, or
+# the same minutes are counted twice.
+HANDLING_PARAMETERS = {
+    # ESTIMATED: moving the torch, or turning the work, to reach the next weld's start.
+    "welding_reposition_minutes_per_weld": 0.5,
+    # ESTIMATED: clamping the joint and placing tacks before the weld is run.
+    "welding_tack_minutes_per_weld": 1.0,
+}
+
+DESCRIPTION_1_0_0 = (
+    "ILLUSTRATIVE, not client data. The machining parameters are the seeded poc-baseline-time "
+    "values copied unchanged; the five welding parameters are ESTIMATED typical manual MIG/TIG "
+    "figures for demo use only. Replace with a shop's own values before treating any time as "
+    "usable."
+)
+DESCRIPTION_1_1_0 = (
+    "ILLUSTRATIVE, not client data. Version 1.0.0 unchanged, plus two per-weld handling times "
+    "(reposition 0.5 min, clamp and tack 1 min) added to each weld's cycle time. Both are "
+    "ESTIMATED for demo use only, with no published source behind them. Replace with a shop's "
+    "own values before treating any time as usable."
+)
+
+# Every version this script knows, oldest first: (welding parameters, description).
+VERSIONS = {
+    "1.0.0": (WELDING_PARAMETERS, DESCRIPTION_1_0_0),
+    "1.1.0": ({**WELDING_PARAMETERS, **HANDLING_PARAMETERS}, DESCRIPTION_1_1_0),
+}
+PROFILE_VERSION = list(VERSIONS)[-1]
+ALL_WELDING_KEYS = tuple(VERSIONS[PROFILE_VERSION][0])
+
 
 def _get_json(url: str):
     with urllib.request.urlopen(url, timeout=60) as response:
@@ -67,8 +107,9 @@ def _get_json(url: str):
 
 
 def build_profile(baseline_assumptions: dict, version: str = PROFILE_VERSION) -> dict:
-    """The baseline's assumptions, unchanged, plus the welding parameters."""
-    already = sorted(k for k in WELDING_PARAMETERS if baseline_assumptions.get(k) is not None)
+    """The baseline's assumptions, unchanged, plus that version's welding parameters."""
+    welding, description = VERSIONS[version]
+    already = sorted(k for k in ALL_WELDING_KEYS if baseline_assumptions.get(k) is not None)
     if already:
         raise ValueError(
             "The baseline already carries welding parameters "
@@ -78,23 +119,30 @@ def build_profile(baseline_assumptions: dict, version: str = PROFILE_VERSION) ->
         "time_profile_id": PROFILE_ID,
         "name": PROFILE_NAME,
         "version": version,
-        "description": PROFILE_DESCRIPTION,
+        "description": description,
         "is_illustrative": True,
-        "assumptions": {**baseline_assumptions, **WELDING_PARAMETERS},
+        "assumptions": {**baseline_assumptions, **welding},
     }
+
+
+def _welding_of(assumptions: dict) -> dict:
+    """The welding parameters an assumptions object actually sets (absent and null alike)."""
+    return {k: assumptions[k] for k in ALL_WELDING_KEYS if assumptions.get(k) is not None}
 
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--base-url", default="http://127.0.0.1:8001")
-    parser.add_argument("--dry-run", action="store_true", help="print the profile, publish nothing")
+    parser.add_argument("--dry-run", action="store_true", help="print the profiles, publish nothing")
     parser.add_argument(
         "--version",
-        default=PROFILE_VERSION,
-        help="version to publish; raise it when this one already exists (versions are immutable)",
+        choices=list(VERSIONS),
+        default=None,
+        help="publish only this version; by default every version the server lacks is published",
     )
     args = parser.parse_args()
     base = args.base_url.rstrip("/")
+    wanted = [args.version] if args.version else list(VERSIONS)
 
     try:
         baseline = _get_json(f"{base}/time-profiles/{BASELINE_ID}")
@@ -103,68 +151,86 @@ def main() -> int:
         print(f"Could not read the baseline profile from {base}: {error}")
         return 1
 
-    # A server that predates timed welding would accept the profile and silently drop the five
-    # welding fields, leaving an immutable profile with no welding in it. Ask its own schema first.
+    # A server that predates a parameter would accept the profile and silently drop the field,
+    # leaving an immutable version without it. Ask its own schema first.
     try:
         known = _get_json(f"{base}/openapi.json")["components"]["schemas"]["TimeAssumptions"]["properties"]
     except (urllib.error.URLError, OSError, KeyError) as error:
         print(f"Could not read the server's TimeAssumptions schema from {base}: {error}")
         return 1
-    unsupported = sorted(k for k in WELDING_PARAMETERS if k not in known)
-    if unsupported:
-        print(
-            f"Not published: the server at {base} predates timed welding (its TimeAssumptions has "
-            f"no {', '.join(unsupported)}). Restart it on the current code and try again."
+
+    published = {p["version"] for p in existing if p["time_profile_id"] == PROFILE_ID}
+    failed = False
+    for version in wanted:
+        welding = VERSIONS[version][0]
+
+        if version in published:
+            # Immutable: never re-posted. Only checked, so a version someone published under
+            # this id with other figures is reported rather than taken for this script's.
+            stored = _get_json(f"{base}/time-profiles/{PROFILE_ID}?version={version}")
+            if _welding_of(stored["assumptions"]) == welding:
+                print(f"Already published: {PROFILE_ID} v{version} on {base}; left as it is.")
+            else:
+                print(
+                    f"{PROFILE_ID} v{version} exists on {base} with different welding parameters "
+                    f"({_welding_of(stored['assumptions'])}). A published version is immutable; "
+                    "nothing was changed."
+                )
+                failed = True
+            continue
+
+        unsupported = sorted(k for k in welding if k not in known)
+        if unsupported:
+            print(
+                f"Not published: v{version} needs parameters the server at {base} does not have "
+                f"(its TimeAssumptions has no {', '.join(unsupported)}). Restart it on the "
+                "current code and try again."
+            )
+            failed = True
+            continue
+
+        try:
+            profile = build_profile(baseline["assumptions"], version)
+        except ValueError as error:
+            print(error)
+            return 1
+
+        if args.dry_run:
+            print(json.dumps(profile, indent=2))
+            continue
+
+        request = urllib.request.Request(
+            f"{base}/time-profiles",
+            data=json.dumps(profile).encode(),
+            headers={"Content-Type": "application/json"},
+            method="POST",
         )
-        return 1
+        try:
+            with urllib.request.urlopen(request, timeout=60) as response:
+                stored = json.load(response)
+        except urllib.error.HTTPError as error:
+            print(f"Not published: v{version}: HTTP {error.code} {error.read().decode()[:400]}")
+            failed = True
+            continue
 
-    if any(p["time_profile_id"] == PROFILE_ID and p["version"] == args.version for p in existing):
+        stored_assumptions = stored["assumptions"]
+        # The server must have kept exactly this version's welding values.
+        kept = _welding_of(stored_assumptions)
+        if kept != welding:
+            print(
+                f"Published {stored['time_profile_id']} v{stored['version']} but the server did "
+                f"not keep the welding parameters (got {kept}); it likely predates them."
+            )
+            failed = True
+            continue
+        machining = {k: v for k, v in baseline["assumptions"].items() if k not in ALL_WELDING_KEYS}
+        changed = [k for k, v in machining.items() if stored_assumptions.get(k) != v]
         print(
-            f"Not published: {PROFILE_ID} v{args.version} already exists on {base}. A published "
-            "version is immutable; publish a higher one with --version."
+            f"Published {stored['time_profile_id']} v{stored['version']} (illustrative): "
+            f"{len(machining)} machining parameters copied from {BASELINE_ID} "
+            f"({len(changed)} differ), {len(welding)} welding parameters set."
         )
-        return 1
-
-    try:
-        profile = build_profile(baseline["assumptions"], args.version)
-    except ValueError as error:
-        print(error)
-        return 1
-
-    if args.dry_run:
-        print(json.dumps(profile, indent=2))
-        return 0
-
-    request = urllib.request.Request(
-        f"{base}/time-profiles",
-        data=json.dumps(profile).encode(),
-        headers={"Content-Type": "application/json"},
-        method="POST",
-    )
-    try:
-        with urllib.request.urlopen(request, timeout=60) as response:
-            stored = json.load(response)
-    except urllib.error.HTTPError as error:
-        print(f"Not published: HTTP {error.code} {error.read().decode()[:400]}")
-        return 1
-
-    stored_assumptions = stored["assumptions"]
-    # The server must have kept the five welding values, or an older server dropped them.
-    kept = {k: stored_assumptions.get(k) for k in WELDING_PARAMETERS}
-    if kept != WELDING_PARAMETERS:
-        print(
-            f"Published {stored['time_profile_id']} v{stored['version']} but the server did not "
-            f"keep the welding parameters (got {kept}); it likely predates timed welding."
-        )
-        return 1
-    machining = {k: v for k, v in baseline["assumptions"].items() if k not in WELDING_PARAMETERS}
-    changed = [k for k, v in machining.items() if stored_assumptions.get(k) != v]
-    print(
-        f"Published {stored['time_profile_id']} v{stored['version']} (illustrative): "
-        f"{len(machining)} machining parameters copied from {BASELINE_ID} "
-        f"({len(changed)} differ), {len(WELDING_PARAMETERS)} welding parameters added."
-    )
-    return 0
+    return 1 if failed else 0
 
 
 if __name__ == "__main__":
