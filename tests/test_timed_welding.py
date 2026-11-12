@@ -270,6 +270,20 @@ def test_timing_a_stage_without_a_time_model_is_refused():
     assert "only welding has a time model" in response.json()["detail"]
 
 
+def test_a_yield_on_a_timed_stage_is_refused_not_dropped():
+    # A timed stage is left out of stage pricing, so its yield would vanish
+    # silently. Priced by its stage rate it is refused too: welding pours nothing.
+    publish_weld_shop()
+    before = client.get("/estimates").json()["total"]
+    timed = cost(stage_inputs={"welding": {"pricing": "timed", "yield_percent": 80.0}})
+    assert timed.status_code == 400
+    assert "priced by time" in timed.json()["detail"]
+    by_rate = cost(stage_inputs={"welding": {"yield_percent": 80.0}}, with_weld=False)
+    assert by_rate.status_code == 400
+    assert "Welding" in by_rate.json()["detail"]
+    assert client.get("/estimates").json()["total"] == before
+
+
 def test_the_pricing_choice_is_recorded_with_the_estimate():
     publish_weld_shop()
     estimate_id = cost(stage_inputs={"welding": {"pricing": "timed"}}).json()["estimate_id"]

@@ -195,11 +195,20 @@ function renderStageInputs() {
       if (rate.batch_charge) parts.push(`${money(rate.batch_charge, currency)} per batch`);
       const entered = (state.stageInputs[stage.stage] || {}).mass_kg;
       const timed = stagePricing(stage.stage) === "timed";
+      const enteredYield = (state.stageInputs[stage.stage] || {}).yield_percent;
+      // Which stages may carry a yield is the server's list, read with the
+      // routes; the page keeps none of its own.
+      const yieldStages = (processRoutes && processRoutes.yield_stages) || [];
       const input =
         rate.unit_basis === "per_kg" && !timed
           ? `<label>Mass charged on, kg per part
                <input type="number" step="any" min="0" class="stage-mass" data-stage="${escapeHtml(stage.stage)}"
-                 value="${entered ?? ""}" placeholder="from CAD unless entered"></label>`
+                 value="${entered ?? ""}" placeholder="from CAD unless entered"></label>` +
+            (yieldStages.includes(stage.stage)
+              ? `<label>Yield, % of the metal poured or billet bought
+                   <input type="number" step="any" min="0" max="100" class="stage-yield" data-stage="${escapeHtml(stage.stage)}"
+                     value="${enteredYield ?? ""}" placeholder="none unless entered"></label>`
+              : "")
           : "";
       // A stage with a time model can be priced by time instead: its welds are
       // then operations in the plan, costed at the rate set's hourly rate.
@@ -219,12 +228,21 @@ function renderStageInputs() {
     `<table class="mini stage-rates"><tbody>${rows}</tbody></table>` +
     `<p class="hint">Left blank, a per-kg stage is charged on the finished part's mass from the CAD ` +
     `model, and the estimate says so. A casting or forging machined afterwards is heavier than ` +
-    `that by the material removed — enter the blank's weight to correct it.</p>`;
+    `that by the material removed — enter the blank's weight to correct it. A yield is yours to ` +
+    `enter and none is assumed: with one, the estimate charges that mass divided by the yield, ` +
+    `to cover gating, risers, flash and melt loss, and states the mass it charged.</p>`;
   host.querySelectorAll("input.stage-mass").forEach((input) =>
     input.addEventListener("input", () => {
       const raw = input.value.trim();
       // Blank is "not entered", never 0.
       setStageInput(input.dataset.stage, "mass_kg", raw === "" ? null : Number(raw));
+      if (typeof renderPlanRoute === "function") renderPlanRoute();
+    })
+  );
+  host.querySelectorAll("input.stage-yield").forEach((input) =>
+    input.addEventListener("input", () => {
+      const raw = input.value.trim();
+      setStageInput(input.dataset.stage, "yield_percent", raw === "" ? null : Number(raw));
       if (typeof renderPlanRoute === "function") renderPlanRoute();
     })
   );

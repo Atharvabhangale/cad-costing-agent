@@ -492,3 +492,285 @@ def test_a_comparison_attributes_a_stage_change_and_leaves_nothing_unexplained(c
     assert sum(i["delta"] for i in route_stage) == pytest.approx(650.0)
     assert "unexplained" not in impacts
     assert "material_rate" not in impacts and "material_quantity" not in impacts
+
+
+# --- 7. an entered yield on the stage that supplies the material ----------------
+#
+# The engineer's number, never a default: the blank's mass as a percentage of the
+# metal poured or billet bought. Absent, a line is exactly what it was.
+
+# The keys of a stage cost line before yields existed. A line with no yield must
+# serialize with these and no others.
+LINE_KEYS_WITHOUT_A_YIELD = {
+    "stage", "label", "unit_basis", "unit_rate", "mass_kg", "quantity", "unit_cost_per_part",
+    "run_cost", "batch_charge", "total_cost", "supplies_material", "rate_note", "formula",
+    "mass_source", "mass_note",
+}
+YIELD_KEYS = {"yield_percent", "base_mass_kg", "base_mass_source"}
+
+
+def casting_line(**stage_input):
+    return price_stages(
+        [StageInput(stage="casting", label="Casting", **stage_input)],
+        rate_set(casting=CASTING),
+        quantity=5,
+        material_stage="casting",
+        finished_mass_kg=2.4,
+    ).lines[0]
+
+
+def test_a_yield_charges_the_cad_mass_divided_by_it_and_states_all_three():
+    line = casting_line(yield_percent=60.0)
+    assert line.base_mass_kg == 2.4
+    assert line.base_mass_source == "cad_finished_mass"
+    assert line.yield_percent == 60.0
+    assert line.mass_kg == pytest.approx(4.0)
+    assert line.mass_source == "yield_applied"
+    # 120/kg x 4.0 kg x 5 off + 15,000 pattern.
+    assert line.total_cost == pytest.approx(17400.0)
+    assert "2.4 kg" in line.mass_note and "60%" in line.mass_note and "4 kg" in line.mass_note
+    assert "entered by the engineer" in line.mass_note
+    assert "yield_percent" in line.formula
+
+
+def test_a_yield_applies_to_an_entered_blank_mass_too():
+    line = casting_line(mass_kg=3.0, yield_percent=75.0)
+    assert line.base_mass_kg == 3.0 and line.base_mass_source == "entered"
+    assert line.mass_kg == pytest.approx(4.0)
+    assert line.mass_source == "yield_applied"
+
+
+def test_no_yield_is_no_allowance_and_the_line_keeps_its_old_keys():
+    line = casting_line()
+    assert line.mass_kg == 2.4 and line.mass_source == "cad_finished_mass"
+    assert line.yield_percent is None and line.base_mass_kg is None
+    assert set(line.model_dump()) == LINE_KEYS_WITHOUT_A_YIELD
+    assert set(line.model_dump(mode="json")) == LINE_KEYS_WITHOUT_A_YIELD
+    assert set(casting_line(yield_percent=60.0).model_dump()) == LINE_KEYS_WITHOUT_A_YIELD | YIELD_KEYS
+
+
+def test_a_yield_of_one_hundred_percent_changes_no_money_but_is_recorded():
+    without, with_full = casting_line(), casting_line(yield_percent=100.0)
+    assert with_full.total_cost == without.total_cost
+    assert with_full.mass_kg == without.mass_kg
+    assert with_full.yield_percent == 100.0 and with_full.mass_source == "yield_applied"
+
+
+@pytest.mark.parametrize("bad", [0.0, -5.0, 100.01, 250.0, float("inf"), float("nan")])
+def test_a_yield_must_be_above_zero_and_at_most_one_hundred(bad):
+    with pytest.raises(ValidationError):
+        StageInput(stage="casting", label="Casting", yield_percent=bad)
+
+
+def test_a_later_per_kg_step_works_on_the_blank_not_on_the_metal_poured():
+    pricing = price_stages(
+        [
+            StageInput(stage="casting", label="Casting", yield_percent=60.0),
+            StageInput(stage="fettling", label="Fettling"),
+        ],
+        rate_set(casting=CASTING, fettling={"unit_basis": "per_kg", "unit_rate": 10.0}),
+        quantity=1,
+        material_stage="casting",
+        finished_mass_kg=2.4,
+    )
+    casting, fettling = pricing.lines
+    assert casting.mass_kg == pytest.approx(4.0)
+    assert fettling.mass_kg == 2.4 and fettling.mass_source == "blank_mass"
+
+
+def test_a_blank_lighter_than_the_part_is_still_refused_whatever_the_yield():
+    pricing = price_stages(
+        [StageInput(stage="casting", label="Casting", mass_kg=1.0, yield_percent=50.0)],
+        rate_set(casting=CASTING),
+        quantity=1,
+        material_stage="casting",
+        finished_mass_kg=1.4,
+    )
+    assert pricing.problems[0].code == "needs_mass"
+    assert "lighter" in pricing.problems[0].detail
+
+
+def test_a_yield_on_a_per_piece_stage_is_refused_not_ignored():
+    with pytest.raises(ValueError, match="per piece"):
+        price_stages(
+            [StageInput(stage="casting", label="Casting", yield_percent=60.0)],
+            rate_set(casting={"unit_basis": "per_piece", "unit_rate": 400.0}),
+            quantity=1,
+            material_stage="casting",
+            finished_mass_kg=2.4,
+        )
+
+
+def test_a_yield_on_a_batch_only_stage_is_refused():
+    with pytest.raises(ValueError, match="per batch only"):
+        price_stages(
+            [StageInput(stage="casting", label="Casting", yield_percent=60.0)],
+            rate_set(casting={"batch_charge": 2500.0}),
+            quantity=1,
+            material_stage="casting",
+            finished_mass_kg=2.4,
+        )
+
+
+def test_a_yield_on_a_per_kg_stage_that_supplies_no_material_is_refused():
+    with pytest.raises(ValueError, match="supplies the material"):
+        price_stages(
+            [StageInput(stage="finishing", label="Finishing", yield_percent=60.0)],
+            rate_set(finishing={"unit_basis": "per_kg", "unit_rate": 40.0}),
+            quantity=1,
+            finished_mass_kg=2.4,
+        )
+
+
+def test_the_endpoint_charges_the_yielded_mass_and_the_part_keeps_its_own(client_rates):
+    classification = classification_for("casting_machining")
+    plain = cost(classification=classification).json()
+    yielded = cost(classification=classification,
+                   stage_inputs={"casting": {"yield_percent": 80.0}}).json()
+
+    finished = plain["mass"]["mass_kg"]
+    line, fettling = yielded["part_cost"]["stage_costs"]
+    assert line["base_mass_kg"] == pytest.approx(finished)
+    assert line["base_mass_source"] == "cad_finished_mass"
+    assert line["yield_percent"] == 80.0
+    assert line["mass_kg"] == pytest.approx(finished / 0.8)
+    assert line["mass_source"] == "yield_applied"
+    assert "heavier" in line["mass_note"] and "80%" in line["mass_note"]
+    assert line["total_cost"] == pytest.approx(120.0 * finished / 0.8 * 5 + 15000.0, abs=0.01)
+    # Fettling is charged on the blank, and the part's own mass is untouched.
+    assert fettling == plain["part_cost"]["stage_costs"][1]
+    assert yielded["mass"] == plain["mass"]
+    assert yielded["part_cost"]["total_stage_cost"] > plain["part_cost"]["total_stage_cost"]
+    assert yielded["part_cost"]["total_material_cost"] == 0.0
+
+
+def test_no_yield_leaves_the_response_and_the_stored_estimate_as_they_were(client_rates):
+    classification = classification_for("casting_machining")
+    inputs = {"casting": {"mass_kg": 3.0}}
+    absent = cost(classification=classification, stage_inputs=inputs).json()
+    null = cost(classification=classification,
+                stage_inputs={"casting": {"mass_kg": 3.0, "yield_percent": None}}).json()
+
+    for line in absent["part_cost"]["stage_costs"]:
+        assert set(line) == LINE_KEYS_WITHOUT_A_YIELD
+    stored = client.get(f"/estimates/{absent['estimate_id']}").json()
+    # Precise tokens: the scrap note's own prose says "yield-based".
+    snapshot_text = json.dumps(stored["result_snapshot"])
+    assert "yield_percent" not in snapshot_text and "base_mass" not in snapshot_text
+    for line in stored["result_snapshot"]["part_cost"]["stage_costs"]:
+        assert set(line) == LINE_KEYS_WITHOUT_A_YIELD
+    assert stored["request_snapshot"]["stage_inputs"] == inputs
+    # A null yield is no yield: the same figures, line for line.
+    for body in (absent, null):
+        body["part_cost"].pop("estimate_id")
+    assert null["part_cost"] == absent["part_cost"]
+
+
+def test_the_yield_is_recorded_with_the_estimate(client_rates):
+    inputs = {"casting": {"mass_kg": 3.0, "yield_percent": 75.0}}
+    estimate_id = cost(classification=classification_for("casting_machining"),
+                       stage_inputs=inputs).json()["estimate_id"]
+    stored = client.get(f"/estimates/{estimate_id}").json()
+    assert stored["request_snapshot"]["stage_inputs"] == inputs
+    line = stored["result_snapshot"]["part_cost"]["stage_costs"][0]
+    assert (line["base_mass_kg"], line["yield_percent"], line["mass_kg"]) == (3.0, 75.0, 4.0)
+    assert line["base_mass_source"] == "entered"
+    # 120/kg x 4.0 kg x 5 off + 15,000 pattern.
+    assert line["total_cost"] == pytest.approx(17400.0)
+
+
+@pytest.mark.parametrize("bad", [0, -10, 100.5, "60", True, [60]])
+def test_a_yield_that_is_not_a_percentage_is_refused_and_nothing_is_stored(client_rates, bad):
+    before = estimate_count()
+    response = cost(classification=classification_for("casting_machining"),
+                    stage_inputs={"casting": {"yield_percent": bad}})
+    assert response.status_code == 400
+    assert "above 0 and at most 100" in response.json()["detail"]
+    assert estimate_count() == before
+
+
+def test_a_yield_on_a_step_that_supplies_no_material_is_refused_at_the_endpoint(client_rates):
+    before = estimate_count()
+    response = cost(classification=classification_for("casting_machining"),
+                    stage_inputs={"fettling": {"yield_percent": 60.0}})
+    assert response.status_code == 400
+    assert "Fettling" in response.json()["detail"]
+    assert "supplies the material" in response.json()["detail"]
+    assert estimate_count() == before
+
+
+def test_a_yield_on_a_per_piece_stage_is_refused_at_the_endpoint(client_rates):
+    response = cost(classification=classification_for("purchased"),
+                    stage_inputs={"purchase": {"yield_percent": 60.0}})
+    assert response.status_code == 400
+    assert "per piece" in response.json()["detail"]
+
+
+def test_a_yield_for_a_stage_the_route_does_not_have_changes_nothing(client_rates):
+    # Stage inputs are shared across the routes a comparison prices, so one for
+    # a stage this route lacks is not this route's to refuse.
+    classification = classification_for("sheet_cutting_bending")
+    plain = cost(classification=classification).json()["part_cost"]
+    other = cost(classification=classification,
+                 stage_inputs={"casting": {"yield_percent": 60.0}}).json()["part_cost"]
+    plain.pop("estimate_id"), other.pop("estimate_id")
+    assert other == plain
+
+
+def test_the_quotation_still_partitions_the_total_with_a_yield(client_rates):
+    body = cost(classification=classification_for("casting_machining"),
+                stage_inputs={"casting": {"mass_kg": 3.0, "yield_percent": 75.0}}).json()
+    totals = client.get(f"/estimates/{body['estimate_id']}/quotation").json()["totals"]
+    lines = {line["category"]: line for line in totals["lines"]}
+    # Casting 120 x 4.0 x 5 + 15,000, and fettling 10 x 3.0 x 5 on the blank.
+    assert lines["route_stages"]["amount"] == pytest.approx(17550.0)
+    assert not totals["reconciliation"]
+
+
+def test_a_comparison_attributes_a_yield_change_and_leaves_nothing_unexplained(client_rates):
+    classification = classification_for("casting_machining")
+    plain = cost(classification=classification,
+                 stage_inputs={"casting": {"mass_kg": 3.0}}).json()["estimate_id"]
+    yielded = cost(classification=classification,
+                   stage_inputs={"casting": {"mass_kg": 3.0, "yield_percent": 75.0}}
+                   ).json()["estimate_id"]
+    comparison = client.get(
+        f"/estimates/compare?baseline={plain}&comparison={yielded}"
+    ).json()
+    categories = {impact["category"] for impact in comparison["impacts"]}
+    route_stage = [i for i in comparison["impacts"] if i["category"] == "route_stage"]
+    moved = [i for i in route_stage if i["delta"]]
+    # Only the casting moves: 120 x (4.0 - 3.0) kg x 5. Fettling stays on the blank.
+    assert len(moved) == 1
+    assert moved[0]["delta"] == pytest.approx(600.0)
+    assert "yield none → 75%" in json.dumps(moved[0], ensure_ascii=False)
+    assert "unexplained" not in categories
+    assert "material_rate" not in categories and "material_quantity" not in categories
+
+
+def test_the_route_catalog_says_which_stages_may_carry_a_yield():
+    assert client.get("/process-routes").json()["yield_stages"] == sorted(MATERIAL_SUPPLYING_STAGES)
+
+
+def _js_without_comments(name: str) -> str:
+    lines = (PACKAGE / "static" / name).read_text(encoding="utf-8").splitlines()
+    return "\n".join(line for line in lines if not line.strip().startswith("//"))
+
+
+def test_the_page_sends_a_blank_yield_as_absent_and_works_nothing_out():
+    process = _js_without_comments("process.js")
+    # One setter for both fields, so typing a mass cannot drop the yield.
+    assert (
+        'setStageInput(input.dataset.stage, "yield_percent", raw === "" ? null : Number(raw))'
+        in process
+    )
+    assert "if (value === null || value === undefined) delete next[field];" in _js_without_comments("plan.js")
+    assert "{ mass_kg: Number(raw) }" not in process
+    assert "{ mass_kg: Number(raw) }" not in _js_without_comments("routecompare.js")
+    # Which stages take a yield is the server's list, and the yield is never
+    # applied in the browser: it appears only as an input and as a label.
+    assert "processRoutes.yield_stages" in process
+    for name in ("process.js", "plan.js", "routecompare.js", "app.js"):
+        code = _js_without_comments(name)
+        assert "yield_percent /" not in code and "/ yield" not in code.lower(), name
+        assert "enteredYield /" not in code and "/ enteredYield" not in code, name

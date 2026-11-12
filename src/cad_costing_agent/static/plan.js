@@ -462,8 +462,8 @@ function stagePricing(stageId) {
   return ((state.stageInputs || {})[stageId] || {}).pricing === "timed" ? "timed" : "stage_rate";
 }
 
-// One stage's inputs are a mass and a pricing choice; changing one keeps the
-// other. A stage with neither is removed, so "not entered" is never sent as 0.
+// One stage's inputs are a mass, a yield and a pricing choice; changing one
+// keeps the others. A stage with neither is removed, so "not entered" is never sent as 0.
 function setStageInput(stageId, field, value) {
   state.stageInputs = state.stageInputs || {};
   const next = { ...(state.stageInputs[stageId] || {}) };
@@ -729,11 +729,15 @@ function stageRateText(stage) {
   }
   if (rate.batch_charge) parts.push(`${money(rate.batch_charge, currency)} per batch`);
   const entered = ((state.stageInputs || {})[stage.stage] || {}).mass_kg;
+  const enteredYield = ((state.stageInputs || {})[stage.stage] || {}).yield_percent;
   const mass =
     rate.unit_basis === "per_kg"
-      ? entered !== undefined
-        ? ` · on ${number(entered, 3)} kg per part (entered)`
-        : " · on a mass you enter on the route card, or else the casting/forging blank's or the CAD model's — the estimate says which"
+      ? (entered !== undefined
+          ? ` · on ${number(entered, 3)} kg per part (entered)`
+          : " · on a mass you enter on the route card, or else the casting/forging blank's or the CAD model's — the estimate says which") +
+        (enteredYield !== undefined
+          ? ` · at a yield of ${number(enteredYield, 2)}% (entered) — the estimate states the mass charged`
+          : "")
       : "";
   return `<span class="muted">${parts.join(" + ")}${mass}</span>`;
 }

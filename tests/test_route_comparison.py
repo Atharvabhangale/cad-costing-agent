@@ -117,6 +117,24 @@ def test_a_per_kg_stage_with_no_entered_mass_is_priced_on_the_cad_mass_and_says_
     assert fettling["mass_kg"] == pytest.approx(mass["mass_kg"])
     assert rows["milling_drilling"]["status"] == "priced"
     assert rows["milling_drilling"]["stage_masses"] == []
+    # No yield was entered, so no row mentions one.
+    assert set(mass) == {"stage", "label", "mass_kg", "mass_source", "mass_note"}
+
+
+def test_an_entered_yield_is_previewed_exactly_as_the_estimate_would_charge_it():
+    assert publish(STAGE_RATES).status_code == 201
+    inputs = {"casting": {"mass_kg": 3.0, "yield_percent": 75.0}}
+    rows = by_id(compare(rate_set_id="client-shop", stage_inputs=inputs).json())
+    mass, fettling = rows["casting_machining"]["stage_masses"]
+    assert (mass["base_mass_kg"], mass["yield_percent"], mass["mass_kg"]) == (3.0, 75.0, 4.0)
+    assert mass["mass_source"] == "yield_applied"
+    assert "yield_percent" not in fettling and fettling["mass_kg"] == 3.0
+    for route_id in ("milling_drilling", "casting", "casting_machining"):
+        part = _cost(route_id, stage_inputs=inputs, rate_set_id="client-shop").json()["part_cost"]
+        assert rows[route_id]["total_part_cost"] == part["total_part_cost"], route_id
+        assert rows[route_id]["total_stage_cost"] == part["total_stage_cost"], route_id
+    # Casting 120 x 4.0 x 5 + 15,000, and fettling 10 x 3.0 x 5 on the blank.
+    assert rows["casting_machining"]["total_stage_cost"] == pytest.approx(17550.0)
 
 
 def test_a_row_says_what_its_cost_leaves_out_of_the_plan():

@@ -25,6 +25,26 @@ material the CAD file does not record, and the note says so rather than adding
 a hidden allowance. An entered blank lighter than the finished part is refused,
 because no blank is lighter than the part made from it.
 
+Yield
+-----
+
+The stage that supplies the material may also carry a yield a person entered
+(`yield_percent`, 0 < y <= 100): the share of the metal poured, or of the billet
+bought, that ends up in the blank. The rest is gating, risers, flash and melt
+loss, which a foundry or forge charges for and the CAD file does not record.
+The per-kg rate is then charged on `base mass / (yield / 100)`. The base is the
+same mass as without a yield — the blank's weight a person entered, or else the
+finished part's CAD mass — so an entered mass and a yield are not alternatives:
+the first says what the blank weighs, the second how much metal it took.
+
+There is no default yield and nothing is assumed about one: absent, the line is
+exactly what it was, down to its keys. With one, the line states the base mass
+and where it came from, the yield, and the mass charged, and `mass_source` reads
+`yield_applied`. A later per-kg step with no mass of its own (fettling) still
+works on the blank, not on the metal poured. A yield on anything but the per-kg
+stage that supplies the material is refused rather than ignored: a per-piece or
+per-batch price has no mass to divide, and a finishing step pours nothing.
+
 Material
 --------
 
@@ -39,6 +59,7 @@ Formulas, per stage
 
     unit_cost_per_part = unit_rate x mass_kg     (per_kg)
                        = unit_rate               (per_piece)
+    mass_kg            = base_mass_kg / (yield_percent / 100)   (only with a yield)
     run_cost           = unit_cost_per_part x quantity
     total_cost         = run_cost + batch_charge
 
@@ -51,7 +72,7 @@ It does not know what a route is; the caller hands it stage ids in route order.
 
 import math
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_serializer
 
 from cad_costing_agent.money import Money
 from cad_costing_agent.rate_sets import PER_KG, RateSet
@@ -102,6 +123,16 @@ def timed_stages(stage_input_values: dict, route_stage_ids: list[str]) -> dict[s
 STAGE_COST_FORMULA = (
     "total_cost = unit_rate x (mass_kg if per_kg else 1) x quantity + batch_charge"
 )
+STAGE_COST_FORMULA_WITH_YIELD = (
+    "total_cost = unit_rate x (base_mass_kg / (yield_percent / 100)) x quantity + batch_charge"
+)
+
+# `mass_source` of a line whose charged mass is a base mass divided by a yield.
+YIELD_APPLIED = "yield_applied"
+
+# Present on a line only when a yield was entered, so a line without one
+# serializes exactly as it did before yields existed.
+_YIELD_ONLY_KEYS = ("yield_percent", "base_mass_kg", "base_mass_source")
 
 
 class StageInput(BaseModel):
@@ -116,6 +147,17 @@ class StageInput(BaseModel):
         description=(
             "Per part, entered by a person. When absent, a per-kg stage uses the finished part's "
             "CAD mass and labels it."
+        ),
+    )
+    yield_percent: float | None = Field(
+        default=None,
+        gt=0,
+        le=100,
+        allow_inf_nan=False,
+        description=(
+            "Entered by a person, never defaulted: the blank's mass as a percentage of the metal "
+            "poured or billet bought. The per-kg rate is then charged on mass / (yield / 100). "
+            "Only the per-kg stage that supplies the material takes one."
         ),
     )
 
@@ -137,8 +179,22 @@ class StageCostLine(BaseModel):
     # For a per-kg stage: where the mass came from — 'entered' by a person, or
     # 'cad_finished_mass' (the CAD part's own volume x density, used when none
     # was entered) — and what that means for this route.
+    # With a yield it is 'yield_applied': `mass_kg` is then the mass charged,
+    # `base_mass_kg` the mass it was derived from and `base_mass_source` where
+    # that came from ('entered' or 'cad_finished_mass').
     mass_source: str | None = None
     mass_note: str = ""
+    yield_percent: float | None = None
+    base_mass_kg: float | None = None
+    base_mass_source: str | None = None
+
+    @model_serializer(mode="wrap")
+    def _without_an_absent_yield(self, handler):
+        data = handler(self)
+        if self.yield_percent is None:
+            for key in _YIELD_ONLY_KEYS:
+                data.pop(key, None)
+        return data
 
 
 class StageProblem(BaseModel):
@@ -184,6 +240,9 @@ def price_stages(
     a per-kg stage with no entered mass is charged on it, labelled as such, and
     an entered blank lighter than it is refused. `route_machines` says the route
     machines the part afterwards, so a blank's real weight is above the CAD mass.
+
+    A `yield_percent` on a stage that cannot take one raises `ValueError`: it is
+    a contradiction in what was entered, not a stage waiting for a rate or a mass.
     """
     if quantity < 1:
         raise ValueError(f"quantity must be at least 1, got {quantity}.")
@@ -224,7 +283,31 @@ def price_stages(
             )
             continue
 
+        takes_yield = (
+            rate.unit_rate is not None and rate.unit_basis == PER_KG and supplies_material
+        )
+        if stage.yield_percent is not None and not takes_yield:
+            if rate.unit_rate is None or rate.unit_basis != PER_KG:
+                reason = (
+                    f"rate set '{rate_set.rate_set_id}' v{rate_set.version} prices it "
+                    f"{'per piece' if rate.unit_rate is not None else 'per batch only'}, so there "
+                    "is no mass for a yield to apply to"
+                )
+            else:
+                reason = (
+                    "a yield belongs to the stage that supplies the material (the metal poured "
+                    "or billet bought), and this stage does not"
+                )
+            raise ValueError(
+                f"A yield of {stage.yield_percent:g}% was entered for {stage.label}, but "
+                f"{reason}. Remove the yield."
+            )
+
         unit_cost: float | None = None
+        yield_percent: float | None = None
+        base_mass_kg: float | None = None
+        base_mass_source: str | None = None
+        formula = STAGE_COST_FORMULA
         mass_kg = stage.mass_kg
         mass_source: str | None = None
         mass_note = ""
@@ -290,9 +373,24 @@ def price_stages(
                         )
                     )
                     continue
-                unit_cost = rate.unit_rate * mass_kg
                 if supplies_material:
+                    # Before any yield: a later step works on the blank, not on
+                    # the metal poured to make it.
                     blank_mass = mass_kg
+                if stage.yield_percent is not None:
+                    yield_percent = stage.yield_percent
+                    base_mass_kg = mass_kg
+                    base_mass_source = mass_source
+                    mass_kg = base_mass_kg / (yield_percent / 100.0)
+                    mass_source = YIELD_APPLIED
+                    mass_note += (
+                        f" Charged on {mass_kg:.4g} kg per part: that {base_mass_kg:.4g} kg "
+                        f"divided by a yield of {yield_percent:g}%, entered by the engineer — the "
+                        "share of the metal poured or billet bought that ends up in it. No yield "
+                        "is assumed when none is entered."
+                    )
+                    formula = STAGE_COST_FORMULA_WITH_YIELD
+                unit_cost = rate.unit_rate * mass_kg
             else:
                 unit_cost = rate.unit_rate
 
@@ -306,6 +404,10 @@ def price_stages(
                 mass_kg=mass_kg if rate.unit_basis == PER_KG else None,
                 mass_source=mass_source,
                 mass_note=mass_note,
+                yield_percent=yield_percent,
+                base_mass_kg=base_mass_kg,
+                base_mass_source=base_mass_source,
+                formula=formula,
                 quantity=quantity,
                 unit_cost_per_part=unit_cost,
                 run_cost=run_cost,

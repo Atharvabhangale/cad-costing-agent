@@ -24,7 +24,7 @@ from __future__ import annotations
 
 from collections.abc import Iterable, Sequence
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_serializer
 
 from cad_costing_agent.money import Money
 
@@ -129,9 +129,23 @@ class StageMassView(BaseModel):
     label: str
     mass_kg: float
     mass_source: str | None = Field(
-        default=None, description="'entered' or 'cad_finished_mass'."
+        default=None,
+        description="'entered', 'cad_finished_mass', 'blank_mass' or 'yield_applied'.",
     )
     mass_note: str = ""
+    # Only with an entered yield: `mass_kg` is then the mass charged, and this
+    # is the mass it was divided from. Absent otherwise, so a row without a
+    # yield reads exactly as before.
+    yield_percent: float | None = None
+    base_mass_kg: float | None = None
+
+    @model_serializer(mode="wrap")
+    def _without_an_absent_yield(self, handler):
+        data = handler(self)
+        if self.yield_percent is None:
+            data.pop("yield_percent", None)
+            data.pop("base_mass_kg", None)
+        return data
 
 
 RouteComparisonRow.model_rebuild()
