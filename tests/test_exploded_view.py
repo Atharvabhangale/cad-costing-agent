@@ -211,9 +211,11 @@ def test_a_sub_assemblys_parts_keep_their_positions_relative_to_each_other():
 
     for factor in (0.0, 0.5, 1.0):
         positions = translations(state, factor)
+        # Flat, not a list of tuples: pytest.approx refuses nested sequences.
         offsets = [
-            tuple(positions[inside[index]][axis] - positions[inside[0]][axis] for axis in range(3))
+            positions[inside[index]][axis] - positions[inside[0]][axis]
             for index in range(len(inside))
+            for axis in range(3)
         ]
         if factor == 0.0:
             reference = offsets
