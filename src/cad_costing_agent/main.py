@@ -34,6 +34,8 @@ from cad_costing_agent.cost_actuals import (
     ActualCostRecord,
     CostVariance,
     EstimateFigures,
+    SupplierQuoteComparison,
+    compare_supplier_quotes,
     compute_variance,
     figures_from_estimate,
 )
@@ -754,6 +756,11 @@ def quotation(
 # comparison is `cost_actuals.compute_variance`, which imports no calculator and
 # no repository; it is handed the stored estimate as a plain carrier built here.
 # Recording an actual changes no estimate, and nothing in costing reads them.
+#
+# A record is an actual or a supplier quote (`figure_kind`, required). These two
+# endpoints are the only readers of the table, and neither aggregates across
+# records: each entry is compared on its own and carries its kind, and the
+# side-by-side table is built from the quotes alone.
 
 
 class ActualCostEntry(BaseModel):
@@ -769,6 +776,12 @@ class EstimateActuals(BaseModel):
     currency: str
     estimate_quantity: int
     entries: list[ActualCostEntry]
+    supplier_quotes: SupplierQuoteComparison = Field(
+        description=(
+            "The current supplier quotes side by side, in the order entered. Never sorted "
+            "by price; none is marked as preferred."
+        )
+    )
 
 
 def _figures_of(estimate: StoredEstimate) -> EstimateFigures:
@@ -815,7 +828,11 @@ def record_actual_cost(
     entry: ActualCostInput,
     session: Session = Depends(get_session),
 ) -> ActualCostEntry:
-    """Record a client's actual cost against an estimate, and compare the two.
+    """Record an actual cost or a supplier quote against an estimate, and compare the two.
+
+    `figure_kind` says which, and has no default. An actual is reported as a
+    variance (estimate minus actual); a supplier quote as a gap (quote minus
+    should-cost), with no verdict on either figure.
 
     Only the total is required. A breakdown category left out is reported as not
     supplied, never as zero. A per-batch cost must state its batch quantity, and
@@ -830,8 +847,9 @@ def record_actual_cost(
         raise HTTPException(
             status_code=422,
             detail=(
-                f"This estimate is in {figures.currency} and the actual is in {entry.currency}. "
-                "Currencies are never converted; record the actual in the estimate's currency."
+                f"This estimate is in {figures.currency} and the figure entered is in "
+                f"{entry.currency}. Currencies are never converted; record it in the "
+                "estimate's currency."
             ),
         )
     repository = CostActualRepository(session)
@@ -850,18 +868,23 @@ def record_actual_cost(
 def estimate_actual_costs(
     estimate_id: str, session: Session = Depends(get_session)
 ) -> EstimateActuals:
-    """Every actual recorded against an estimate, oldest first, each with its variance.
+    """Every actual and supplier quote recorded against an estimate, oldest first.
+
+    Each entry carries its `figure_kind` and its own comparison. The current
+    supplier quotes are also set side by side in `supplier_quotes`.
 
     A corrected record is still listed, marked not current, with the id of the
     record that replaced it.
     """
     figures = _figures_of(_stored_estimate(session, estimate_id))
+    records = CostActualRepository(session).for_estimate(estimate_id)
     return EstimateActuals(
         estimate_id=estimate_id,
         estimate_kind=figures.kind,
         currency=figures.currency,
         estimate_quantity=figures.quantity,
-        entries=_entries(figures, CostActualRepository(session).for_estimate(estimate_id)),
+        entries=_entries(figures, records),
+        supplier_quotes=compare_supplier_quotes(figures, records),
     )
 
 

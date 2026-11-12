@@ -5,12 +5,21 @@
 // and sends what a person typed. A blank breakdown field is sent as null, never
 // as 0 — the server reports it as "not supplied", and a zero would be a claim
 // that the part had no such cost.
+//
+// A record is an actual or a supplier quote, and the person says which: the
+// kind has no preselected option. The server words the two differently — an
+// actual gets a variance, a quote a gap against the should-cost — and reports
+// them in different fields; this file prints whichever the response carries.
+// The side-by-side quote table is the server's too, in the server's order.
 
 const ACTUAL_STATE_LABELS = {
   compared: "",
   not_supplied: "Not supplied",
   not_comparable: "Not comparable",
+  unavailable: "Unavailable",
 };
+
+const SUPPLIER_QUOTE_KIND = "supplier_quote";
 
 async function renderActualsPanel(estimate) {
   const host = $("history-actuals");
@@ -24,17 +33,19 @@ async function renderActualsPanel(estimate) {
     return;
   }
   host.innerHTML = `
-    <h3>Actual cost (client data)</h3>
-    <p class="muted">Costs stated outside this application — an ERP actual, a past quotation —
-    compared with this estimate per unit. Recording one changes nothing in the estimate.
+    <h3>Actual costs and supplier quotes</h3>
+    <p class="muted">Figures stated outside this application — an ERP actual, a supplier's
+    quotation — compared with this estimate per unit. Recording one changes nothing in the
+    estimate.
     ${data.estimate_kind === "assembly"
       ? "An assembly is compared on its total only."
       : ""}</p>
     <div id="actuals-list">${
       data.entries.length
         ? data.entries.map((entry) => actualEntryMarkup(entry)).join("")
-        : "<p class='muted'>No actual cost recorded yet.</p>"
+        : "<p class='muted'>No actual cost or supplier quote recorded yet.</p>"
     }</div>
+    ${supplierQuotesMarkup(data.supplier_quotes)}
     ${actualFormMarkup(data)}`;
 
   host.querySelectorAll("button.actual-correct").forEach((button) =>
@@ -48,6 +59,74 @@ async function renderActualsPanel(estimate) {
     submitActual(estimate);
   });
   $("actual-cancel-correction").addEventListener("click", () => fillActualForm(null));
+  $("actual-kind").addEventListener("change", showSupplierFields);
+}
+
+// The supplier fields belong to a quote, so they are offered only for one.
+function showSupplierFields() {
+  const isQuote = $("actual-kind").value === SUPPLIER_QUOTE_KIND;
+  $("actual-supplier-fields").classList.toggle("hidden", !isQuote);
+}
+
+// Current supplier quotes side by side, exactly as the server ordered them.
+function supplierQuotesMarkup(comparison) {
+  if (!comparison || !comparison.quotes.length) return "";
+  const currency = comparison.currency;
+  const heads = comparison.quotes
+    .map(
+      (quote) => `<th class="num" colspan="3">${escapeHtml(quote.supplier_name || quote.source)}${
+        quote.quote_reference
+          ? `<br><span class="muted">${escapeHtml(quote.quote_reference)}</span>`
+          : ""
+      }</th>`
+    )
+    .join("");
+  const subheads = comparison.quotes
+    .map(() => `<th class="num">Quote / unit</th><th class="num">Gap</th><th class="num">%</th>`)
+    .join("");
+  const rows = comparison.rows
+    .map(
+      (row) => `<tr>
+        <th>${escapeHtml(row.label)}</th>
+        <td class="num">${money(row.estimate_per_unit, currency)}</td>
+        ${row.cells
+          .map((cell) =>
+            cell.state === "compared"
+              ? `<td class="num">${money(cell.quote_per_unit, currency)}</td>
+                 <td class="num">${signed(cell.gap)}</td>
+                 <td class="num">${signed(cell.gap_percent, "%")}</td>`
+              : cell.state === "not_comparable"
+              ? `<td class="num">${money(cell.quote_per_unit, currency)}</td>
+                 <td class="num" colspan="2"><em>Not comparable</em></td>`
+              : `<td class="num" colspan="3"><em>${
+                  cell.state === "not_supplied" ? "Not itemised" : ACTUAL_STATE_LABELS[cell.state]
+                }</em></td>`
+          )
+          .join("")}
+      </tr>`
+    )
+    .join("");
+  const problems = comparison.quotes
+    .filter((quote) => quote.status !== "available")
+    .map(
+      (quote) => `<p class="warning">${escapeHtml(quote.supplier_name || quote.source)}:
+        ${escapeHtml(quote.unavailable_detail)}</p>`
+    )
+    .join("");
+  return `<div id="supplier-quotes" class="supplier-quotes">
+    <h4>Supplier quotes against the should-cost</h4>
+    <p class="muted">${escapeHtml(comparison.note)}</p>
+    <div class="supplier-quote-scroll"><table class="mini actual-variance supplier-quote-table">
+      <thead>
+        <tr><th></th><th class="num">Should-cost / unit</th>${heads}</tr>
+        <tr><th></th><th></th>${subheads}</tr>
+      </thead>
+      <tbody>${rows}</tbody>
+    </table></div>
+    ${problems}
+    <p class="provenance">${escapeHtml(comparison.basis)}
+      ${escapeHtml(comparison.category_mapping)}</p>
+  </div>`;
 }
 
 function signed(value, suffix = "") {
@@ -59,11 +138,14 @@ function actualEntryMarkup(entry) {
   const record = entry.record;
   const variance = entry.variance;
   const currency = record.currency;
+  const isQuote = record.figure_kind === SUPPLIER_QUOTE_KIND;
   const basis =
     record.cost_basis === "per_batch"
       ? `per batch of ${record.batch_quantity}`
       : `per unit${record.batch_quantity ? `, batch of ${record.batch_quantity}` : ""}`;
   const identity = [
+    record.supplier_name ? `Supplier ${escapeHtml(record.supplier_name)}` : "",
+    record.quote_reference ? `quote ref ${escapeHtml(record.quote_reference)}` : "",
     record.client_part_number ? `Client part ${escapeHtml(record.client_part_number)}` : "",
     record.drawing_revision ? `drawing rev ${escapeHtml(record.drawing_revision)}` : "",
     record.cost_date ? `dated ${escapeHtml(record.cost_date)}` : "",
@@ -73,7 +155,8 @@ function actualEntryMarkup(entry) {
 
   let body;
   if (variance.status !== "available") {
-    body = `<p class="warning">Variance unavailable: ${escapeHtml(variance.unavailable_detail)}</p>`;
+    body = `<p class="warning">${isQuote ? "Gap" : "Variance"} unavailable:
+      ${escapeHtml(variance.unavailable_detail)}</p>`;
   } else {
     const rows = variance.lines
       .map(
@@ -82,13 +165,21 @@ function actualEntryMarkup(entry) {
           <td class="num">${money(line.estimate_per_unit, currency)}</td>
           <td class="num">${
             line.state === "not_supplied"
-              ? "<em>Not supplied</em>"
-              : money(line.actual_per_unit, currency)
+              ? `<em>${isQuote ? "Not itemised" : "Not supplied"}</em>`
+              : money(isQuote ? line.quote_per_unit : line.actual_per_unit, currency)
           }</td>
           <td class="num">${
-            line.state === "compared" ? signed(line.variance) : ACTUAL_STATE_LABELS[line.state]
+            line.state === "compared"
+              ? signed(isQuote ? line.gap : line.variance)
+              : isQuote && line.state === "not_supplied"
+              ? ""
+              : ACTUAL_STATE_LABELS[line.state]
           }</td>
-          <td class="num">${line.state === "compared" ? signed(line.variance_percent, "%") : ""}</td>
+          <td class="num">${
+            line.state === "compared"
+              ? signed(isQuote ? line.gap_percent : line.variance_percent, "%")
+              : ""
+          }</td>
         </tr>`
       )
       .join("");
@@ -103,26 +194,42 @@ function actualEntryMarkup(entry) {
           )
       ),
     ];
+    // The server's sentence for each compared line: a direction and a size.
+    const statements = variance.lines
+      .filter((line) => line.statement)
+      .map((line) => `${line.label}: ${line.statement}`);
+    const unattributed = isQuote
+      ? variance.unattributed_quote_per_unit
+      : variance.unattributed_actual_per_unit;
     body = `
       <table class="mini actual-variance">
-        <thead><tr><th></th><th class="num">Estimate / unit</th><th class="num">Actual / unit</th>
-          <th class="num">Variance</th><th class="num">%</th></tr></thead>
+        <thead><tr><th></th>
+          <th class="num">${isQuote ? "Should-cost / unit" : "Estimate / unit"}</th>
+          <th class="num">${isQuote ? "Quote / unit" : "Actual / unit"}</th>
+          <th class="num">${isQuote ? "Gap" : "Variance"}</th><th class="num">%</th></tr></thead>
         <tbody>${rows}</tbody>
       </table>
+      ${statements
+        .map((text) => `<p class="actual-note actual-statement">${escapeHtml(text)}</p>`)
+        .join("")}
       ${notes.map((text) => `<p class="muted actual-note">${escapeHtml(text)}</p>`).join("")}
       ${
-        variance.unattributed_actual_per_unit !== null &&
-        variance.unattributed_actual_per_unit !== undefined
-          ? `<p class="muted">Actual not attributed to any supplied category:
-             ${money(variance.unattributed_actual_per_unit, currency)} per unit.</p>`
+        unattributed !== null && unattributed !== undefined
+          ? `<p class="muted">${
+              isQuote
+                ? "Quote not attributed to any itemised category"
+                : "Actual not attributed to any supplied category"
+            }: ${money(unattributed, currency)} per unit.</p>`
           : ""
       }
       ${variance.warnings.map((text) => `<p class="warning">${escapeHtml(text)}</p>`).join("")}
       <p class="provenance">${escapeHtml(variance.basis)} ${escapeHtml(variance.category_mapping)}</p>`;
   }
 
-  return `<div class="actual-entry${entry.is_current ? "" : " superseded"}">
-    <p><strong>${money(record.total_cost, currency)}</strong> ${basis} —
+  return `<div class="actual-entry${entry.is_current ? "" : " superseded"}"
+      data-kind="${escapeHtml(record.figure_kind)}">
+    <p><span class="actual-kind-label">${isQuote ? "Supplier quote" : "Actual"}</span>
+      <strong>${money(record.total_cost, currency)}</strong> ${basis} —
       ${escapeHtml(record.source)}
       ${identity ? `<br><span class="muted">${identity}</span>` : ""}
       <br><span class="muted mono">Recorded ${new Date(record.recorded_at + "Z").toLocaleString()}
@@ -144,10 +251,16 @@ function actualEntryMarkup(entry) {
 function actualFormMarkup(data) {
   return `
     <form id="actual-form" class="actual-form">
-      <h4 id="actual-form-title">Record an actual cost</h4>
+      <h4 id="actual-form-title">Record an actual cost or a supplier quote</h4>
       <p id="actual-correcting" class="warning hidden"></p>
       <input type="hidden" id="actual-supersedes">
       <div class="grid3">
+        <label>Kind of figure
+          <select id="actual-kind" required>
+            <option value="">Choose…</option>
+            <option value="actual">Actual cost (incurred)</option>
+            <option value="supplier_quote">Supplier quote (offered)</option>
+          </select></label>
         <label>Source <input id="actual-source" required
           placeholder="e.g. Client ERP actual, FY2025"></label>
         <label>Cost basis
@@ -174,9 +287,15 @@ function actualFormMarkup(data) {
           placeholder="optional"></label>
         <label>Notes <input id="actual-notes" maxlength="2000"></label>
       </div>
+      <div id="actual-supplier-fields" class="grid3 hidden">
+        <label>Supplier name <input id="actual-supplier" maxlength="200"
+          placeholder="optional"></label>
+        <label>Quote reference <input id="actual-quote-ref" maxlength="100"
+          placeholder="optional"></label>
+      </div>
       <p id="actual-error" class="error hidden"></p>
       <div class="row">
-        <button type="submit">Record actual cost</button>
+        <button type="submit">Record</button>
         <button type="button" id="actual-cancel-correction" class="secondary hidden">
           Cancel correction</button>
       </div>
@@ -184,6 +303,9 @@ function actualFormMarkup(data) {
 }
 
 const ACTUAL_FIELDS = {
+  "actual-kind": "figure_kind",
+  "actual-supplier": "supplier_name",
+  "actual-quote-ref": "quote_reference",
   "actual-source": "source",
   "actual-basis": "cost_basis",
   "actual-batch": "batch_quantity",
@@ -206,7 +328,10 @@ function fillActualForm(record) {
   }
   $("actual-supersedes").value = record ? record.actual_id : "";
   $("actual-error").classList.add("hidden");
-  $("actual-form-title").textContent = record ? "Correct an actual cost" : "Record an actual cost";
+  showSupplierFields();
+  $("actual-form-title").textContent = record
+    ? "Correct a recorded figure"
+    : "Record an actual cost or a supplier quote";
   $("actual-correcting").textContent = record
     ? `Correcting ${record.actual_id}. The original stays on the record, marked superseded.`
     : "";
@@ -229,7 +354,12 @@ function optionalText(id) {
 async function submitActual(estimate) {
   const error = $("actual-error");
   error.classList.add("hidden");
+  // A hidden supplier field is not sent: it belongs to a quote only.
+  const isQuote = $("actual-kind").value === SUPPLIER_QUOTE_KIND;
   const payload = {
+    figure_kind: optionalText("actual-kind"),
+    supplier_name: isQuote ? optionalText("actual-supplier") : null,
+    quote_reference: isQuote ? optionalText("actual-quote-ref") : null,
     source: $("actual-source").value,
     cost_basis: $("actual-basis").value,
     batch_quantity: optionalNumber("actual-batch"),

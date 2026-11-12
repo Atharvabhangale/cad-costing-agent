@@ -28,7 +28,7 @@ from cad_costing_agent.time_profiles import SEED_TIME_PROFILES
 SEEDED_VERSIONS = len(SEED_RATE_SETS) + len(SEED_TIME_PROFILES) + len(SEED_DFM_PROFILES)
 from cad_costing_agent.repository import EstimateRepository, RateSetRepository
 
-HEAD_REVISION = "0007"
+HEAD_REVISION = "0008"
 
 
 def _engine(path=None):

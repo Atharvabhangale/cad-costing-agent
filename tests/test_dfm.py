@@ -338,7 +338,7 @@ def test_migration_0007_upgrades_an_existing_0006_database_without_touching_data
     assert db_module.run_migrations(engine) == "upgraded"
 
     with engine.connect() as c:
-        assert c.execute(text("select version_num from alembic_version")).scalar_one() == "0007"
+        assert c.execute(text("select version_num from alembic_version")).scalar_one() == "0008"
         assert c.execute(text("select * from time_profiles")).fetchall() == before
         assert "dfm_profiles" in inspect(c).get_table_names()
 
