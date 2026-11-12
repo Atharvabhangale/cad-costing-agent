@@ -108,9 +108,11 @@ function routeCompareMasses(row) {
         (mass) =>
           `<label class="route-mass">${escapeHtml(mass.label)}, kg per part ` +
           `<input type="number" min="0" step="any" class="route-mass-input" ` +
-          `data-stage="${escapeHtml(mass.stage)}" value="${escapeHtml(number(mass.mass_kg, 3))}">` +
+          // With a yield the box holds the mass the yield was applied to, as
+          // the server reports it; the mass charged is in the note beside it.
+          `data-stage="${escapeHtml(mass.stage)}" value="${escapeHtml(number(mass.base_mass_kg ?? mass.mass_kg, 3))}">` +
           `<span class="pill ${mass.mass_source === "entered" ? "pill-sys" : "pill-off"}">` +
-          `${{ entered: "entered", blank_mass: "same as the blank" }[mass.mass_source] || "from CAD"}</span></label>` +
+          `${{ entered: "entered", blank_mass: "same as the blank", yield_applied: "yield applied" }[mass.mass_source] || "from CAD"}</span></label>` +
           `<div class="hint">${escapeHtml(mass.mass_note)}</div>`
       )
       .join("") + `<button type="button" class="secondary tiny route-recompare">Re-price</button>`

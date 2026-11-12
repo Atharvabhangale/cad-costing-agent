@@ -682,10 +682,19 @@ def decompose(
         before_stage = before_stages.get(stage_id) or {}
         after_stage = after_stages.get(stage_id) or {}
         label = after_stage.get("label") or before_stage.get("label") or stage_id
+        # An entered yield that differs is named, read as stored. A line with
+        # no yield has no such key, and reads "none".
+        yields = [stage.get("yield_percent") for stage in (before_stage, after_stage)]
+        yield_change = (
+            ""
+            if yields[0] == yields[1]
+            else "; yield "
+            + " → ".join("none" if value is None else f"{value:g}%" for value in yields)
+        )
         impacts.extend(
             _flat(
                 "route_stage",
-                f"{label} (route stage)"
+                f"{label} (route stage{yield_change})"
                 if before_stage and after_stage
                 else f"{label} is no longer a route stage"
                 if before_stage

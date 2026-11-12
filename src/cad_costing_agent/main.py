@@ -1,4 +1,5 @@
 import json
+import math
 from dataclasses import dataclass
 import time
 import mimetypes
@@ -135,6 +136,7 @@ from cad_costing_agent.operation_suggestions import (
 )
 from cad_costing_agent.raw_stock import BarStock, propose_bar_stock, record_stock_decision
 from cad_costing_agent.stage_costing import (
+    MATERIAL_SUPPLYING_STAGES,
     StageInput,
     material_supplying_stage,
     price_stages,
@@ -2616,6 +2618,13 @@ class ProcessRouteCatalog(BaseModel):
     families: list[ProcessFamilyOption]
     routes: list[ProcessRoute]
     not_assessed: list[str]
+    yield_stages: list[str] = Field(
+        default_factory=list,
+        description=(
+            "Stage ids whose rate includes the material. Priced per kg, such a stage may carry "
+            "an engineer-entered yield; the page offers the input for these and no others."
+        ),
+    )
 
 
 @app.get("/process-routes", response_model=ProcessRouteCatalog)
@@ -2632,6 +2641,7 @@ def process_routes() -> ProcessRouteCatalog:
         ],
         routes=route_catalog(),
         not_assessed=list(NOT_ASSESSED),
+        yield_stages=sorted(MATERIAL_SUPPLYING_STAGES),
     )
 
 
@@ -2984,6 +2994,29 @@ async def cad_mass(
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
+def _entered_yield_percent(stage_id: str, entry) -> float | None:
+    """The yield a person entered for one stage in `stage_inputs`, or None when absent.
+
+    Absent (or null) is "no yield", and nothing stands in for it. Anything else
+    must be a number above 0 and at most 100, or the request is refused.
+    """
+    if not isinstance(entry, dict) or entry.get("yield_percent") is None:
+        return None
+    value = entry["yield_percent"]
+    if (
+        isinstance(value, bool)
+        or not isinstance(value, (int, float))
+        or not math.isfinite(value)
+        or not 0 < value <= 100
+    ):
+        raise ValueError(
+            f"'yield_percent' for stage '{stage_id}' must be a number above 0 and at most 100 — "
+            f"the blank's mass as a percentage of the metal poured or billet bought; got {value!r}. "
+            "Leave it out for no yield."
+        )
+    return float(value)
+
+
 @dataclass
 class PricedCadPart:
     """Everything `/cost/cad-part` works out before it stores an estimate.
@@ -3095,6 +3128,12 @@ def price_cad_part(
                 raise ValueError(f"'stage_inputs' must be valid JSON: {exc}") from exc
             if not isinstance(stage_input_values, dict):
                 raise ValueError("'stage_inputs' must be an object keyed by route stage id.")
+        # A yield is the engineer's number or it is absent. Checked for every
+        # stage sent, priced by this route or not, because it is stored as sent.
+        stage_yields = {
+            stage_id: _entered_yield_percent(stage_id, entry)
+            for stage_id, entry in stage_input_values.items()
+        }
         timed: dict[str, str] = {}
         if classification is not None and classification.route is not None:
             timed = timed_stages(
@@ -3207,6 +3246,16 @@ def price_cad_part(
         # stage rates — every one of them, or the estimate is refused with each
         # stage's reason. Which stages those are comes from the route catalog by
         # stage id, not from what the payload says about itself.
+        # A stage priced by time is left out of stage pricing, so a yield on it
+        # would be dropped without a word. It is refused instead: a yield divides
+        # the mass a per-kg rate is charged on, and this stage has no such charge.
+        for stage_id in timed:
+            if stage_yields.get(stage_id) is not None:
+                raise ValueError(
+                    f"A yield of {stage_yields[stage_id]:g}% was entered for "
+                    f"{STAGES[stage_id][0]}, but that stage is priced by time, so there is no "
+                    "per-kg mass for a yield to apply to. Remove the yield."
+                )
         stage_lines = []
         material_supplied_by: str | None = None
         if classification is not None and classification.costing_status == "stage_rates_required":
@@ -3216,6 +3265,7 @@ def price_cad_part(
                     stage=stage.stage,
                     label=STAGES[stage.stage][0] if stage.stage in STAGES else stage.label,
                     mass_kg=(stage_input_values.get(stage.stage) or {}).get("mass_kg"),
+                    yield_percent=stage_yields.get(stage.stage),
                 )
                 for stage in classification.route.stages
                 if (stage.stage not in STAGES or STAGES[stage.stage][1] is None)
@@ -3374,7 +3424,10 @@ async def cost_cad_part(
             "Optional JSON object keyed by route stage id, e.g. {\"casting\": {\"mass_kg\": "
             "2.4}}: the mass, per part, that a per-kg stage rate is charged on, recorded on the "
             "estimate. A per-kg stage with none entered is charged on the finished part's CAD "
-            "mass, labelled as such."
+            "mass, labelled as such. The per-kg stage that supplies the material may also carry "
+            "\"yield_percent\" (above 0, at most 100): the blank's mass as a percentage of the "
+            "metal poured or billet bought, so the rate is charged on mass / (yield / 100). "
+            "There is no default yield; absent, nothing is added."
         ),
     ),
     session: Session = Depends(get_session),
@@ -3710,6 +3763,8 @@ async def compare_routes(
                         mass_kg=line.mass_kg,
                         mass_source=line.mass_source,
                         mass_note=line.mass_note,
+                        yield_percent=line.yield_percent,
+                        base_mass_kg=line.base_mass_kg,
                     )
                     for line in cost.stage_costs
                     if line.mass_kg is not None
