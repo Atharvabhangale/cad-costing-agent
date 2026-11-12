@@ -14,6 +14,7 @@ are different questions and now have different answers.
     CAD_COSTING_MAX_BULK_ROWS           parts one bulk preview will price
     CAD_COSTING_MAX_BULK_FILES          CAD files one bulk preview will accept
     CAD_COSTING_MAX_BULK_TOTAL_MB       combined size of one bulk preview's CAD files
+    CAD_COSTING_MAX_MATRIX_CELLS        rate set x quantity cells one matrix preview will price
 
 The ordering that matters: a model can be **too complex to draw and still
 perfectly costable**. Geometry and mass need a volume, which is cheap; the
@@ -120,3 +121,9 @@ MAX_BULK_TOTAL_BYTES = MAX_BULK_TOTAL_MB * _MEGABYTE
 MAX_BULK_CSV_BYTES = 1 * _MEGABYTE
 """Largest batch CSV. A hundred rows is a few tens of kilobytes; this is a
 sanity bound, not a tuning knob."""
+
+
+MAX_MATRIX_CELLS = _positive_int("CAD_COSTING_MAX_MATRIX_CELLS", 24)
+"""Cells (rate sets x quantities) one matrix costing preview will price. Every
+cell goes through the whole pricing path, which reads the CAD file again, so
+this bounds how long a request can run. A larger grid is refused, not trimmed."""

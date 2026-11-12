@@ -499,6 +499,28 @@
           <span id="calc-status" class="muted"></span>
         </div>
 
+        <!-- ---------------- matrix preview ----------------
+             One part under several rate-set versions at several quantities.
+             matrix.js draws the picker from the rate-set list app.js loaded and
+             shows the server's grid as it arrives. -->
+        <div class="card" id="matrix-card">
+          <details id="matrix-details">
+            <summary><strong>Matrix preview</strong> <span class="muted">— this part under several rate sets and quantities; nothing is saved</span></summary>
+            <p class="hint">Prices the part above exactly as <em>Calculate estimate</em> would, once per
+              rate-set version and quantity you list, with the plan as it stands — only committed
+              times count. A preview: nothing is saved, nothing is ranked, and currencies are never
+              converted.</p>
+            <div id="matrix-rate-sets" class="matrix-picker"></div>
+            <label>Quantities <span class="muted">(whole numbers, separated by commas)</span>
+              <input id="matrix-quantities" type="text" value="1, 10, 100" placeholder="e.g. 1, 10, 100"></label>
+            <div class="actions">
+              <button type="button" id="matrix-run" class="secondary">Preview matrix</button>
+              <span id="matrix-status" class="hint"></span>
+            </div>
+            <div id="matrix-result"></div>
+          </details>
+        </div>
+
       </div>
 
       <!-- ============================================================
@@ -1011,6 +1033,7 @@
 <script src="feedback.js"></script>
 <script src="actuals.js"></script>
 <script src="routecompare.js"></script>
+<script src="matrix.js"></script>
 <script src="bulk.js"></script>
 <script src="dfm.js"></script>
 <script src="estimateflow.js"></script>

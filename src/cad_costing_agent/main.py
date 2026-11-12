@@ -4022,6 +4022,165 @@ def bulk_preview_run(
     )
 
 
+# -------------------------------------------------------------- matrix preview
+#
+# One part priced as a grid: rate-set versions down, quantities across. Every
+# cell goes through `price_cad_part`, the same path `/cost/cad-part` uses, with
+# the plan exactly as it was sent (no time is accepted here), so a cell is the
+# figure an estimate with that rate set and quantity would have. Nothing is
+# stored, nothing is ordered by cost and nothing is chosen.
+
+from cad_costing_agent import matrix_preview  # noqa: E402
+from cad_costing_agent.limits import MAX_MATRIX_CELLS  # noqa: E402
+
+
+def _matrix_rate_set(
+    session: Session, request: "matrix_preview.RateSetRequest"
+) -> "matrix_preview.MatrixRateSet":
+    """The row's rate set as stored, or why it is not there. Read only, to label the row."""
+    asked = dict(requested_rate_set_id=request.rate_set_id, requested_version=request.version)
+    try:
+        rate_set = RateSetRepository(session).get(request.rate_set_id, request.version)
+    except ValueError as exc:
+        return matrix_preview.MatrixRateSet(**asked, resolved=False, reason=str(exc))
+    return matrix_preview.MatrixRateSet(
+        **asked,
+        resolved=True,
+        rate_set_id=rate_set.rate_set_id,
+        name=rate_set.name,
+        version=rate_set.version,
+        currency=rate_set.currency,
+        is_illustrative=rate_set.is_illustrative,
+    )
+
+
+@app.post("/cost/matrix-preview", response_model=matrix_preview.MatrixPreview)
+def cost_matrix_preview(
+    file: UploadFile = File(...),
+    rate_sets: str = Form(
+        ...,
+        description=(
+            "JSON list of the rate sets to price under, in the order to show them, e.g. "
+            '[{"rate_set_id": "poc-default"}, {"rate_set_id": "poc-machine-shop", "version": '
+            '"1.0.0"}]. Omit `version` for the latest.'
+        ),
+    ),
+    quantities: str = Form(
+        ..., description="JSON list of the quantities to price at, in order, e.g. [1, 10, 100]."
+    ),
+    material: str = Form(...),
+    source_unit: str = Form(...),
+    part_id: str = Form(...),
+    part_name: str = Form(...),
+    operations: str = Form("[]"),
+    operation_requirements: str = Form("[]"),
+    overhead_rate_percent: float | None = Form(None),
+    scrap_rate_percent: float | None = Form(None),
+    tooling_cost_per_batch: float | None = Form(None),
+    geometry_completion_method: str | None = Form(None),
+    geometry_completion_volume_mm3: float | None = Form(None),
+    manufacturing_plan: str | None = Form(None),
+    raw_stock: str | None = Form(None),
+    process_classification: str | None = Form(None),
+    stage_inputs: str | None = Form(None),
+    session: Session = Depends(get_session),
+) -> "matrix_preview.MatrixPreview":
+    """Price one CAD part under each rate set at each quantity, as a preview.
+
+    Takes `/cost/cad-part`'s own inputs, with a list of rate sets and a list of
+    quantities in place of one of each. A cell that cannot be priced (a rate set
+    with no rate for a process in the plan, an unknown rate set) is listed with
+    the pricing path's reason and no figures. Currencies are never converted.
+    """
+    try:
+        requests = matrix_preview.parse_rate_set_requests(rate_sets)
+        columns = matrix_preview.parse_quantities(quantities)
+        matrix_preview.check_grid_size(len(requests), len(columns), MAX_MATRIX_CELLS)
+    except matrix_preview.MatrixRefused as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    data = file.file.read()
+    rows: list[matrix_preview.MatrixRow] = []
+    for request in requests:
+        rate_set = _matrix_rate_set(session, request)
+        cells: list[matrix_preview.MatrixCell] = []
+        for quantity in columns:
+            try:
+                priced = price_cad_part(
+                    session,
+                    data=data,
+                    filename=file.filename or "",
+                    material=material,
+                    source_unit=source_unit,
+                    part_id=part_id,
+                    part_name=part_name,
+                    quantity=quantity,
+                    operations=operations,
+                    operation_requirements=operation_requirements,
+                    rate_set_id=request.rate_set_id,
+                    # The version the row's label names, so "latest" is one
+                    # version for the whole row.
+                    rate_set_version=rate_set.version if rate_set.resolved else request.version,
+                    overhead_rate_percent=overhead_rate_percent,
+                    scrap_rate_percent=scrap_rate_percent,
+                    tooling_cost_per_batch=tooling_cost_per_batch,
+                    geometry_completion_method=geometry_completion_method,
+                    geometry_completion_volume_mm3=geometry_completion_volume_mm3,
+                    manufacturing_plan=manufacturing_plan,
+                    raw_stock=raw_stock,
+                    process_classification=process_classification,
+                    stage_inputs=stage_inputs,
+                )
+            except HTTPException as exc:
+                code, message, stages = refusal_from_detail(exc.status_code, exc.detail)
+                cells.append(
+                    matrix_preview.MatrixCell(
+                        rate_set=rate_set,
+                        quantity=quantity,
+                        status=matrix_preview.STATUS_REFUSED,
+                        refusal=matrix_preview.MatrixRefusal(
+                            code=code, message=message, stages=stages
+                        ),
+                    )
+                )
+                continue
+
+            cost = priced.result.part_cost
+            plan = priced.plan
+            cells.append(
+                matrix_preview.MatrixCell(
+                    rate_set=rate_set,
+                    quantity=quantity,
+                    status=matrix_preview.STATUS_PRICED,
+                    currency=cost.currency,
+                    total_part_cost=cost.total_part_cost,
+                    per_unit_cost=cost.per_unit_cost,
+                    total_material_cost=cost.total_material_cost,
+                    total_operation_cost=cost.total_operation_cost,
+                    total_stage_cost=cost.total_stage_cost,
+                    direct_cost_base=cost.direct_cost_base,
+                    overhead_cost=cost.additional_costs.overhead_cost,
+                    scrap_cost=cost.additional_costs.scrap_cost,
+                    tooling_cost=cost.additional_costs.tooling_cost,
+                    total_additional_cost=cost.total_additional_cost,
+                    material_charged=cost.material_charged,
+                    operations_costed=(
+                        None if plan is None else len(priced.requirement_models)
+                    ),
+                    operations_not_timed=(
+                        None if plan is None else len(plan.uncosted_operations())
+                    ),
+                )
+            )
+        rows.append(matrix_preview.MatrixRow(rate_set=rate_set, cells=cells))
+
+    return matrix_preview.MatrixPreview(
+        currency_note=matrix_preview.currency_note(row.rate_set.currency for row in rows),
+        quantities=columns,
+        rows=rows,
+    )
+
+
 # ---------------------------------------------------------------------------
 # Advisory design-for-manufacturing flags and their threshold profiles.
 #
