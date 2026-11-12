@@ -70,6 +70,12 @@ finished by following it.
     passes = ceil(size / mm_per_pass)          (size: fillet leg, or butt plate thickness)
     arc    = length · passes / travel_speed    (travel speed for the weld process)
     cycle  = arc / arc_on_factor               (handling, cleaning between passes)
+           + reposition_per_weld + tack_per_weld   (each only if the profile gives it)
+
+The two per-weld handling figures are optional on their own: a profile that
+times welds without them gives exactly the arc-derived time above. They are
+added once per weld line, per part, to the *cycle* — never to the setup, which
+belongs to a fixturing and is charged once however many welds it holds.
 
 Its parameters default to *absent*: a profile with none says so and the time is
 entered by hand, rather than a built-in figure pretending to be a welding shop.
@@ -242,6 +248,28 @@ class TimeAssumptions(BaseModel):
         description="Fraction of welding time the arc is on; the rest is handling and cleaning.",
     )
     welding_setup_minutes: float | None = Field(default=None, ge=0, le=10000.0)
+    # Per-weld handling. Optional even in a profile that times welds: absent,
+    # a weld's time is its arc-derived time alone, exactly as before these
+    # existed. They are per weld and per part, so they join the cycle time —
+    # not the setup, which is charged once per fixturing.
+    welding_reposition_minutes_per_weld: float | None = Field(
+        default=None,
+        ge=0,
+        le=1000.0,
+        description=(
+            "Time to reach a weld's start, or turn the work to it, added once to each weld's "
+            "cycle time. Not covered by the arc-on factor, which scales with weld length."
+        ),
+    )
+    welding_tack_minutes_per_weld: float | None = Field(
+        default=None,
+        ge=0,
+        le=1000.0,
+        description=(
+            "Time to clamp and tack the joint before a weld is run, added once to each weld's "
+            "cycle time."
+        ),
+    )
 
     # --- shared spindle limits ---
     #
@@ -898,9 +926,17 @@ _WELDING_PARAMETERS = (
     "welding_setup_minutes",
 )
 
+# Added to a weld's cycle time when the profile supplies them, and not required
+# for a weld to be timed: (field, what the explanation calls it).
+_WELDING_HANDLING = (
+    ("welding_reposition_minutes_per_weld", "repositioning"),
+    ("welding_tack_minutes_per_weld", "clamping and tacking"),
+)
+
 
 def _welding(weld: WeldSpec | None, a: TimeAssumptions):
-    """Arc time for one described weld, or the reason none can be given."""
+    """One described weld's time — arc time, plus any per-weld handling the
+    profile states — or the reason none can be given."""
     speed_field = f"welding_{weld.process if weld else 'mig'}_travel_speed_mm_per_min"
     absent = [name for name in (speed_field, *_WELDING_PARAMETERS) if getattr(a, name) is None]
     if absent:
@@ -949,6 +985,26 @@ def _welding(weld: WeldSpec | None, a: TimeAssumptions):
         "weld_size_mm": weld.size_mm,
         "weld_passes": float(passes),
     }
+    # Per-weld handling, only where the profile states it. A profile without
+    # either leaves the cycle, the explanation and the recorded parameters
+    # exactly as they were.
+    handling = [
+        (field, label, getattr(a, field))
+        for field, label in _WELDING_HANDLING
+        if getattr(a, field) is not None
+    ]
+    if handling:
+        for field, label, minutes in handling:
+            cycle += minutes
+            parameters[field] = minutes
+            assumptions.append(
+                f"{label} {minutes:g} min per weld, added to the cycle time (per part, not setup)"
+            )
+        assumptions.append(
+            f"cycle {cycle:.2f} min = {arc:.2f} / {a.welding_arc_on_factor:g}"
+            + "".join(f" + {minutes:g}" for _, _, minutes in handling)
+        )
+        parameters["weld_arc_cycle_minutes"] = round(arc / a.welding_arc_on_factor, 6)
     return cycle, "welding_time_baseline_v1", evidence, assumptions, parameters
 
 
