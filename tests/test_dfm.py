@@ -414,3 +414,143 @@ def test_dfm_panel_is_wired_between_actuals_and_estimateflow_and_does_no_arithme
     code = re.sub(r"//[^\n]*", "", source)
     assert "/cad/dfm" in code and "selectFeature" in code
     assert not re.search(r"[A-Za-z_\)\]]\s*[*/]\s*[A-Za-z_\(\d]", re.sub(r"`[^`]*`|\"[^\"\n]*\"", "", code)), "no arithmetic in dfm.js"
+
+
+# --- flags pointed at on the 3D model -----------------------------------------------------------
+
+
+def _three_rule_block() -> bytes:
+    """A deep hole, a deep narrow slot and seven hole diameters in one block."""
+    shape = _cut(_box(160.0, 100.0, 40.0), _box(60.0, 5.0, 40.0, at=(10.0, 20.0, 10.0)))
+    shape = _cut(shape, _cylinder(2.5, 40.0, (20.0, 70.0, 15.0)))
+    for i, d in enumerate((10.0, 11.0, 12.0, 13.0, 14.0, 15.0)):
+        shape = _cut(shape, _cylinder(d / 2, 60.0, (50.0 + 20.0 * i, 70.0, -10.0)))
+    return to_step(shape)
+
+
+def _js_code(name: str) -> str:
+    from cad_costing_agent.main import STATIC_PATH
+
+    source = (STATIC_PATH / name).read_text(encoding="utf-8")
+    return re.sub(r"//[^\n]*", "", re.sub(r"/\*.*?\*/", "", source, flags=re.DOTALL))
+
+
+def test_the_report_hands_back_each_flagged_feature_once_unchanged_and_in_recognition_order():
+    features = [_hole("H-001", 5, 30), _hole("H-002", 9, 9)] + [_hole(f"H-1{i}", 3.0 + i, 5.0) for i in range(6)]
+    report = evaluate_dfm(features, SEED)
+    assert {f.rule_id for f in report.flags} == {RuleId.DEEP_HOLE, RuleId.MANY_HOLE_DIAMETERS}
+    # H-001 is named by two flags and still appears once.
+    assert [f.feature_id for f in report.flagged_features] == [f.feature_id for f in features]
+    assert all(returned is given for returned, given in zip(report.flagged_features, features))
+    # A feature no flag names is not handed back.
+    quiet = evaluate_dfm([_hole("H-001", 5, 30), _hole("H-002", 9, 9)], SEED)
+    assert [f.feature_id for f in quiet.flagged_features] == ["H-001"]
+    assert evaluate_dfm([_hole("H-002", 9, 9)], SEED).flagged_features == []
+
+
+def test_every_flag_names_features_the_same_request_recognized():
+    data = _three_rule_block()
+    body = _dfm(data).json()
+    assert {f["rule_id"] for f in body["flags"]} == {
+        "dfm_deep_hole",
+        "dfm_deep_narrow_pocket_or_slot",
+        "dfm_many_distinct_hole_diameters",
+    }
+    returned = {f["feature_id"]: f for f in body["flagged_features"]}
+    assert len(returned) == len(body["flagged_features"])
+    named = set()
+    for flag in body["flags"]:
+        assert flag["feature_ids"], flag["rule_id"]
+        for feature_id in flag["feature_ids"]:
+            assert feature_id in returned, (flag["rule_id"], feature_id)
+            named.add(feature_id)
+    assert named == set(returned)
+
+    # They are recognition's own features: the same objects `/cad/features` reports for
+    # this file, location and axis included, so a marker is drawn where the table says.
+    recognized = client.post(
+        "/cad/features", files={"file": ("part.step", data, "application/octet-stream")}
+    ).json()["features"]
+    by_id = {f["feature_id"]: f for f in recognized}
+    for feature_id, feature in returned.items():
+        assert feature == by_id[feature_id]
+        assert feature["location"] is not None
+    assert [f["feature_id"] for f in body["flagged_features"]] == [
+        f["feature_id"] for f in recognized if f["feature_id"] in returned
+    ]
+
+
+def test_the_endpoint_report_is_deterministic_including_the_flagged_features():
+    data = _three_rule_block()
+    assert _dfm(data).json() == _dfm(data).json()
+
+
+def test_a_part_with_no_flags_hands_back_no_features():
+    assert _dfm(step_fixtures.block_with_through_hole()).json()["flagged_features"] == []
+
+
+def test_a_flag_is_marked_through_the_existing_selection_from_the_servers_own_features():
+    code = _js_code("dfm.js")
+    assert "selectFeatures(" in code and "flagged: true" in code
+    assert "markFlaggedFeatures" in code and "flagged_features" in code
+    assert "clearMarker" in code
+    # The features come from the DFM response, so marking does not wait for the
+    # features panel: the panel's lookup and its "analyse first" refusal are gone.
+    assert "featureById" not in code
+    assert "Analyse features first" not in code
+    # What was drawn is the viewer's answer, and the panel says when nothing was.
+    assert "Nothing could be marked" in code
+    assert "No location was recorded" in code
+    # The browser picks no feature by a threshold or a measured value of its own.
+    assert "threshold >" not in code and "threshold <" not in code
+    assert "measured_value >" not in code and "measured_value <" not in code
+    assert "dimensions" not in code
+
+
+def test_flag_rows_are_keyboard_reachable_and_state_what_is_marked_in_words():
+    from cad_costing_agent.main import STATIC_PATH
+
+    code = _js_code("dfm.js")
+    assert '<button type="button" class="secondary tiny dfm-show" aria-pressed="false">' in code
+    assert '"Marked on model"' in code and '"Show on model"' in code
+    markup = (STATIC_PATH / "index.html").read_text(encoding="utf-8")
+    markup = re.sub(r"<!--.*?-->", "", markup, flags=re.DOTALL)
+    for element_id in ('id="dfm-show-all"', 'id="dfm-clear-marks"', 'id="dfm-marked"'):
+        assert markup.count(element_id) == 1, element_id
+    assert 'id="dfm-marked" class="hint" role="status"' in markup
+
+
+def test_there_is_one_flag_colour_and_no_claim_of_face_highlighting():
+    from cad_costing_agent.main import STATIC_PATH
+
+    viewer = _js_code("viewer.js")
+    assert viewer.count("FLAG_MARKER_COLOR = 0x") == 1
+    assert len(re.findall(r"const [A-Z_]*MARKER_COLOR = 0x", viewer)) == 2  # ordinary + flag
+    assert "OctahedronGeometry" in viewer  # a different shape, not colour alone
+    assert "markFlaggedFeatures," in viewer
+    for name in ("dfm.js", "viewer.js"):
+        code = _js_code(name).lower()
+        for scale in ("severity", "amber", "critical", "0xff0000", "highlights the face", "faces highlighted"):
+            assert scale not in code, (name, scale)
+    markup = (STATIC_PATH / "index.html").read_text(encoding="utf-8")
+    legend = markup[markup.index('class="dfm-legend"') :]
+    legend = legend[: legend.index("</p>")]
+    assert "Magenta diamond" in legend and "Orange dot" in legend
+    assert "does not outline the feature's faces" in legend
+    styles = (STATIC_PATH / "styles.css").read_text(encoding="utf-8")
+    styles = re.sub(r"/\*.*?\*/", "", styles, flags=re.DOTALL)
+    dfm_colours = set(
+        re.findall(
+            r"\.dfm-(?:flag\.is-marked|swatch-flag) \{[^}]*?(?:border-color|background): (#[0-9a-f]{6})",
+            styles,
+        )
+    )
+    assert dfm_colours == {"#c2185b"}, dfm_colours
+
+
+def test_the_viewer_decides_nothing_about_which_features_are_flagged():
+    viewer = _js_code("viewer.js")
+    body = viewer[viewer.index("function markFlaggedFeatures") :]
+    body = body[: body.index(chr(10) + "}")]
+    for forbidden in ("threshold", "rule_id", "dimensions", "fetch(", "/cad/"):
+        assert forbidden not in body, forbidden

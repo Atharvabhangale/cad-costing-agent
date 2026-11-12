@@ -250,6 +250,20 @@
           <div id="dfm-body" class="hidden">
             <p id="dfm-profile-line" class="muted"></p>
             <p id="dfm-disclaimer" class="provenance"></p>
+            <div id="dfm-marking" class="dfm-marking hidden">
+              <div class="dfm-marking-controls">
+                <button type="button" id="dfm-show-all" class="secondary tiny">Show all flagged features</button>
+                <button type="button" id="dfm-clear-marks" class="secondary tiny" disabled>Clear markers</button>
+              </div>
+              <p class="dfm-legend">
+                <span class="dfm-swatch dfm-swatch-flag" aria-hidden="true"></span> Magenta diamond: a feature a flag was raised on.
+                <span class="dfm-swatch dfm-swatch-select" aria-hidden="true"></span> Orange dot: an ordinary feature selection.
+                A marker is a point at the feature's recognized location, with a line along its axis where it has one.
+                It points at the feature; it does not outline the feature's faces. A flag marker is drawn over the part,
+                because a through hole's location is on the far face and a slot's is on its floor.
+              </p>
+              <p id="dfm-marked" class="hint" role="status" aria-live="polite"></p>
+            </div>
             <ul id="dfm-flags" class="dfm-flags"></ul>
           </div>
         </div>
