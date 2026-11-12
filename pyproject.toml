@@ -9,7 +9,7 @@ dependencies = [
     "trimesh>=4.0",
     "numpy>=1.26",
     "python-multipart>=0.0.9",
-    "cadquery-ocp>=7.8",
+    "cadquery-ocp>=7.8,<8",  # 8.x removed TopTools_Indexed* and TDF_LabelSequence, which this code imports
     "sqlalchemy>=2.0",
     "alembic>=1.13",
 ]
