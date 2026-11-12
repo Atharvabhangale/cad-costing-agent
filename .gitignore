@@ -47,3 +47,6 @@ reports/
 artifacts/
 playwright-report/
 test-results/
+
+# Agent worktrees are working copies, never content
+.claude/worktrees/
