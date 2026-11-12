@@ -52,6 +52,7 @@ def record(**overrides) -> ActualCostRecord:
         actual_id="a1",
         estimate_id="e1",
         recorded_at="2026-10-19T10:00:00",
+        figure_kind="actual",
         source="Client ERP actual",
         cost_basis="per_unit",
         currency="INR",
@@ -70,28 +71,29 @@ def line(variance, category):
 
 def test_the_cost_basis_has_no_default():
     with pytest.raises(ValidationError):
-        ActualCostInput(source="ERP", currency="INR", total_cost=10.0)
+        ActualCostInput(figure_kind="actual", source="ERP", currency="INR", total_cost=10.0)
 
 
 def test_a_per_batch_cost_without_its_batch_quantity_is_refused():
     with pytest.raises(ValidationError, match="batch quantity"):
-        ActualCostInput(source="ERP", cost_basis="per_batch", currency="INR", total_cost=10.0)
+        ActualCostInput(figure_kind="actual", source="ERP", cost_basis="per_batch", currency="INR", total_cost=10.0)
 
 
 def test_a_source_is_required_and_blank_is_not_a_source():
     with pytest.raises(ValidationError):
-        ActualCostInput(source="   ", cost_basis="per_unit", currency="INR", total_cost=10.0)
+        ActualCostInput(figure_kind="actual", source="   ", cost_basis="per_unit", currency="INR", total_cost=10.0)
 
 
 @pytest.mark.parametrize("total", [0.0, -5.0, float("inf"), float("nan")])
 def test_a_total_must_be_a_positive_finite_amount(total):
     with pytest.raises(ValidationError):
-        ActualCostInput(source="ERP", cost_basis="per_unit", currency="INR", total_cost=total)
+        ActualCostInput(figure_kind="actual", source="ERP", cost_basis="per_unit", currency="INR", total_cost=total)
 
 
 def test_a_breakdown_larger_than_its_total_is_refused():
     with pytest.raises(ValidationError, match="more than the total"):
         ActualCostInput(
+            figure_kind="actual",
             source="ERP",
             cost_basis="per_unit",
             currency="INR",
@@ -103,6 +105,7 @@ def test_a_breakdown_larger_than_its_total_is_refused():
 
 def test_a_breakdown_equal_to_its_total_is_accepted():
     entry = ActualCostInput(
+        figure_kind="actual",
         source="ERP",
         cost_basis="per_unit",
         currency="INR",
@@ -340,7 +343,7 @@ def create_estimate() -> dict:
 
 
 def post_actual(estimate_id, **overrides):
-    body = {"source": "Client ERP actual", "cost_basis": "per_unit", "currency": "INR",
+    body = {"figure_kind": "actual", "source": "Client ERP actual", "cost_basis": "per_unit", "currency": "INR",
             "total_cost": 300.0}
     body.update(overrides)
     return client.post(f"/estimates/{estimate_id}/actuals", json=body)
@@ -499,9 +502,526 @@ def test_upgrading_a_0005_database_keeps_its_estimates_and_adds_the_table():
 
     assert "cost_actuals" in inspect(engine).get_table_names()
     with engine.connect() as connection:
-        assert connection.execute(text("select version_num from alembic_version")).scalar_one() == "0007"
+        assert connection.execute(text("select version_num from alembic_version")).scalar_one() == "0008"
     with sessionmaker(bind=engine)() as session:
         kept = EstimateRepository(session).get(estimate_id)
         assert kept.request_snapshot == {"before": "0006"}
         assert kept.total_part_cost == 3.0
         assert CostActualRepository(session).for_estimate(estimate_id) == []
+
+
+# --- what kind of figure: an actual or a supplier quote -----------------------
+
+
+def quote(**overrides) -> ActualCostRecord:
+    values = dict(figure_kind="supplier_quote", source="RFQ 2026-11", supplier_name="Acme")
+    values.update(overrides)
+    return record(**values)
+
+
+def test_the_figure_kind_has_no_default():
+    with pytest.raises(ValidationError, match="figure_kind"):
+        ActualCostInput(source="ERP", cost_basis="per_unit", currency="INR", total_cost=10.0)
+
+
+def test_an_unknown_figure_kind_is_refused():
+    with pytest.raises(ValidationError):
+        ActualCostInput(
+            figure_kind="estimate", source="ERP", cost_basis="per_unit", currency="INR",
+            total_cost=10.0,
+        )
+
+
+@pytest.mark.parametrize("field", ["supplier_name", "quote_reference"])
+def test_a_supplier_field_on_an_actual_is_refused(field):
+    with pytest.raises(ValidationError, match="belongs to a supplier quote"):
+        ActualCostInput(
+            figure_kind="actual", source="ERP", cost_basis="per_unit", currency="INR",
+            total_cost=10.0, **{field: "Q-17"},
+        )
+
+
+def test_a_quote_needs_neither_supplier_field_and_keeps_them_as_entered():
+    bare = ActualCostInput(
+        figure_kind="supplier_quote", source="RFQ", cost_basis="per_unit", currency="INR",
+        total_cost=10.0,
+    )
+    assert bare.supplier_name is None and bare.quote_reference is None
+    named = ActualCostInput(
+        figure_kind="supplier_quote", source="RFQ", cost_basis="per_unit", currency="INR",
+        total_cost=10.0, supplier_name="  acme Castings pvt  ", quote_reference=" q/17-b ",
+    )
+    # Trimmed at the ends and otherwise untouched: no case folding, no matching.
+    assert named.supplier_name == "acme Castings pvt"
+    assert named.quote_reference == "q/17-b"
+
+
+def test_a_quote_gap_is_quote_minus_should_cost_relative_to_the_should_cost():
+    result = compute_variance(PART_FIGURES, quote(total_cost=300.0, batch_quantity=4))
+
+    total = line(result, "total")
+    assert result.figure_kind == "supplier_quote"
+    assert total.state == "compared"
+    assert total.estimate_per_unit == pytest.approx(242.0)
+    assert total.quote_per_unit == pytest.approx(300.0)
+    assert total.gap == pytest.approx(58.0)
+    assert total.gap_percent == pytest.approx(58.0 / 242.0 * 100)
+    assert total.statement == "Quote is 58.00 INR above should-cost (23.97% of should-cost)."
+
+
+def test_a_quote_below_should_cost_says_below_and_one_equal_says_equal():
+    below = line(compute_variance(PART_FIGURES, quote(total_cost=200.0)), "total")
+    assert below.gap == pytest.approx(-42.0)
+    assert below.statement == "Quote is 42.00 INR below should-cost (17.36% of should-cost)."
+    equal = line(compute_variance(PART_FIGURES, quote(total_cost=242.0)), "total")
+    assert equal.statement == "Quote equals should-cost."
+
+
+def test_a_quote_never_fills_the_actual_fields_nor_an_actual_the_quote_fields():
+    quoted = compute_variance(
+        PART_FIGURES, quote(total_cost=300.0, material_cost=5.0, machining_cost=250.0)
+    )
+    for item in quoted.lines:
+        assert item.actual_per_unit is None
+        assert item.variance is None
+        assert item.variance_percent is None
+    assert quoted.unattributed_actual_per_unit is None
+    assert quoted.unattributed_quote_per_unit == pytest.approx(45.0)
+
+    actual = compute_variance(
+        PART_FIGURES, record(total_cost=300.0, material_cost=5.0, machining_cost=250.0)
+    )
+    for item in actual.lines:
+        assert item.quote_per_unit is None
+        assert item.gap is None
+        assert item.gap_percent is None
+    assert actual.unattributed_quote_per_unit is None
+    assert actual.unattributed_actual_per_unit == pytest.approx(45.0)
+
+
+def test_an_actual_keeps_its_figures_and_its_wording():
+    result = compute_variance(PART_FIGURES, record(total_cost=200.0, batch_quantity=4))
+    total = line(result, "total")
+    assert result.figure_kind == "actual"
+    assert result.basis == cost_actuals.VARIANCE_BASIS
+    assert total.variance == pytest.approx(42.0)
+    assert total.variance_percent == pytest.approx(21.0)
+    assert total.statement == "Estimate is 42.00 INR above the actual (21.00% of the actual)."
+
+
+def test_the_wording_differs_by_kind():
+    quoted = compute_variance(PART_FIGURES, quote(batch_quantity=50))
+    actual = compute_variance(PART_FIGURES, record(batch_quantity=50))
+
+    assert quoted.basis == cost_actuals.QUOTE_GAP_BASIS != actual.basis
+    assert "the supplier quote for 50" in quoted.warnings[0]
+    assert "this gap" in quoted.warnings[0]
+    assert "the actual for 50" in actual.warnings[0]
+    assert "this variance" in actual.warnings[0]
+    assert line(quoted, "material").note.startswith("Not itemised in the supplier quote")
+    assert line(actual, "material").note.startswith("Not supplied in the actual cost record")
+
+
+def test_an_un_itemised_quote_category_is_not_supplied_and_never_zero():
+    result = compute_variance(PART_FIGURES, quote(total_cost=300.0, material_cost=5.0))
+
+    machining = line(result, "machining")
+    assert machining.state == "not_supplied"
+    assert machining.quote_per_unit is None
+    assert machining.gap is None
+    assert machining.gap_percent is None
+    assert machining.statement == ""
+    assert machining.estimate_per_unit == pytest.approx(240.0)
+    assert line(result, "material").gap == pytest.approx(3.0)
+
+
+def test_a_quote_against_a_zero_should_cost_figure_has_a_gap_but_no_percentage():
+    additional = line(compute_variance(PART_FIGURES, quote(additional_cost=12.0)), "additional")
+    assert additional.state == "compared"
+    assert additional.gap == pytest.approx(12.0)
+    assert additional.gap_percent is None
+    assert "should-cost figure is zero" in additional.note
+    assert additional.statement == "Quote is 12.00 INR above should-cost."
+
+
+def test_a_quote_for_an_assembly_is_compared_on_its_total_only():
+    result = compute_variance(assembly_figures(), quote(total_cost=300.0, material_cost=30.0))
+    assert line(result, "total").gap == pytest.approx(50.0)
+    material = line(result, "material")
+    assert material.state == "not_comparable"
+    assert material.quote_per_unit == pytest.approx(30.0)
+    assert material.gap is None
+    assert line(result, "machining").state == "not_supplied"
+
+
+def test_no_wording_passes_a_verdict_on_the_supplier():
+    # Every sentence a quote can produce, and the constants, read for a judgement.
+    spoken = [cost_actuals.QUOTE_GAP_BASIS, cost_actuals.QUOTE_ORDER_NOTE]
+    for entry in (
+        quote(total_cost=900.0, material_cost=50.0, batch_quantity=50),
+        quote(total_cost=100.0, additional_cost=1.0),
+        quote(total_cost=242.0),
+    ):
+        result = compute_variance(PART_FIGURES, entry)
+        spoken += result.warnings
+        spoken += [item.statement for item in result.lines]
+        spoken += [item.note for item in result.lines]
+    text_ = " ".join(spoken).lower()
+    for word in ("overcharg", "overpric", "too high", "too low", "cheapest", "best", "worst",
+                 "unfair", "excessive", "should pay", "recommend"):
+        assert word not in text_, word
+
+
+# --- several quotes, side by side ---------------------------------------------
+
+
+def test_quotes_are_listed_in_the_order_entered_and_never_by_price():
+    records = [
+        quote(actual_id="q1", supplier_name="Dear", total_cost=400.0),
+        record(actual_id="a1", total_cost=200.0),
+        quote(actual_id="q2", supplier_name="Cheap", total_cost=100.0),
+        quote(actual_id="q3", supplier_name="Middle", total_cost=250.0, material_cost=4.0),
+    ]
+    comparison = cost_actuals.compare_supplier_quotes(PART_FIGURES, records)
+
+    assert [column.supplier_name for column in comparison.quotes] == ["Dear", "Cheap", "Middle"]
+    assert comparison.order == "as_entered"
+    assert comparison.ranked is False
+    assert comparison.preferred is None
+    total = next(row for row in comparison.rows if row.category == "total")
+    assert total.estimate_per_unit == pytest.approx(242.0)
+    assert [cell.actual_id for cell in total.cells] == ["q1", "q2", "q3"]
+    assert [cell.gap for cell in total.cells] == pytest.approx([158.0, -142.0, 8.0])
+    material = next(row for row in comparison.rows if row.category == "material")
+    assert [cell.state for cell in material.cells] == ["not_supplied", "not_supplied", "compared"]
+    assert material.cells[0].quote_per_unit is None
+    assert material.cells[2].gap == pytest.approx(2.0)
+
+
+def test_the_side_by_side_table_leaves_out_actuals_and_superseded_quotes():
+    records = [
+        quote(actual_id="q1", total_cost=400.0),
+        record(actual_id="a1", total_cost=200.0),
+        quote(actual_id="q2", total_cost=390.0, supersedes_actual_id="q1"),
+    ]
+    comparison = cost_actuals.compare_supplier_quotes(PART_FIGURES, records)
+    assert [column.actual_id for column in comparison.quotes] == ["q2"]
+
+
+def test_no_quotes_gives_an_empty_table_not_a_row_of_blanks():
+    comparison = cost_actuals.compare_supplier_quotes(PART_FIGURES, [record()])
+    assert comparison.quotes == [] and comparison.rows == []
+
+
+def test_quotes_against_an_estimate_with_no_total_are_listed_without_figures():
+    figures = assembly_figures(is_complete=False, production_total_cost=None)
+    comparison = cost_actuals.compare_supplier_quotes(figures, [quote(actual_id="q1")])
+    assert comparison.quotes[0].status == "unavailable"
+    assert all(cell.state == "unavailable" for row in comparison.rows for cell in row.cells)
+    assert all(cell.gap is None for row in comparison.rows for cell in row.cells)
+
+
+def test_the_quote_comparison_does_not_sort_or_pick():
+    # Unparse the two functions, so the docstrings saying what they do not do
+    # cannot match.
+    tree = ast.parse((PACKAGE / "cost_actuals.py").read_text(encoding="utf-8"))
+    for name in ("compare_supplier_quotes", "current_records"):
+        function = next(
+            node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name == name
+        )
+        if isinstance(function.body[0], ast.Expr):
+            function.body = function.body[1:]
+        code = ast.unparse(function)
+        for forbidden in ("sorted(", ".sort(", "min(", "max(", "reversed(", "rank"):
+            assert forbidden not in code, (name, forbidden)
+
+
+def test_every_reader_of_the_table_keeps_the_kinds_apart():
+    # The readers of the table are the repository and the two endpoints. None
+    # may add records together: a sum or mean over rows is where a quote would
+    # be averaged into an "actual" variance.
+    def code_of(path, names):
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        found = [
+            node for node in ast.walk(tree)
+            if isinstance(node, (ast.FunctionDef, ast.ClassDef)) and node.name in names
+        ]
+        assert {node.name for node in found} == set(names)
+        return "\n".join(ast.unparse(node) for node in found)
+
+    code = code_of(PACKAGE / "repository.py", {"CostActualRepository"}) + code_of(
+        PACKAGE / "main.py", {"_entries", "record_actual_cost", "estimate_actual_costs"}
+    )
+    for forbidden in ("sum(", "mean(", "median(", "func.avg", "func.sum"):
+        assert forbidden not in code, forbidden
+
+    # And nothing else in the package touches the ORM row.
+    users = set()
+    for path in PACKAGE.rglob("*.py"):
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        if any(isinstance(node, ast.Name) and node.id == "CostActualRow" for node in ast.walk(tree)):
+            users.add(path.name)
+    assert users == {"repository.py"}
+
+
+# --- the API, for a quote -----------------------------------------------------
+
+
+def post_quote(estimate_id, **overrides):
+    body = {"figure_kind": "supplier_quote", "source": "RFQ 2026-11", "supplier_name": "Acme"}
+    body.update(overrides)
+    return post_actual(estimate_id, **body)
+
+
+def test_a_payload_without_a_figure_kind_is_refused_and_nothing_is_stored():
+    # The payload every caller sent before the field existed.
+    estimate_id = create_estimate()["estimate_id"]
+    response = client.post(
+        f"/estimates/{estimate_id}/actuals",
+        json={"source": "Client ERP actual", "cost_basis": "per_unit", "currency": "INR",
+              "total_cost": 300.0},
+    )
+    assert response.status_code == 422
+    assert any(error["loc"][-1] == "figure_kind" for error in response.json()["detail"])
+    assert client.get(f"/estimates/{estimate_id}/actuals").json()["entries"] == []
+
+
+def test_a_supplier_quote_is_recorded_and_compared_as_a_gap():
+    estimate = create_estimate()
+    per_unit = estimate["per_unit_cost"]
+    response = post_quote(
+        estimate["estimate_id"], total_cost=round(per_unit + 50.0, 2), quote_reference="Q-17",
+        batch_quantity=4,
+    )
+
+    assert response.status_code == 201
+    entry = response.json()
+    assert entry["record"]["figure_kind"] == "supplier_quote"
+    assert entry["record"]["supplier_name"] == "Acme"
+    assert entry["record"]["quote_reference"] == "Q-17"
+    assert entry["variance"]["figure_kind"] == "supplier_quote"
+    total = next(item for item in entry["variance"]["lines"] if item["category"] == "total")
+    assert total["gap"] == pytest.approx(50.0, abs=0.01)
+    assert total["variance"] is None
+    assert total["actual_per_unit"] is None
+    assert "above should-cost" in total["statement"]
+
+
+def test_recording_a_quote_changes_nothing_in_the_estimate():
+    estimate_id = create_estimate()["estimate_id"]
+    before = client.get(f"/estimates/{estimate_id}").json()
+    assert post_quote(estimate_id, material_cost=10.0).status_code == 201
+    assert client.get(f"/estimates/{estimate_id}").json() == before
+
+
+def test_a_supplier_name_on_an_actual_is_refused_by_the_api():
+    estimate_id = create_estimate()["estimate_id"]
+    assert post_actual(estimate_id, supplier_name="Acme").status_code == 422
+    assert client.get(f"/estimates/{estimate_id}/actuals").json()["entries"] == []
+
+
+def test_the_listing_sets_quotes_side_by_side_in_the_order_entered():
+    estimate_id = create_estimate()["estimate_id"]
+    post_quote(estimate_id, supplier_name="Dear", total_cost=900.0)
+    post_actual(estimate_id, total_cost=310.0)
+    post_quote(estimate_id, supplier_name="Cheap", total_cost=100.0)
+    post_quote(estimate_id, supplier_name=None, source="Phone quote", total_cost=500.0)
+
+    listing = client.get(f"/estimates/{estimate_id}/actuals").json()
+    assert [entry["record"]["figure_kind"] for entry in listing["entries"]] == [
+        "supplier_quote", "actual", "supplier_quote", "supplier_quote"
+    ]
+    side = listing["supplier_quotes"]
+    assert [column["supplier_name"] for column in side["quotes"]] == ["Dear", "Cheap", None]
+    assert side["quotes"][2]["source"] == "Phone quote"
+    assert side["ranked"] is False and side["preferred"] is None
+    assert side["order"] == "as_entered"
+    total = next(row for row in side["rows"] if row["category"] == "total")
+    assert [cell["quote_per_unit"] for cell in total["cells"]] == [900.0, 100.0, 500.0]
+    material = next(row for row in side["rows"] if row["category"] == "material")
+    assert {cell["state"] for cell in material["cells"]} == {"not_supplied"}
+    assert all(cell["quote_per_unit"] is None for cell in material["cells"])
+
+
+def test_a_quote_is_corrected_by_a_new_record_and_the_original_is_kept():
+    estimate_id = create_estimate()["estimate_id"]
+    original = post_quote(estimate_id, total_cost=400.0).json()["record"]
+    corrected = post_quote(
+        estimate_id, total_cost=380.0, supersedes_actual_id=original["actual_id"]
+    )
+    assert corrected.status_code == 201
+    assert post_quote(estimate_id, supersedes_actual_id=original["actual_id"]).status_code == 409
+
+    listing = client.get(f"/estimates/{estimate_id}/actuals").json()
+    assert listing["entries"][0]["record"] == original
+    assert listing["entries"][0]["is_current"] is False
+    assert [column["actual_id"] for column in listing["supplier_quotes"]["quotes"]] == [
+        corrected.json()["record"]["actual_id"]
+    ]
+
+
+def test_a_correction_may_change_the_kind_and_the_original_still_says_what_was_entered():
+    estimate_id = create_estimate()["estimate_id"]
+    original = post_actual(estimate_id, total_cost=400.0).json()["record"]
+    assert post_quote(
+        estimate_id, total_cost=400.0, supersedes_actual_id=original["actual_id"]
+    ).status_code == 201
+
+    listing = client.get(f"/estimates/{estimate_id}/actuals").json()
+    assert listing["entries"][0]["record"]["figure_kind"] == "actual"
+    assert listing["entries"][0]["is_current"] is False
+    assert listing["entries"][1]["record"]["figure_kind"] == "supplier_quote"
+    assert len(listing["supplier_quotes"]["quotes"]) == 1
+
+
+def test_the_quote_comparison_is_deterministic():
+    estimate_id = create_estimate()["estimate_id"]
+    post_quote(estimate_id, total_cost=400.0, material_cost=12.0)
+    post_quote(estimate_id, total_cost=300.0)
+    first = client.get(f"/estimates/{estimate_id}/actuals").json()
+    assert client.get(f"/estimates/{estimate_id}/actuals").json() == first
+
+
+# --- the UI, for a quote ------------------------------------------------------
+
+
+def actuals_script_code() -> str:
+    source = (STATIC / "actuals.js").read_text(encoding="utf-8")
+    return re.sub(r"^\s*//.*$", "", source, flags=re.MULTILINE)
+
+
+def test_the_kind_selector_preselects_nothing_and_is_sent():
+    code = actuals_script_code()
+    selector = code[code.index('<select id="actual-kind" required>'):]
+    selector = selector[: selector.index("</select>")]
+    assert selector.index('<option value="">') < selector.index('<option value="actual">')
+    assert '<option value="supplier_quote">' in selector
+    assert "selected" not in selector
+    assert 'figure_kind: optionalText("actual-kind")' in code
+
+
+def test_supplier_fields_are_sent_as_null_unless_the_record_is_a_quote():
+    code = actuals_script_code()
+    assert 'supplier_name: isQuote ? optionalText("actual-supplier") : null' in code
+    assert 'quote_reference: isQuote ? optionalText("actual-quote-ref") : null' in code
+
+
+def test_the_quote_table_is_the_servers_and_the_browser_neither_sorts_nor_subtracts():
+    code = actuals_script_code()
+    assert "supplierQuotesMarkup(data.supplier_quotes)" in code
+    for forbidden in (".sort(", ".reverse(", "Math.min", "Math.max", ".reduce("):
+        assert forbidden not in code, forbidden
+    # Arithmetic on a quote's fields — a gap or a percentage worked out here.
+    assert not re.search(r"(cell|row|quote|comparison)\.\w+\s*[-*/]", code)
+    assert not re.search(r"[\w)\]]\s*[-*/]\s*(cell|row|quote|comparison)\.", code)
+
+
+# --- migration 0008 -----------------------------------------------------------
+
+
+def _engine_at(revision):
+    from alembic import command
+
+    engine = create_engine(
+        "sqlite://", connect_args={"check_same_thread": False}, poolclass=StaticPool
+    )
+    with engine.begin() as connection:
+        command.upgrade(_alembic_config(connection), revision)
+    return engine
+
+
+OLD_ROW = (
+    "insert into cost_actuals (actual_id, estimate_id, recorded_at, source, cost_basis, "
+    "batch_quantity, currency, total_cost, material_cost, machining_cost, additional_cost, "
+    "cost_date, client_part_number, drawing_revision, notes, supersedes_actual_id) values "
+)
+
+
+def test_upgrading_a_0007_database_keeps_every_recorded_actual_and_calls_it_an_actual():
+    engine = _engine_at("0007")
+    with engine.begin() as connection:
+        connection.execute(text(
+            OLD_ROW + "('old1', 'e1', '2026-10-20 09:00:00', 'Client ERP actual', 'per_unit', "
+            "NULL, 'INR', 300.0, NULL, 250.5, NULL, '2025-03-31', 'FL-100', 'C', 'first', NULL)"
+        ))
+        connection.execute(text(
+            OLD_ROW + "('old2', 'e1', '2026-10-21 09:00:00', 'Corrected', 'per_batch', "
+            "4, 'INR', 1240.0, 0.0, NULL, NULL, NULL, NULL, NULL, '', 'old1')"
+        ))
+        before = connection.execute(text("select * from cost_actuals order by id")).fetchall()
+        columns_before = [column["name"] for column in inspect(connection).get_columns("cost_actuals")]
+    assert "figure_kind" not in columns_before
+
+    assert run_migrations(engine) == "upgraded"
+
+    with engine.connect() as connection:
+        assert connection.execute(text("select version_num from alembic_version")).scalar_one() == "0008"
+        after = connection.execute(
+            text(f"select {', '.join(columns_before)} from cost_actuals order by id")
+        ).fetchall()
+        assert after == before
+        added = connection.execute(
+            text("select figure_kind, supplier_name, quote_reference from cost_actuals order by id")
+        ).fetchall()
+        assert added == [("actual", None, None), ("actual", None, None)]
+
+    from sqlalchemy.orm import sessionmaker
+
+    with sessionmaker(bind=engine)() as session:
+        records = CostActualRepository(session).for_estimate("e1")
+        assert [item.figure_kind for item in records] == ["actual", "actual"]
+        # Not supplied stayed not supplied, and a stated zero stayed a zero.
+        assert records[0].material_cost is None and records[0].machining_cost == 250.5
+        assert records[1].material_cost == 0.0
+        assert records[1].supersedes_actual_id == "old1"
+        # The migrated rows are compared as actuals, exactly as before.
+        result = compute_variance(PART_FIGURES, records[0])
+        assert line(result, "total").variance == pytest.approx(-58.0)
+        assert line(result, "total").gap is None
+
+
+def test_the_upgraded_table_keeps_its_constraints_and_requires_a_kind():
+    from sqlalchemy.exc import IntegrityError
+
+    upgraded = _engine_at("0007")
+    with upgraded.begin() as connection:
+        connection.execute(text(
+            OLD_ROW + "('old1', 'e1', '2026-10-20 09:00:00', 'ERP', 'per_unit', NULL, 'INR', "
+            "300.0, NULL, NULL, NULL, NULL, NULL, NULL, '', NULL)"
+        ))
+    run_migrations(upgraded)
+    fresh = _engine_at("head")
+
+    def shape(engine):
+        inspector = inspect(engine)
+        return (
+            {c["name"]: (str(c["type"]), c["nullable"], c["default"])
+             for c in inspector.get_columns("cost_actuals")},
+            sorted((u["name"], tuple(u["column_names"]))
+                   for u in inspector.get_unique_constraints("cost_actuals")),
+            sorted((i["name"], tuple(i["column_names"])) for i in inspector.get_indexes("cost_actuals")),
+            inspector.get_pk_constraint("cost_actuals")["constrained_columns"],
+        )
+
+    assert shape(upgraded) == shape(fresh)
+    columns = shape(fresh)[0]
+    # Required, and no default left behind in the schema to answer for the caller.
+    assert columns["figure_kind"][1] is False
+    assert columns["figure_kind"][2] is None
+    assert ("uq_cost_actual_supersedes", ("supersedes_actual_id",)) in shape(upgraded)[1]
+
+    for engine in (upgraded, fresh):
+        with pytest.raises(IntegrityError):
+            with engine.begin() as connection:
+                connection.execute(text(
+                    OLD_ROW + "('new1', 'e1', '2026-11-12 09:00:00', 'ERP', 'per_unit', NULL, "
+                    "'INR', 300.0, NULL, NULL, NULL, NULL, NULL, NULL, '', NULL)"
+                ))
+
+
+def test_a_fresh_database_records_both_kinds(db_session):
+    estimate_id = create_estimate()["estimate_id"]
+    assert post_actual(estimate_id).status_code == 201
+    assert post_quote(estimate_id).status_code == 201
+    stored = CostActualRepository(db_session).for_estimate(estimate_id)
+    assert [item.figure_kind for item in stored] == ["actual", "supplier_quote"]

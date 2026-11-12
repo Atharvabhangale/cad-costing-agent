@@ -672,7 +672,11 @@ class QuotationRepository:
 
 
 class CostActualRepository:
-    """Records and reads actual costs. There is deliberately no update or delete.
+    """Records and reads actual costs and supplier quotes. There is deliberately
+    no update or delete.
+
+    Both kinds are rows of one table, told apart by `figure_kind`, which every
+    record carries. Nothing here filters or aggregates by it.
 
     An actual is a statement somebody made about a real cost; changing it in
     place would lose what was first entered. A correction is recorded as a new
@@ -714,7 +718,7 @@ class CostActualRepository:
         return _row_to_actual(row)
 
     def for_estimate(self, estimate_id: str) -> list[ActualCostRecord]:
-        """Every actual recorded against the estimate, oldest first."""
+        """Every record against the estimate — actuals and quotes — oldest first."""
         rows = (
             self.session.execute(
                 select(CostActualRow)

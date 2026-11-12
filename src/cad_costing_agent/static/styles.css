@@ -758,6 +758,10 @@ table.mini.actual-variance th { width: auto; }
 table.mini.actual-variance th:first-child { width: 34%; }
 table.mini.actual-variance td.num, table.mini.actual-variance th.num { padding-left: 12px; }
 .actual-note { margin: 4px 0; font-size: 13px; }
+.actual-statement { font-weight: 600; }
+.actual-kind-label { display: inline-block; padding: 1px 8px; margin-right: 6px; border: 1px solid var(--line, #ddd); border-radius: 10px; font-size: 12px; }
+.supplier-quotes { border-top: 1px solid var(--line, #ddd); margin-top: 14px; padding-top: 10px; }
+.supplier-quote-scroll { overflow-x: auto; }
 
 /* Advisory design-for-manufacturing flags. */
 .dfm-flags { list-style: none; margin: 10px 0 0; padding: 0; display: grid; gap: 10px; }

@@ -205,6 +205,12 @@ class CostActualRow(Base):
     recorded_at: Mapped[datetime] = mapped_column(DateTime, default=_utc_now)
 
     source: Mapped[str] = mapped_column(String(200))
+    # What kind of figure the row is: `actual` or `supplier_quote`. No default
+    # here or in the schema; the caller states it. `source` above is the free
+    # text saying where the figure came from, which is a different question.
+    figure_kind: Mapped[str] = mapped_column(String(16))
+    supplier_name: Mapped[str | None] = mapped_column(String(200), nullable=True)
+    quote_reference: Mapped[str | None] = mapped_column(String(100), nullable=True)
     cost_basis: Mapped[str] = mapped_column(String(16))
     batch_quantity: Mapped[int | None] = mapped_column(Integer, nullable=True)
     currency: Mapped[str] = mapped_column(String(3))

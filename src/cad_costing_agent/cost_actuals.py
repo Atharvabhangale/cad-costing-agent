@@ -7,7 +7,8 @@ What an actual is
 -----------------
 
 A cost somebody outside this application states for a part — an ERP actual, a
-historical quotation, a supplier invoice — together with where it came from.
+supplier invoice, a supplier's quotation — together with where it came from and
+which of those kinds it is.
 It is a recorded fact, never an input to costing: nothing here can reach a
 calculator, a rate set or a time profile, and no estimate changes because an
 actual was recorded against it. The module imports `money` and nothing else, and
@@ -65,6 +66,34 @@ Per-unit cost depends on the batch: setup and tooling are spread over it. A
 different batch size on the two sides is reported as a warning beside the
 variance, not corrected for — correcting it would need the setup share of the
 actual, which the client data does not state.
+
+What kind of figure it is
+-------------------------
+
+A record states its `figure_kind`: an `actual` (a cost that was incurred) or a
+`supplier_quote` (a price a supplier offers). Like the basis, it has no default
+and is never guessed from the free-text `source` — a quote read as an actual
+would be reported as the estimate being wrong. Rows recorded before the field
+existed were all entered and displayed as actuals, and the migration says so.
+
+The two are compared with the same arithmetic and reported in separate fields,
+so a reader of one cannot pick up the other by accident:
+
+    actual          variance = estimate - actual,       percent of the actual
+    supplier_quote  gap      = quote - should-cost,     percent of the should-cost
+
+An actual's variance says how far the estimate was from what happened. A quote's
+gap is a difference to discuss with the supplier, and nothing here says which
+side of it is right: no verdict, no judgement of the supplier, no ranking.
+Several quotes for one estimate are listed side by side in the order entered,
+never sorted by price, and none is marked as preferred.
+
+`supplier_name` and `quote_reference` are free text kept as entered and matched
+to nothing. They belong to a quote; on an actual they are refused, since a
+record cannot be both.
+
+A correction may change the kind. That is the one way to fix a quote that was
+recorded as an actual, and the superseded record still shows what was entered.
 """
 
 import math
@@ -73,11 +102,21 @@ from typing import Literal
 
 from pydantic import BaseModel, Field, field_validator, model_validator
 
-from cad_costing_agent.money import CURRENCY_CODE_PATTERN, Money, Percent, round_money
+from cad_costing_agent.money import (
+    CURRENCY_CODE_PATTERN,
+    Money,
+    Percent,
+    round_money,
+    round_percent,
+)
 
 PER_UNIT = "per_unit"
 PER_BATCH = "per_batch"
 COST_BASES = (PER_UNIT, PER_BATCH)
+
+ACTUAL = "actual"
+SUPPLIER_QUOTE = "supplier_quote"
+FIGURE_KINDS = (ACTUAL, SUPPLIER_QUOTE)
 
 PART = "part"
 ASSEMBLY = "assembly"
@@ -112,6 +151,33 @@ CATEGORY_MAPPING = (
     "cost, which includes machine time, labour and setup; additional with its overhead, scrap "
     "allowance and tooling."
 )
+QUOTE_GAP_BASIS = (
+    "Per unit. Gap = supplier quote - should-cost estimate, so a positive figure means the "
+    "quote is above the should-cost. The percentage is relative to the should-cost. A gap is "
+    "a difference to discuss, not a finding about either figure. Currencies are never "
+    "converted."
+)
+QUOTE_ORDER_NOTE = (
+    "Current supplier quotes, in the order they were entered. Not sorted by price, and none "
+    "is marked as preferred: choosing a supplier is not something this comparison does."
+)
+# The words that differ between the two kinds of figure. The arithmetic does not.
+_WORDING = {
+    ACTUAL: {
+        "the_figure": "the actual",
+        "The_figure": "The actual",
+        "not_supplied": "Not supplied in the actual cost record. Not treated as zero.",
+        "zero": "The actual is zero, so a percentage has no meaning here.",
+        "difference": "variance",
+    },
+    SUPPLIER_QUOTE: {
+        "the_figure": "the supplier quote",
+        "The_figure": "The supplier quote",
+        "not_supplied": "Not itemised in the supplier quote. Not treated as zero.",
+        "zero": "The should-cost figure is zero, so a percentage has no meaning here.",
+        "difference": "gap",
+    },
+}
 ASSEMBLY_BREAKDOWN_NOTE = (
     "Not compared: an assembly estimate's material, operation and additional figures cover "
     "its manufactured components only, so they are not the same quantity as a breakdown of "
@@ -126,6 +192,22 @@ class ActualCostInput(BaseModel):
         min_length=1,
         max_length=200,
         description="Where this figure came from, e.g. 'Client ERP actual, FY2025'. Required.",
+    )
+    figure_kind: Literal["actual", "supplier_quote"] = Field(
+        description=(
+            "What kind of figure this is: a cost that was incurred, or a price a supplier "
+            "offers. No default, and never read out of the free-text source."
+        )
+    )
+    supplier_name: str | None = Field(
+        default=None,
+        max_length=200,
+        description="Who quoted. Supplier quotes only; kept as entered, matched to nothing.",
+    )
+    quote_reference: str | None = Field(
+        default=None,
+        max_length=100,
+        description="The supplier's quote number. Supplier quotes only; kept as entered.",
     )
     cost_basis: Literal["per_unit", "per_batch"] = Field(
         description="Whether the amounts are for one unit or for the whole batch. No default."
@@ -150,7 +232,14 @@ class ActualCostInput(BaseModel):
         description="The record this one corrects. The corrected record is kept unchanged.",
     )
 
-    @field_validator("source", "client_part_number", "drawing_revision", "supersedes_actual_id")
+    @field_validator(
+        "source",
+        "supplier_name",
+        "quote_reference",
+        "client_part_number",
+        "drawing_revision",
+        "supersedes_actual_id",
+    )
     @classmethod
     def _strip(cls, value: str | None) -> str | None:
         if value is None:
@@ -166,6 +255,12 @@ class ActualCostInput(BaseModel):
 
     @model_validator(mode="after")
     def _unambiguous(self) -> "ActualCostInput":
+        if self.figure_kind != SUPPLIER_QUOTE and (self.supplier_name or self.quote_reference):
+            raise ValueError(
+                "A supplier name or quote reference belongs to a supplier quote, and this "
+                "record says it is an actual. Which of the two is wrong cannot be told from "
+                "here; where an actual came from goes in its source."
+            )
         if self.cost_basis == PER_BATCH and self.batch_quantity is None:
             raise ValueError(
                 "A per-batch cost needs the batch quantity it covers. Without it the cost per "
@@ -218,15 +313,32 @@ class VarianceLine(BaseModel):
     label: str
     state: Literal["compared", "not_supplied", "not_comparable"]
     estimate_per_unit: Money | None = None
-    actual_per_unit: Money | None = None
-    variance: Money | None = None
+    actual_per_unit: Money | None = Field(
+        default=None, description="An actual's figure. Never set for a supplier quote."
+    )
+    variance: Money | None = Field(
+        default=None, description="Estimate minus actual. Never set for a supplier quote."
+    )
     variance_percent: Percent = None
+    quote_per_unit: Money | None = Field(
+        default=None, description="A supplier quote's figure. Never set for an actual."
+    )
+    gap: Money | None = Field(
+        default=None, description="Quote minus should-cost. Never set for an actual."
+    )
+    gap_percent: Percent = Field(
+        default=None, description="The gap relative to the should-cost."
+    )
+    statement: str = Field(
+        default="", description="The compared difference in words. States no verdict."
+    )
     note: str = ""
 
 
 class CostVariance(BaseModel):
     estimate_id: str
     actual_id: str
+    figure_kind: Literal["actual", "supplier_quote"]
     status: Literal["available", "unavailable"]
     unavailable_code: str | None = None
     unavailable_detail: str | None = None
@@ -241,8 +353,58 @@ class CostVariance(BaseModel):
             "when at least one category was supplied; it is not assigned to any of them."
         ),
     )
+    unattributed_quote_per_unit: Money | None = Field(
+        default=None,
+        description=(
+            "The part of a supplier quote's total that no itemised category accounts for. "
+            "Reported only when at least one category was itemised."
+        ),
+    )
     warnings: list[str] = Field(default_factory=list)
     basis: str = VARIANCE_BASIS
+    category_mapping: str = CATEGORY_MAPPING
+
+
+class SupplierQuoteColumn(BaseModel):
+    """One current supplier quote, as a column of the side-by-side table."""
+
+    actual_id: str
+    supplier_name: str | None = None
+    quote_reference: str | None = None
+    source: str
+    cost_date: date | None = None
+    status: Literal["available", "unavailable"]
+    unavailable_detail: str | None = None
+    warnings: list[str] = Field(default_factory=list)
+
+
+class SupplierQuoteCell(BaseModel):
+    actual_id: str
+    state: Literal["compared", "not_supplied", "not_comparable", "unavailable"]
+    quote_per_unit: Money | None = None
+    gap: Money | None = None
+    gap_percent: Percent = None
+
+
+class SupplierQuoteRow(BaseModel):
+    category: str
+    label: str
+    estimate_per_unit: Money | None = None
+    cells: list[SupplierQuoteCell]
+
+
+class SupplierQuoteComparison(BaseModel):
+    """Current supplier quotes for one estimate, side by side, in the order entered."""
+
+    estimate_id: str
+    currency: str
+    order: Literal["as_entered"] = "as_entered"
+    ranked: Literal[False] = False
+    preferred: None = None
+    quotes: list[SupplierQuoteColumn] = Field(default_factory=list)
+    rows: list[SupplierQuoteRow] = Field(default_factory=list)
+    note: str = QUOTE_ORDER_NOTE
+    basis: str = QUOTE_GAP_BASIS
     category_mapping: str = CATEGORY_MAPPING
 
 
@@ -317,50 +479,90 @@ def actual_per_unit(amount: float | None, record: ActualCostInput) -> float | No
     return amount / record.batch_quantity
 
 
-def _line(category: str, estimate: float | None, actual: float | None, note: str = "") -> VarianceLine:
+def _amount(value: float) -> str:
+    return f"{round_money(abs(value)):.2f}"
+
+
+def _statement(kind: str, difference: float, percent: float | None, currency: str) -> str:
+    """The compared difference in words. It names a direction and a size, nothing more."""
+    if kind == SUPPLIER_QUOTE:
+        subject, reference, of = "Quote", "should-cost", " of should-cost"
+    else:
+        subject, reference, of = "Estimate", "the actual", " of the actual"
+    if round_money(difference) == 0:
+        return f"{subject} equals {reference}."
+    direction = "above" if difference > 0 else "below"
+    share = "" if percent is None else f" ({abs(round_percent(percent)):.2f}%{of})"
+    return f"{subject} is {_amount(difference)} {currency} {direction} {reference}{share}."
+
+
+def _line(
+    category: str,
+    estimate: float | None,
+    stated: float | None,
+    *,
+    kind: str,
+    currency: str,
+    note: str = "",
+) -> VarianceLine:
+    """One category. The same arithmetic for both kinds, reported in separate fields."""
     label = _LABELS[category]
-    if actual is None:
+    words = _WORDING[kind]
+    figure = "quote_per_unit" if kind == SUPPLIER_QUOTE else "actual_per_unit"
+    if stated is None:
         return VarianceLine(
             category=category,
             label=label,
             state=NOT_SUPPLIED,
             estimate_per_unit=estimate,
-            note=note or "Not supplied in the actual cost record. Not treated as zero.",
+            note=note or words["not_supplied"],
         )
     if estimate is None:
         return VarianceLine(
             category=category,
             label=label,
             state=NOT_COMPARABLE,
-            actual_per_unit=actual,
             note=note or "The estimate has no comparable figure.",
+            **{figure: stated},
         )
-    variance = estimate - actual
-    percent = None
-    if actual == 0:
-        note = note or "The actual is zero, so a percentage has no meaning here."
+    if kind == SUPPLIER_QUOTE:
+        difference, relative_to = stated - estimate, estimate
+        fields = ("gap", "gap_percent")
     else:
-        percent = variance / actual * 100
+        difference, relative_to = estimate - stated, stated
+        fields = ("variance", "variance_percent")
+    percent = None
+    if relative_to == 0:
+        note = note or words["zero"]
+    else:
+        percent = difference / relative_to * 100
     return VarianceLine(
         category=category,
         label=label,
         state=COMPARED,
         estimate_per_unit=estimate,
-        actual_per_unit=actual,
-        variance=variance,
-        variance_percent=percent,
+        statement=_statement(kind, difference, percent, currency),
         note=note,
+        **{figure: stated, fields[0]: difference, fields[1]: percent},
     )
 
 
 def compute_variance(figures: EstimateFigures, record: ActualCostRecord) -> CostVariance:
-    """Compare one actual with the estimate it was recorded against. Pure."""
+    """Compare one recorded figure with the estimate it was recorded against. Pure.
+
+    An actual yields a variance and a supplier quote a gap; the module docstring
+    says why they are not the same field.
+    """
+    kind = record.figure_kind
+    words = _WORDING[kind]
     base = dict(
         estimate_id=figures.estimate_id,
         actual_id=record.actual_id,
+        figure_kind=kind,
         currency=record.currency,
         estimate_quantity=figures.quantity,
         actual_batch_quantity=record.batch_quantity,
+        basis=QUOTE_GAP_BASIS if kind == SUPPLIER_QUOTE else VARIANCE_BASIS,
     )
     if record.currency != figures.currency:
         return CostVariance(
@@ -368,8 +570,8 @@ def compute_variance(figures: EstimateFigures, record: ActualCostRecord) -> Cost
             status=UNAVAILABLE,
             unavailable_code="currency_mismatch",
             unavailable_detail=(
-                f"The actual is in {record.currency} and the estimate in {figures.currency}. "
-                "Currencies are never converted."
+                f"{words['The_figure']} is in {record.currency} and the estimate in "
+                f"{figures.currency}. Currencies are never converted."
             ),
         )
     if figures.unavailable_code or figures.total is None:
@@ -383,58 +585,133 @@ def compute_variance(figures: EstimateFigures, record: ActualCostRecord) -> Cost
     def per_unit(amount: float | None) -> float | None:
         return None if amount is None else amount / figures.quantity
 
-    actual = {
+    stated = {
         TOTAL: actual_per_unit(record.total_cost, record),
         MATERIAL: actual_per_unit(record.material_cost, record),
         MACHINING: actual_per_unit(record.machining_cost, record),
         ADDITIONAL: actual_per_unit(record.additional_cost, record),
     }
 
-    lines = [_line(TOTAL, per_unit(figures.total), actual[TOTAL])]
+    def line(category: str, estimate: float | None, note: str = "") -> VarianceLine:
+        return _line(
+            category, estimate, stated[category], kind=kind, currency=record.currency, note=note
+        )
+
+    lines = [line(TOTAL, per_unit(figures.total))]
     if figures.kind == ASSEMBLY:
-        for category in (MATERIAL, MACHINING, ADDITIONAL):
-            lines.append(
-                VarianceLine(
-                    category=category,
-                    label=_LABELS[category],
-                    state=NOT_SUPPLIED if actual[category] is None else NOT_COMPARABLE,
-                    actual_per_unit=actual[category],
-                    note=(
-                        "Not supplied in the actual cost record. Not treated as zero."
-                        if actual[category] is None
-                        else ASSEMBLY_BREAKDOWN_NOTE
-                    ),
-                )
-            )
+        lines += [
+            line(category, None, "" if stated[category] is None else ASSEMBLY_BREAKDOWN_NOTE)
+            for category in (MATERIAL, MACHINING, ADDITIONAL)
+        ]
     else:
         lines += [
-            _line(MATERIAL, per_unit(figures.material), actual[MATERIAL]),
-            _line(MACHINING, per_unit(figures.machining), actual[MACHINING]),
-            _line(ADDITIONAL, per_unit(figures.additional), actual[ADDITIONAL]),
+            line(MATERIAL, per_unit(figures.material)),
+            line(MACHINING, per_unit(figures.machining)),
+            line(ADDITIONAL, per_unit(figures.additional)),
         ]
 
-    supplied = [actual[c] for c in (MATERIAL, MACHINING, ADDITIONAL) if actual[c] is not None]
-    unattributed = actual[TOTAL] - sum(supplied) if supplied else None
+    supplied = [stated[c] for c in (MATERIAL, MACHINING, ADDITIONAL) if stated[c] is not None]
+    unattributed = stated[TOTAL] - sum(supplied) if supplied else None
     if unattributed is not None and math.isclose(unattributed, 0.0, abs_tol=1e-9):
         unattributed = 0.0
 
     warnings = []
     if record.batch_quantity is None:
         warnings.append(
-            f"The actual does not state its batch size, so whether it matches the estimate's "
-            f"{figures.quantity} cannot be checked. Setup and tooling per unit depend on it."
+            f"{words['The_figure']} does not state its batch size, so whether it matches the "
+            f"estimate's {figures.quantity} cannot be checked. Setup and tooling per unit "
+            "depend on it."
         )
     elif record.batch_quantity != figures.quantity:
         warnings.append(
-            f"The estimate is for a batch of {figures.quantity} and the actual for "
+            f"The estimate is for a batch of {figures.quantity} and {words['the_figure']} for "
             f"{record.batch_quantity}. Setup and tooling are spread over the batch, so part of "
-            "this variance can come from the batch size alone. Nothing here adjusts for it."
+            f"this {words['difference']} can come from the batch size alone. Nothing here "
+            "adjusts for it."
         )
 
+    unattributed_field = (
+        "unattributed_quote_per_unit" if kind == SUPPLIER_QUOTE else "unattributed_actual_per_unit"
+    )
     return CostVariance(
         **base,
         status=AVAILABLE,
         lines=lines,
-        unattributed_actual_per_unit=unattributed,
         warnings=warnings,
+        **{unattributed_field: unattributed},
+    )
+
+
+def current_records(records: list[ActualCostRecord]) -> list[ActualCostRecord]:
+    """The records no later one has corrected, in the order they were entered."""
+    superseded = {
+        record.supersedes_actual_id
+        for record in records
+        if record.supersedes_actual_id is not None
+    }
+    return [record for record in records if record.actual_id not in superseded]
+
+
+def compare_supplier_quotes(
+    figures: EstimateFigures, records: list[ActualCostRecord]
+) -> SupplierQuoteComparison:
+    """The estimate's current supplier quotes side by side. Pure.
+
+    `records` is every record of the estimate, oldest first, as the repository
+    returns them. Actuals are left out — an actual is not an offer — and so is a
+    quote a later record corrected. The order is the order entered and nothing
+    here reorders it or singles a quote out.
+    """
+    quotes = [
+        record for record in current_records(records) if record.figure_kind == SUPPLIER_QUOTE
+    ]
+    compared = [compute_variance(figures, record) for record in quotes]
+    columns = [
+        SupplierQuoteColumn(
+            actual_id=record.actual_id,
+            supplier_name=record.supplier_name,
+            quote_reference=record.quote_reference,
+            source=record.source,
+            cost_date=record.cost_date,
+            status=result.status,
+            unavailable_detail=result.unavailable_detail,
+            warnings=result.warnings,
+        )
+        for record, result in zip(quotes, compared)
+    ]
+
+    rows = []
+    for category in CATEGORIES if quotes else ():
+        cells = []
+        estimate = None
+        for result in compared:
+            found = next((item for item in result.lines if item.category == category), None)
+            if found is None:
+                cells.append(SupplierQuoteCell(actual_id=result.actual_id, state=UNAVAILABLE))
+                continue
+            if found.estimate_per_unit is not None:
+                estimate = found.estimate_per_unit
+            cells.append(
+                SupplierQuoteCell(
+                    actual_id=result.actual_id,
+                    state=found.state,
+                    quote_per_unit=found.quote_per_unit,
+                    gap=found.gap,
+                    gap_percent=found.gap_percent,
+                )
+            )
+        rows.append(
+            SupplierQuoteRow(
+                category=category,
+                label=_LABELS[category],
+                estimate_per_unit=estimate,
+                cells=cells,
+            )
+        )
+
+    return SupplierQuoteComparison(
+        estimate_id=figures.estimate_id,
+        currency=figures.currency,
+        quotes=columns,
+        rows=rows,
     )
