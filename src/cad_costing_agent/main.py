@@ -4495,6 +4495,16 @@ async def cad_dfm(
     file: UploadFile = File(...),
     dfm_profile_id: str = Form(DEFAULT_DFM_PROFILE_ID),
     dfm_profile_version: str | None = Form(None, description="Omit for the latest version."),
+    forming_process: str | None = Form(
+        None,
+        description=(
+            "'casting', 'forging' or 'moulding' when the part is formed by one. The draft and "
+            "undercut rules are evaluated only when a forming process is stated here or by a "
+            "decided route in `process_classification`; it is never guessed from the geometry."
+        ),
+    ),
+    process_classification: str | None = Form(None),
+    pull_axis: str | None = Form(None, description="The engineer's pull axis, [x, y, z]."),
     session: Session = Depends(get_session),
 ) -> DfmReport:
     """Advisory DFM flags for the features recognized in an uploaded CAD file.
@@ -4532,7 +4542,17 @@ async def cad_dfm(
     recognition = recognized.recognition
     # Walls are measured only when the profile has a rule that reads them.
     wall = _wall_evidence(recognized, file.filename or "") if _profile_reads_walls(profile) else None
-    report = evaluate_dfm(recognition.features, profile, file.filename or "", wall=wall)
+    # Draft and undercuts only when the request states a forming process (see their section).
+    draw = (
+        _draw_evidence(
+            recognized, file.filename or "", forming_process, process_classification, pull_axis
+        )
+        if _profile_reads_draw(profile)
+        else None
+    )
+    report = evaluate_dfm(
+        recognition.features, profile, file.filename or "", wall=wall, draw=draw
+    )
     report.warnings.extend(recognition.warnings)
     return report
 
@@ -4674,6 +4694,219 @@ async def cad_wall_thickness(file: UploadFile = File(...)) -> wall_thickness.Wal
             status_code=500,
             detail=(
                 f"Wall-thickness measurement failed unexpectedly on this model "
+                f"({type(exc).__name__}). Geometry, the 3D preview and costing are unaffected."
+            ),
+        ) from exc
+
+
+# ------------------------------------------------------------- pull direction
+#
+# The pull (draw) direction of a two-half mould or die, the draft of every face
+# against it and the faces no straight pull releases (`features.draw_direction`),
+# and the one place that measurement becomes the draft and undercut DFM rules'
+# evidence. Analysis only: nothing here reaches a route, a time or a cost, and
+# nothing is stored. The shape is the one recognition read. Those two rules run
+# only when the request states a forming process — explicitly, or as a decided
+# route that starts by casting, forging or moulding — because a machined part
+# fails draft on every wall; the process is never guessed from the geometry.
+
+from cad_costing_agent.dfm import FORMING_RULES, NO_FORMING_PROCESS, DrawEvidence  # noqa: E402
+from cad_costing_agent.features import draw_direction  # noqa: E402
+
+FORMING_PROCESSES = ("casting", "forging", "moulding")
+
+
+def _pull_axis_from_form(pull_axis: str | None) -> tuple[float, float, float] | None:
+    """The engineer's axis from `[x, y, z]` or `{"x":..,"y":..,"z":..}`, or None if absent."""
+    if pull_axis is None or not pull_axis.strip():
+        return None
+    try:
+        value = json.loads(pull_axis)
+    except json.JSONDecodeError as exc:
+        raise HTTPException(status_code=400, detail="Invalid pull_axis: not valid JSON.") from exc
+    if isinstance(value, dict):
+        value = [value.get("x"), value.get("y"), value.get("z")]
+    try:
+        if not isinstance(value, list) or len(value) != 3:
+            raise ValueError("A pull axis is three numbers: [x, y, z].")
+        return draw_direction.normalise_axis(value)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=f"Invalid pull_axis: {exc}") from exc
+
+
+def _stated_forming_process(
+    forming_process: str | None, process_classification: str | None
+) -> tuple[str, str] | None:
+    """(process, where it was stated), or None when the request states none.
+
+    Only an explicit field or a *decided* route counts; an unreviewed
+    recommendation never proposes a forming family, and nothing here reads
+    the geometry. An explicit process that contradicts a decided route is a 400.
+    """
+    explicit = None
+    if forming_process is not None and forming_process.strip():
+        explicit = forming_process.strip().lower()
+        if explicit not in FORMING_PROCESSES:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f"forming_process must be one of {', '.join(FORMING_PROCESSES)}; "
+                    f"'{forming_process}' is not a process a mould or die forms here."
+                ),
+            )
+    decided = None
+    if process_classification:
+        try:
+            classification = ProcessClassification.model_validate_json(process_classification)
+        except ValidationError as exc:
+            raise HTTPException(
+                status_code=400, detail=f"Invalid process_classification: {exc}"
+            ) from exc
+        route = classification.route
+        if classification.decision_status in ("confirmed", "overridden") and route is not None:
+            first = route.stages[0].stage if route.stages else None
+            decided = (first if first in FORMING_PROCESSES else None, route.label)
+    if explicit and decided and decided[0] != explicit:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"forming_process '{explicit}' contradicts the decided route '{decided[1]}'. "
+                "Change the route, or leave forming_process out."
+            ),
+        )
+    if explicit:
+        return explicit, "stated in the request"
+    if decided and decided[0]:
+        return decided[0], f"the decided route '{decided[1]}'"
+    return None
+
+
+def _measure_draw(
+    recognized: RecognizedShape, filename: str, axis: tuple[float, float, float] | None
+) -> draw_direction.DrawDirectionResult:
+    """The one path from a recognized upload to its pull-direction measurement."""
+    reason = draw_direction.refusal_reason(
+        recognized.recognition.representation, recognized.shape is not None
+    )
+    if reason is not None:
+        return draw_direction.not_measured(reason, filename=filename)
+    return draw_direction.measure_draw_direction(recognized.shape, filename=filename, pull_axis=axis)
+
+
+def _profile_reads_draw(profile: DfmProfile) -> bool:
+    return any(profile.setting(rule) is not None for rule in FORMING_RULES)
+
+
+def _draw_evidence(
+    recognized: RecognizedShape,
+    filename: str,
+    forming_process: str | None,
+    process_classification: str | None,
+    pull_axis: str | None,
+) -> DrawEvidence:
+    """The measurement as the DFM rules' plain carrier — or why it was not made."""
+    stated = _stated_forming_process(forming_process, process_classification)
+    axis = _pull_axis_from_form(pull_axis)
+    if stated is None:
+        return DrawEvidence(measured=False, not_measured_reason=NO_FORMING_PROCESS)
+    process, source = stated
+    try:
+        result = _measure_draw(recognized, filename, axis)
+    except Exception as exc:  # noqa: BLE001 - a failed measurement skips two rules, no more
+        return DrawEvidence(
+            measured=False,
+            forming_process=process,
+            forming_process_source=source,
+            not_measured_reason=(
+                f"Pull-direction measurement failed on this model ({type(exc).__name__})."
+            ),
+        )
+    released = [
+        face
+        for face in result.faces
+        if face.draft_deg is not None and face.release not in ("undercut", "not_sampled")
+    ]
+    return DrawEvidence(
+        measured=result.measured,
+        not_measured_reason=result.not_measured_reason,
+        forming_process=process,
+        forming_process_source=source,
+        pull_axis=result.pull_axis,
+        pull_axis_label=result.pull_axis_label,
+        axis_source=result.axis_source,
+        recommendation_basis=result.recommendation_basis,
+        face_drafts=[(face.face_id, face.draft_deg) for face in released],
+        draft_markers=[(face.face_id, face.marker) for face in released if face.marker is not None],
+        undercut_faces=[
+            (face.face_id, face.marker)
+            for face in result.faces
+            if face.release == "undercut" and face.marker is not None
+        ],
+        faces_checked=sum(1 for face in result.faces if face.release != "not_sampled"),
+        method=result.method,
+        method_description=result.method_description,
+        limitations=list(result.limitations),
+        budget_limited=result.budget_limited,
+        budget_note=result.budget_note,
+    )
+
+
+@app.post("/cad/draw-direction", response_model=draw_direction.DrawDirectionResult)
+async def cad_draw_direction(
+    file: UploadFile = File(...),
+    pull_axis: str | None = Form(
+        None,
+        description=(
+            "The engineer's pull axis as [x, y, z]. Evaluated like every candidate and reported "
+            "as the axis used, beside the recommendation."
+        ),
+    ),
+) -> draw_direction.DrawDirectionResult:
+    """Candidate pull axes for a two-half mould or die, the draft of every face against the
+    axis used, and the faces no straight pull releases (undercuts), with the method and what
+    it can miss.
+
+    Read-only analysis. It states no process, and changes no route, time, cost or
+    suggestion and persists nothing. The recommended axis is a ranking by undercut count
+    then zero-draft area, not a design decision. Refused (400) for geometry it cannot
+    measure honestly — a faceted export, an STL, an IGES surface model — with the reason.
+    """
+    data = await file.read()
+    if len(data) > MAX_UPLOAD_BYTES:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"CAD file is {len(data) / 1024 / 1024:.1f} MB, above the "
+                f"{MAX_UPLOAD_BYTES // 1024 // 1024} MB limit for this POC."
+            ),
+        )
+    filename = file.filename or ""
+    axis = _pull_axis_from_form(pull_axis)
+    _import(data, filename, CAPABILITY_FEATURES, with_geometry=False)
+    try:
+        recognized = recognize_features_with_shape(data, filename)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:  # noqa: BLE001 - a bad model must not take the app down
+        raise HTTPException(
+            status_code=500,
+            detail=(
+                f"This model could not be read for analysis ({type(exc).__name__}). "
+                "Geometry, the 3D preview and costing are unaffected."
+            ),
+        ) from exc
+    reason = draw_direction.refusal_reason(
+        recognized.recognition.representation, recognized.shape is not None
+    )
+    if reason is not None:
+        raise HTTPException(status_code=400, detail=reason)
+    try:
+        return _measure_draw(recognized, filename, axis)
+    except Exception as exc:  # noqa: BLE001 - a bad model must not take the app down
+        raise HTTPException(
+            status_code=500,
+            detail=(
+                f"Pull-direction measurement failed unexpectedly on this model "
                 f"({type(exc).__name__}). Geometry, the 3D preview and costing are unaffected."
             ),
         ) from exc

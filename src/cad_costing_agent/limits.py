@@ -16,6 +16,7 @@ are different questions and now have different answers.
     CAD_COSTING_MAX_BULK_TOTAL_MB       combined size of one bulk preview's CAD files
     CAD_COSTING_MAX_MATRIX_CELLS        rate set x quantity cells one matrix preview will price
     CAD_COSTING_MAX_WALL_RAYS           rays one wall-thickness measurement will cast
+    CAD_COSTING_MAX_DRAW_RAYS           rays one pull-direction (draft, undercut) measurement will cast
 
 The ordering that matters: a model can be **too complex to draw and still
 perfectly costable**. Geometry and mass need a volume, which is cheap; the
@@ -137,3 +138,11 @@ can do. Over it, every face is sampled more coarsely and the result says so; if
 even one ray per face is over it, walls are not measured. Either way only the
 wall analysis and the minimum-wall DFM rule degrade — never geometry, the
 preview or an estimate."""
+
+
+MAX_DRAW_RAYS = _positive_int("CAD_COSTING_MAX_DRAW_RAYS", 40_000)
+"""Rays one pull-direction measurement may cast (up to two per sampled point per
+candidate axis). Over it, every face is sampled more coarsely and the result
+says so; if even the coarse grid is over it, the pull direction is not
+measured. Either way only that analysis and the draft and undercut DFM rules
+degrade — never geometry, the preview or an estimate."""

@@ -633,6 +633,7 @@ def test_the_approach_module_imports_no_plan_and_no_costing():
     assert imported <= {
         "cad_costing_agent.features",
         "cad_costing_agent.features.model",
+        "cad_costing_agent.features.rays",
         "cad_costing_agent.features.step_text",
         "cad_costing_agent.cad_assembly",
         "cad_costing_agent.cad_geometry",

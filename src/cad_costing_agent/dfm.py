@@ -59,6 +59,8 @@ class RuleId(str, Enum):
     SMALL_INTERNAL_RADIUS = "dfm_small_internal_radius"
     MANY_HOLE_DIAMETERS = "dfm_many_distinct_hole_diameters"
     MIN_WALL = "dfm_min_wall"
+    MIN_DRAFT = "dfm_min_draft"
+    UNDERCUT = "dfm_undercut"
 
 
 RULE_NAMES = {
@@ -67,7 +69,14 @@ RULE_NAMES = {
     RuleId.SMALL_INTERNAL_RADIUS: "Small internal radii",
     RuleId.MANY_HOLE_DIAMETERS: "Many different hole sizes",
     RuleId.MIN_WALL: "Thin walls",
+    RuleId.MIN_DRAFT: "Low draft (cast, moulded or forged parts)",
+    RuleId.UNDERCUT: "Undercuts (cast, moulded or forged parts)",
 }
+
+# Rules that only mean anything for a part a mould or die forms: a machined block
+# "fails" draft on every wall. They are evaluated only when the request states a
+# forming process, never one guessed from the geometry.
+FORMING_RULES = (RuleId.MIN_DRAFT, RuleId.UNDERCUT)
 
 
 class DfmRuleSetting(BaseModel):
@@ -167,6 +176,48 @@ class WallEvidence(BaseModel):
     budget_note: str | None = None
 
 
+class DrawEvidence(BaseModel):
+    """What the pull-direction measurement found, handed in by `main.py`.
+
+    A plain carrier, like `WallEvidence`, so this module never reaches the
+    measuring code. `measured` false with `not_measured_reason` covers both a
+    measurement that could not be made and one deliberately not made because
+    no forming process was stated; either way the two rules are not evaluated.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    measured: bool
+    not_measured_reason: str | None = None
+    forming_process: str | None = Field(
+        default=None, description="'casting', 'forging' or 'moulding', as the request stated it."
+    )
+    forming_process_source: str | None = Field(
+        default=None, description="Where the process was stated: the request field or the decided route."
+    )
+    pull_axis: Point3D | None = None
+    pull_axis_label: str | None = None
+    axis_source: str | None = Field(default=None, description="'engineer_entered' or 'recommended'.")
+    recommendation_basis: str | None = None
+    face_drafts: list[tuple[int, float]] = Field(
+        default_factory=list,
+        description="(face id, draft in degrees) for every face that releases into a half.",
+    )
+    draft_markers: list[tuple[int, Point3D]] = Field(
+        default_factory=list, description="(face id, a sampled point on it), for the faces above."
+    )
+    undercut_faces: list[tuple[int, Point3D]] = Field(
+        default_factory=list,
+        description="(face id, the first sampled point no straight pull releases) per undercut face.",
+    )
+    faces_checked: int = 0
+    method: str = ""
+    method_description: str = ""
+    limitations: list[str] = Field(default_factory=list)
+    budget_limited: bool = False
+    budget_note: str | None = None
+
+
 class DfmMarker(BaseModel):
     """Where to point at a flag that names no recognized feature.
 
@@ -193,7 +244,9 @@ class DfmFlag(BaseModel):
     )
     measured_value: float
     measured_unit: str
-    comparison: str = Field(description="'greater_than' or 'less_than'; the flag fires when it holds.")
+    comparison: str = Field(
+        description="'greater_than', 'less_than' or 'at_least'; the flag fires when it holds."
+    )
     threshold: float
     dfm_profile_id: str
     dfm_profile_version: str
@@ -241,6 +294,14 @@ class DfmReport(BaseModel):
         description=(
             "The wall-thickness measurement the minimum-wall rule read, present only when the "
             "profile has that rule, with its method and what it can miss."
+        ),
+    )
+    draw: DrawEvidence | None = Field(
+        default=None,
+        description=(
+            "The pull-direction measurement the draft and undercut rules read, present only when "
+            "the profile has either rule — with `measured` false and the reason when no forming "
+            "process was stated."
         ),
     )
     warnings: list[str] = Field(default_factory=list)
@@ -303,12 +364,93 @@ def _flag(
 
 WALL_NOT_SUPPLIED = "wall thickness was not measured for this request."
 
+DRAW_NOT_SUPPLIED = "the pull direction was not measured for this request."
+
+NO_FORMING_PROCESS = (
+    "not evaluated: no forming process stated. Draft and undercuts matter only for a part a "
+    "mould or die forms — a machined block would fail draft on every wall — so they are checked "
+    "only when the request states casting, forging or moulding, or the decided route starts with "
+    "one. The process is never guessed from the geometry."
+)
+
+
+def _forming_flag(profile: DfmProfile, setting: DfmRuleSetting, draw: DrawEvidence) -> DfmFlag | None:
+    """The draft or undercut flag against the stated pull axis, or None if none fires."""
+    axis = draw.pull_axis_label or "the pull axis"
+    chosen = (
+        "the axis the engineer entered"
+        if draw.axis_source == "engineer_entered"
+        else "the recommended axis (ranked by undercut count and zero-draft area, not a design "
+        "decision; enter the real pull to check against it)"
+    )
+    process = draw.forming_process or "the stated process"
+    if setting.rule_id is RuleId.MIN_DRAFT:
+        low = [(face, value) for face, value in draw.face_drafts if value < setting.threshold]
+        if not low:
+            return None
+        face, value = min(low, key=lambda item: (item[1], item[0]))
+        point = dict(draw.draft_markers).get(face)
+        zero = sum(1 for _, v in low if v == 0)
+        return DfmFlag(
+            rule_id=setting.rule_id,
+            feature_ids=[],
+            marker=DfmMarker(label=f"Face {face}: draft {value:g} deg", location=point, axis=draw.pull_axis)
+            if point is not None
+            else None,
+            measured_value=round(value, 4),
+            measured_unit="degrees",
+            comparison="less_than",
+            threshold=setting.threshold,
+            dfm_profile_id=profile.dfm_profile_id,
+            dfm_profile_version=profile.version,
+            basis=setting.basis,
+            source_title=setting.source_title,
+            source_url=setting.source_url,
+            evidence_type="brep",
+            explanation=(
+                f"Against pull axis {axis}, {chosen}: {len(low)} face(s) that release have less than "
+                f"{setting.threshold:g} deg of draft, {zero} of them none at all; the least is face "
+                f"{face} at {value:g} deg. A wall with too little draft drags on the tool as the "
+                f"part is released. Checked because the request states {process}. The figure is a "
+                "moulding guideline; a casting or a forging commonly needs more, and the profile "
+                "says nothing about texture or depth."
+            ),
+        )
+    count = len(draw.undercut_faces)
+    if count < setting.threshold:
+        return None
+    face, point = draw.undercut_faces[0]
+    return DfmFlag(
+        rule_id=setting.rule_id,
+        feature_ids=[],
+        marker=DfmMarker(label=f"Undercut face {face}", location=point, axis=draw.pull_axis),
+        measured_value=float(count),
+        measured_unit="undercut faces",
+        comparison="at_least",
+        threshold=setting.threshold,
+        dfm_profile_id=profile.dfm_profile_id,
+        dfm_profile_version=profile.version,
+        basis=setting.basis,
+        source_title=setting.source_title,
+        source_url=setting.source_url,
+        evidence_type="brep",
+        explanation=(
+            f"Against pull axis {axis}, {chosen}: {count} face(s) have a sampled point that a "
+            "straight pull in neither direction releases (faces "
+            + ", ".join(str(f) for f, _ in draw.undercut_faces)
+            + "). Each needs a side action, a core, a loose piece or later machining. Checked "
+            f"because the request states {process}. A ray is not mould steel: what was tested is "
+            "a straight line from sampled points, so a small undercut between samples is not seen."
+        ),
+    )
+
 
 def evaluate_dfm(
     features: list[Feature],
     profile: DfmProfile,
     filename: str = "",
     wall: WallEvidence | None = None,
+    draw: DrawEvidence | None = None,
 ) -> DfmReport:
     """Apply the profile's thresholds to recognized features and, for the
     minimum-wall rule, to the measured wall. Pure and deterministic."""
@@ -384,6 +526,27 @@ def evaluate_dfm(
                         ),
                     )
                 )
+
+        elif rule_id in FORMING_RULES:
+            if draw is None or not draw.measured or draw.pull_axis is None:
+                reports.append(
+                    DfmRuleReport(
+                        rule_id=rule_id,
+                        evaluated=False,
+                        features_checked=0,
+                        flags=0,
+                        skipped_reason=(
+                            DRAW_NOT_SUPPLIED
+                            if draw is None
+                            else (draw.not_measured_reason or DRAW_NOT_SUPPLIED)
+                        ),
+                    )
+                )
+                continue
+            flag = _forming_flag(profile, setting, draw)
+            checked = len(draw.face_drafts) if rule_id is RuleId.MIN_DRAFT else draw.faces_checked
+            if flag is not None:
+                found.append(flag)
 
         elif rule_id is RuleId.DEEP_HOLE:
             for f in features:
@@ -488,6 +651,7 @@ def evaluate_dfm(
         flagged_features=flagged_features,
         rules=reports,
         wall=wall if profile.setting(RuleId.MIN_WALL) is not None else None,
+        draw=draw if any(profile.setting(rule) is not None for rule in FORMING_RULES) else None,
     )
 
 
@@ -499,8 +663,10 @@ def evaluate_dfm(
 #
 # 1.0.0 is immutable and stays exactly as first seeded. 1.1.0 is 1.0.0 plus the
 # minimum-wall rule, added as a new version because a published version is never
-# edited. `seed` inserts only the versions a database is missing, so a fresh
-# database and one first seeded with 1.0.0 alone end up holding the same rows.
+# edited. 1.2.0 is 1.1.0 plus the draft and undercut rules, for parts a mould or
+# die forms, quoting an injection-moulding guide (fetched 2026-11-13). `seed`
+# inserts only the versions a database is missing, so a fresh database and one
+# first seeded with 1.0.0 alone, or 1.0.0 and 1.1.0, end up holding the same rows.
 # ---------------------------------------------------------------------------
 
 GUIDE_TITLE = "A Practical Design Guide for CNC Machining (Yijin Solution)"
@@ -585,20 +751,73 @@ MIN_WALL_SETTING = DfmRuleSetting(
     ),
 )
 
+MOULDING_GUIDE_TITLE = "Injection Molding Guide: Process, Design Tips & Materials (Protolabs)"
+MOULDING_GUIDE_URL = (
+    "https://www.protolabs.com/resources/guides-and-trend-reports/"
+    "injection-molding-guide-process-design-tips-materials/"
+)
+
+MIN_DRAFT_SETTING = DfmRuleSetting(
+    rule_id=RuleId.MIN_DRAFT,
+    threshold=1.0,
+    unit="degrees",
+    basis=BASIS_PUBLISHED,
+    source_title=MOULDING_GUIDE_TITLE,
+    source_url=MOULDING_GUIDE_URL,
+    source_quote=(
+        "A common starting point is 1 to 2 degrees, with more draft for textured surfaces. "
+        "(The lower figure is applied, to every face that releases, against the pull axis "
+        "reported. It is a moulding figure: a casting or a forging commonly needs more, and a "
+        "shop that knows its process's figure should publish a version with it.)"
+    ),
+)
+
+UNDERCUT_SETTING = DfmRuleSetting(
+    rule_id=RuleId.UNDERCUT,
+    threshold=1.0,
+    unit="faces",
+    basis=BASIS_PUBLISHED,
+    source_title=MOULDING_GUIDE_TITLE,
+    source_url=MOULDING_GUIDE_URL,
+    source_quote=(
+        "Ejector pins can leave marks, while undercuts may require side-actions, pickouts, "
+        "sliding shutoffs, or design changes. Undercut: A feature that prevents the part from "
+        "being pulled straight out of the mold. (The guide gives no count; one face that no "
+        "straight pull releases is the guide's own definition of an undercut, applied.)"
+    ),
+)
+
+_GENERAL_1_1_0 = DfmProfile(
+    dfm_profile_id=DEFAULT_DFM_PROFILE_ID,
+    name=_GENERAL_1_0_0.name,
+    version="1.1.0",
+    description=(
+        "1.0.0 plus a minimum-wall rule, read from the measured wall thickness (exact B-Rep "
+        "only). Thresholds from a published general CNC design guide, plus one rule with no "
+        "published figure, labelled as such. Illustrative: a vendor's rules of thumb, not a "
+        "standard and not your shop's capability. Publish a version with your own limits."
+    ),
+    is_illustrative=True,
+    rules=[*_GENERAL_1_0_0.rules, MIN_WALL_SETTING],
+)
+
 SEED_DFM_PROFILES: tuple[DfmProfile, ...] = (
     _GENERAL_1_0_0,
+    _GENERAL_1_1_0,
     DfmProfile(
         dfm_profile_id=DEFAULT_DFM_PROFILE_ID,
         name=_GENERAL_1_0_0.name,
-        version="1.1.0",
+        version="1.2.0",
         description=(
-            "1.0.0 plus a minimum-wall rule, read from the measured wall thickness (exact B-Rep "
-            "only). Thresholds from a published general CNC design guide, plus one rule with no "
-            "published figure, labelled as such. Illustrative: a vendor's rules of thumb, not a "
-            "standard and not your shop's capability. Publish a version with your own limits."
+            "1.1.0 plus minimum-draft and undercut rules, read from the measured pull direction "
+            "(exact B-Rep only) and evaluated only when the request states a forming process "
+            "(casting, forging or moulding), because a machined part fails draft on every wall. "
+            "Draft and undercut thresholds quote a published injection-moulding guide. "
+            "Illustrative: vendors' rules of thumb, not a standard and not your shop's "
+            "capability. Publish a version with your own limits."
         ),
         is_illustrative=True,
-        rules=[*_GENERAL_1_0_0.rules, MIN_WALL_SETTING],
+        rules=[*_GENERAL_1_1_0.rules, MIN_DRAFT_SETTING, UNDERCUT_SETTING],
     ),
 )
 
@@ -615,6 +834,9 @@ __all__ = [
     "DfmProfileVersionCreate",
     "DfmReport",
     "DfmRuleSetting",
+    "DrawEvidence",
+    "FORMING_RULES",
+    "NO_FORMING_PROCESS",
     "RuleId",
     "SEED_DFM_PROFILES",
     "WallEvidence",

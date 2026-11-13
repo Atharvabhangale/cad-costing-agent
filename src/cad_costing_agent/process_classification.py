@@ -32,8 +32,10 @@ them is in a CAD file. So:
   volume equal to that thickness times the paired area). Each is reported as
   observed, not observed, or not assessable — with the reason.
 - **Casting, forging, moulding, welding and additive manufacturing are never
-  proposed.** No recognizer here detects draft angles, parting lines, weld
-  preparations or lattice structures, so there is no evidence to stand on. They
+  proposed.** Nothing here detects parting lines, weld preparations or lattice
+  structures, and the measured draft (`features.draw_direction`) is not evidence
+  of a process — a machined part can carry a taper — so there is no evidence to
+  stand on, and this module does not read it. They
   are listed in `not_assessed` and the engineer can choose them.
 - **Purchased is never inferred from shape**, for the same reason
   `component_classification` refuses to: a bought part is modelled with the
@@ -233,9 +235,10 @@ NEAR_NET_SHAPE_STAGES = {"casting": "As cast", "forging": "As forged"}
 AS_FORMED_FEATURE_TYPES = ("fillet", "chamfer")
 
 NOT_ASSESSED = (
-    "Casting, forging and moulding are not assessed: no recognizer here detects draft angles, "
-    "parting lines or near-net-shape surfaces, so geometry never proposes them. Choose one if "
-    "it applies.",
+    "Casting, forging and moulding are not assessed: draft and undercuts can be measured "
+    "(pull direction), but a drafted wall is not evidence that a part is cast, moulded or forged, "
+    "and nothing here detects parting lines or near-net-shape surfaces, so geometry never "
+    "proposes them. Choose one if it applies.",
     "Fabrication by welding is not assessed: weld preparations and beads are not recognized. "
     "Separate solids are reported, but they are not evidence of a weldment on their own.",
     "Additive manufacturing is not assessed: lattices, support-free overhangs and build "

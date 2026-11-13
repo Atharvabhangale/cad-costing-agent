@@ -247,12 +247,24 @@
             <button type="button" id="dfm-run" class="secondary tiny" disabled>Check design</button>
           </div>
           <p id="dfm-status" class="hint"></p>
+          <!-- Draft and undercuts are checked only for a stated forming process: chosen
+               here, or a decided casting, forging or moulding route. Never guessed. -->
+          <label class="dfm-forming">Formed by
+            <select id="dfm-forming-process">
+              <option value="">not stated (draft and undercuts not checked)</option>
+              <option value="casting">casting</option>
+              <option value="forging">forging</option>
+              <option value="moulding">moulding</option>
+            </select>
+          </label>
           <div id="dfm-body" class="hidden">
             <p id="dfm-profile-line" class="muted"></p>
             <p id="dfm-disclaimer" class="provenance"></p>
             <!-- The measured wall thickness the thin-wall rule read, exactly as the
                  server reported it, with its method and what it can miss. -->
             <div id="dfm-wall" class="dfm-wall hidden"></div>
+            <!-- The pull direction the draft and undercut rules read, as the server reported it. -->
+            <div id="dfm-draw" class="dfm-wall hidden"></div>
             <div id="dfm-marking" class="dfm-marking hidden">
               <div class="dfm-marking-controls">
                 <button type="button" id="dfm-show-all" class="secondary tiny">Show all flagged features</button>
@@ -265,11 +277,57 @@
                 It points at the feature; it does not outline the feature's faces. A flag marker is drawn over the part,
                 because a through hole's location is on the far face and a slot's is on its floor.
                 A thin-wall flag names no feature: its marker sits halfway through the thinnest wall measured,
-                with its line across the wall.
+                with its line across the wall. A draft or undercut flag names no feature either: its marker is a
+                point sampled on the face, with its line along the pull axis.
               </p>
               <p id="dfm-marked" class="hint" role="status" aria-live="polite"></p>
             </div>
             <ul id="dfm-flags" class="dfm-flags"></ul>
+          </div>
+        </div>
+
+        <!-- ---------------- pull direction, draft and undercuts ---------------- -->
+        <div class="card" id="draw-card">
+          <div class="panel-head">
+            <h2>Pull direction, draft and undercuts</h2>
+            <button type="button" id="draw-run" class="secondary tiny" disabled>Measure pull direction</button>
+          </div>
+          <p id="draw-status" class="hint"></p>
+          <div class="draw-axis-input">
+            <span>Pull axis (optional, overrides the recommendation):</span>
+            <label>x <input type="number" id="draw-axis-x" step="any" class="tiny-input" aria-label="Pull axis x"></label>
+            <label>y <input type="number" id="draw-axis-y" step="any" class="tiny-input" aria-label="Pull axis y"></label>
+            <label>z <input type="number" id="draw-axis-z" step="any" class="tiny-input" aria-label="Pull axis z"></label>
+            <span class="muted">Leave all three empty to report against the recommended axis. The DFM check uses the same axis.</span>
+          </div>
+          <div id="draw-body" class="hidden">
+            <p id="draw-counts"></p>
+            <p id="draw-basis" class="provenance"></p>
+            <div id="draw-warnings"></div>
+            <div class="dfm-marking-controls">
+              <button type="button" id="draw-show-undercuts" class="secondary tiny" disabled>Show undercut faces on model</button>
+            </div>
+            <p id="draw-marked" class="hint" role="status" aria-live="polite"></p>
+            <details class="detail-toggle">
+              <summary>Every candidate axis, in the order evaluated</summary>
+              <table class="draw-table">
+                <thead><tr><th>#</th><th>Axis</th><th>Undercut faces</th><th>Undercut mm²</th><th>Zero-draft faces</th><th>Zero-draft mm²</th><th></th><th>Offered because</th></tr></thead>
+                <tbody id="draw-candidates"></tbody>
+              </table>
+            </details>
+            <details class="detail-toggle">
+              <summary>Every face against the axis used</summary>
+              <table class="draw-table">
+                <thead><tr><th>Face</th><th>Surface</th><th>Draft °</th><th>How</th><th>Releases into</th><th>Undercut samples</th></tr></thead>
+                <tbody id="draw-faces"></tbody>
+              </table>
+            </details>
+            <details class="detail-toggle">
+              <summary>How it is measured, and what it can miss</summary>
+              <p id="draw-method"></p>
+              <p id="draw-parting" class="muted"></p>
+              <ul id="draw-limits"></ul>
+            </details>
           </div>
         </div>
 
@@ -1166,6 +1224,7 @@
 <script src="matrix.js"></script>
 <script src="bulk.js"></script>
 <script src="dfm.js"></script>
+<script src="draw.js"></script>
 <script src="drivers.js"></script>
 <script src="estimateflow.js"></script>
 <script type="module" src="viewer.js"></script>
