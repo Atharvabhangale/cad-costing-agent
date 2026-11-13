@@ -181,7 +181,11 @@ from cad_costing_agent.operation_feedback import feedback_from_plan
 from cad_costing_agent.cad_part_cost import CadPartCostEstimateResult, calculate_cad_part_cost
 from cad_costing_agent.costing import MaterialCostResult, calculate_material_cost
 from cad_costing_agent.operation import ManufacturingOperation
-from cad_costing_agent.operation_costing import OperationCostResult, calculate_operation_cost
+from cad_costing_agent.operation_costing import (
+    OperationCostResult,
+    calculate_operation_cost,
+    run_overhead_cost,
+)
 from cad_costing_agent.part import Part
 from cad_costing_agent.part_cost import (
     PartCostEstimateRequest,
@@ -2192,8 +2196,10 @@ async def cost_assembly(
         # Setup and run are separated from figures the engine already produced:
         # `setup_cost` is its own field on every costed operation.
         setup_total = sum(operation.setup_cost for operation in cost.operations)
+        # A per-machine overhead is charged per hour of run time, so it is run.
         run_total = sum(
-            operation.machine_cost + operation.labor_cost for operation in cost.operations
+            operation.machine_cost + operation.labor_cost + run_overhead_cost(operation)
+            for operation in cost.operations
         )
         estimates[definition.definition_id] = ComponentEstimate(
             definition_id=definition.definition_id,
@@ -2854,7 +2860,13 @@ class PlanCostPreview(BaseModel):
     currency: str = DEFAULT_CURRENCY
     time: PlanTimeSummary
     setup_cost: float = Field(default=0.0, description="Charged once per setup, not per operation.")
-    run_cost: float = Field(default=0.0, description="Machine and labour over the cycle times.")
+    run_cost: float = Field(
+        default=0.0,
+        description=(
+            "Machine and labour over the cycle times, plus any per-machine overhead the rate "
+            "set states, which is charged per run hour."
+        ),
+    )
     total_operation_cost: float = 0.0
     costed_operation_count: int = 0
     rate_set_id: str | None = None
@@ -2914,6 +2926,8 @@ def plan_cost_preview(
         # everything else scales with the cycle time and the quantity.
         setup_cost += float(costed.setup_cost)
         run_cost += float(costed.machine_cost) + float(costed.labor_cost)
+        # A per-machine overhead (when the rate set states one) is per run hour.
+        run_cost += run_overhead_cost(costed)
 
     return PlanCostPreview(
         quantity=quantity,
@@ -4441,6 +4455,8 @@ def _matrix_rate_set(
         version=rate_set.version,
         currency=rate_set.currency,
         is_illustrative=rate_set.is_illustrative,
+        region=rate_set.factory.region if rate_set.factory is not None else None,
+        factory_name=rate_set.factory.factory_name if rate_set.factory is not None else None,
     )
 
 
@@ -5531,3 +5547,106 @@ def operations_moulding_line(
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+# ---------------------------------------------------------------- CO2e estimate
+#
+# Iteration 9. An emission-factor catalog is versioned and immutable like a DFM
+# profile; a CO2e estimate is read from a stored estimate's own snapshots by the
+# pure `co2e` module, in kilograms of CO2e. It is computed on request, stored
+# nowhere, changes no cost and is added to no money total.
+
+from cad_costing_agent import co2e  # noqa: E402
+from cad_costing_agent.emission_factors import (  # noqa: E402
+    DEFAULT_EMISSION_CATALOG_ID,
+    REGION_CODE_PATTERN,
+    EmissionFactorCatalog,
+    EmissionFactorCatalogSummary,
+    EmissionFactorCatalogVersionCreate,
+)
+from cad_costing_agent.repository import EmissionFactorCatalogRepository  # noqa: E402
+
+
+@app.get("/emission-factors", response_model=list[EmissionFactorCatalogSummary])
+def emission_factor_catalogs(
+    session: Session = Depends(get_session),
+) -> list[EmissionFactorCatalogSummary]:
+    """List every stored emission-factor catalog version (the seeded one is illustrative)."""
+    return EmissionFactorCatalogRepository(session).list()
+
+
+@app.get("/emission-factors/{emission_catalog_id}", response_model=EmissionFactorCatalog)
+def emission_factor_catalog(
+    emission_catalog_id: str, version: str | None = None, session: Session = Depends(get_session)
+) -> EmissionFactorCatalog:
+    """One catalog with every factor's source. Omit `version` for the latest."""
+    try:
+        return EmissionFactorCatalogRepository(session).get(emission_catalog_id, version)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@app.post(
+    "/emission-factors/{emission_catalog_id}/versions",
+    response_model=EmissionFactorCatalog,
+    status_code=201,
+)
+def create_emission_factor_catalog_version(
+    emission_catalog_id: str,
+    version: EmissionFactorCatalogVersionCreate,
+    session: Session = Depends(get_session),
+) -> EmissionFactorCatalog:
+    """Publish a catalog version. A factor marked published must cite title, URL and quote
+    (422); an existing version is immutable (409)."""
+    try:
+        catalog = EmissionFactorCatalog(
+            emission_catalog_id=emission_catalog_id, **version.model_dump()
+        )
+    except ValidationError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    repository = EmissionFactorCatalogRepository(session)
+    try:
+        repository.add(catalog)
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    session.commit()
+    return repository.get(catalog.emission_catalog_id, catalog.version)
+
+
+@app.get("/estimates/{estimate_id}/co2e", response_model=co2e.Co2eEstimate)
+def estimate_co2e(
+    estimate_id: str,
+    catalog: str = Query(DEFAULT_EMISSION_CATALOG_ID, description="Emission-factor catalog id."),
+    catalog_version: str | None = Query(None, description="Exact version; omit for the latest."),
+    region: str | None = Query(
+        None,
+        pattern=REGION_CODE_PATTERN,
+        description=(
+            "ISO 3166 region whose grid factor applies. Omit to use the region the estimate's "
+            "rate set states for its factory, if any."
+        ),
+    ),
+    session: Session = Depends(get_session),
+) -> co2e.Co2eEstimate:
+    """Illustrative CO2e (kg) of one stored estimate, from its own snapshots. Not money."""
+    try:
+        stored = EstimateRepository(session).get(estimate_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    try:
+        factors = EmissionFactorCatalogRepository(session).get(catalog, catalog_version)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    region_source = "request" if region else None
+    if region is None:
+        stated = ((stored.rate_set_snapshot or {}).get("factory") or {}).get("region")
+        if stated:
+            region, region_source = stated, "rate_set_factory"
+    return co2e.estimate_co2e(
+        estimate_id=stored.estimate_id,
+        result_snapshot=stored.result_snapshot,
+        catalog=factors,
+        region=region,
+        region_source=region_source,
+    )

@@ -562,15 +562,67 @@ async function loadRateSets() {
     showError(`Could not load rate sets. ${error.message}`);
     return;
   }
+  renderRegionFilter();
+  await renderFamilyOptions();
+}
+
+// ------------------------------------------------------------ factory picker
+//
+// A rate set may say which factory and region it describes (`/rates` lists the
+// label of each version). The picker groups profiles by the region of their
+// newest version and can be narrowed to one region. It only arranges what the
+// server listed: nothing is converted and no rate is read from a region.
+
+function newestSummary(rateSetId) {
+  const versions = state.rateSets
+    .filter((r) => r.rate_set_id === rateSetId)
+    .sort((a, b) => compareVersions(a.version, b.version));
+  return versions[versions.length - 1] || null;
+}
+
+function renderRegionFilter() {
+  const previous = $("rate_region").value;
+  const regions = [...new Set(state.rateSets.map((r) => r.region).filter(Boolean))].sort();
+  $("rate_region").innerHTML =
+    `<option value="">All regions</option>` +
+    regions.map((r) => `<option value="${escapeHtml(r)}">${escapeHtml(r)}</option>`).join("") +
+    `<option value="__none__">No factory stated</option>`;
+  if ([...$("rate_region").options].some((o) => o.value === previous)) $("rate_region").value = previous;
+}
+
+async function renderFamilyOptions() {
   // Labelled by profile name rather than by slug — the id is developer-facing.
   const previous = $("rate_set_id").value;
-  const families = [...new Set(state.rateSets.map((r) => r.rate_set_id))].sort();
-  $("rate_set_id").innerHTML = families
-    .map((id) => `<option value="${id}">${escapeHtml(profileName(id))}</option>`)
-    .join("");
+  const wanted = $("rate_region").value;
+  const families = [...new Set(state.rateSets.map((r) => r.rate_set_id))]
+    .sort()
+    .filter((id) => {
+      const region = (newestSummary(id) || {}).region || "";
+      return !wanted || (wanted === "__none__" ? !region : region === wanted);
+    });
+  const groups = new Map();
+  families.forEach((id) => {
+    const newest = newestSummary(id) || {};
+    const key = newest.region ? `Region ${newest.region}` : "No factory stated";
+    if (!groups.has(key)) groups.set(key, []);
+    groups.get(key).push(id);
+  });
+  const option = (id) => {
+    const newest = newestSummary(id) || {};
+    const factory = newest.factory_name ? ` — ${newest.factory_name}` : "";
+    return `<option value="${id}">${escapeHtml(profileName(id) + factory)}</option>`;
+  };
+  $("rate_set_id").innerHTML =
+    groups.size > 1 || [...groups.keys()].some((key) => key !== "No factory stated")
+      ? [...groups.entries()]
+          .map(([key, ids]) => `<optgroup label="${escapeHtml(key)}">${ids.map(option).join("")}</optgroup>`)
+          .join("")
+      : families.map(option).join("");
   if (families.includes(previous)) $("rate_set_id").value = previous;
   await onFamilyChange();
 }
+
+$("rate_region").addEventListener("change", renderFamilyOptions);
 
 // The display name of a profile's newest version — a renamed profile should
 // show its current name, not the one its first version happened to carry.
@@ -640,6 +692,13 @@ function renderRateSetDetail() {
       : `<span class="badge real">Real rates</span>`,
   ];
   $("rate-badges").innerHTML = badges.join("");
+  // The factory the version says it describes, verbatim. A label only.
+  const factory = rateSet.factory;
+  $("rate-factory").classList.toggle("hidden", !factory);
+  $("rate-factory").textContent = factory
+    ? `Factory: ${factory.factory_name} · region ${factory.region}` +
+      (factory.site_notes ? ` — ${factory.site_notes}` : "")
+    : "";
   $("rate-desc").textContent = rateSet.description || "";
 }
 
@@ -813,6 +872,7 @@ $("calculate").addEventListener("click", async () => {
     if (typeof renderCostDriversFor === "function") {
       await renderCostDriversFor(state.result.estimate_id);
     }
+    if (typeof renderCo2eFor === "function") await renderCo2eFor(state.result.estimate_id);
     if (typeof renderImpactAgainstPrevious === "function") {
       await renderImpactAgainstPrevious(state.result.estimate_id);
     }
@@ -1053,6 +1113,10 @@ async function showEstimateDetail(estimateId) {
       <summary>Cost drivers</summary>
       <div id="history-drivers"></div>
     </details>
+    <details class="detail-toggle" id="history-co2e-toggle">
+      <summary>CO2e (illustrative)</summary>
+      <div id="history-co2e"></div>
+    </details>
     <div id="history-actuals"></div>`;
   panel.scrollIntoView({ behavior: "smooth", block: "nearest" });
   // Guarded forward: actuals.js is loaded after this file.
@@ -1061,6 +1125,8 @@ async function showEstimateDetail(estimateId) {
   if (typeof renderCostDriversInto === "function") {
     renderCostDriversInto("history-drivers", estimate.estimate_id);
   }
+  // Guarded forward: co2e.js is loaded after this file.
+  if (typeof renderCo2eInto === "function") renderCo2eInto("history-co2e", estimate.estimate_id);
 }
 
 $("refresh-history").addEventListener("click", loadHistory);

@@ -319,6 +319,26 @@ def _operation_rows(part_cost: dict) -> list[_Row]:
                     _part("Setup", summed("setup_cost")),
                     _part("Machine (run)", summed("machine_cost")),
                     _part("Labour (run)", summed("labor_cost")),
+                    # A per-machine overhead appears only where the estimate
+                    # stored one, as stored: never a part reading 0 for an
+                    # estimate whose rate set stated none.
+                    # An operation of the group without the key charged none.
+                    *(
+                        _part(
+                            label,
+                            float(
+                                sum(
+                                    (_dec(op.get(field)) or Decimal(0) for op in members),
+                                    Decimal(0),
+                                )
+                            ),
+                        )
+                        for field, label in (
+                            ("direct_overhead_cost", "Direct overhead (run)"),
+                            ("indirect_overhead_cost", "Indirect overhead (run)"),
+                        )
+                        if any(field in op for op in members)
+                    ),
                 ],
             )
         )

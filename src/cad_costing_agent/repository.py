@@ -126,6 +126,9 @@ class RateSetRepository:
                 material_count=len((row.rates or {}).get("materials") or {}),
                 process_count=len((row.rates or {}).get("operations") or {}),
                 stage_rate_count=len((row.rates or {}).get("stage_rates") or {}),
+                # --- factory label (Iteration 9): read from the version's own JSON ---
+                region=((row.rates or {}).get("factory") or {}).get("region"),
+                factory_name=((row.rates or {}).get("factory") or {}).get("factory_name"),
             )
             for row in ordered
         ]
@@ -197,6 +200,9 @@ class RateSetRepository:
                 # Only when there are some, so a version without stage rates is
                 # stored exactly as every version before them was.
                 **({"stage_rates": payload["stage_rates"]} if payload["stage_rates"] else {}),
+                # Likewise the factory label: absent from the payload when none
+                # was stated (`exclude_if`), and then absent here too.
+                **({"factory": payload["factory"]} if payload.get("factory") else {}),
             },
         )
         self.session.add(row)
@@ -738,3 +744,123 @@ class CostActualRepository:
 
 def _row_to_actual(row: CostActualRow) -> ActualCostRecord:
     return ActualCostRecord.model_validate(row, from_attributes=True)
+
+
+# --- Iteration 9: emission-factor catalogs (CO2e) ---------------------------
+
+from cad_costing_agent.db_models import EmissionFactorCatalogRow  # noqa: E402
+from cad_costing_agent.emission_factors import (  # noqa: E402
+    EmissionFactorCatalog,
+    EmissionFactorCatalogSummary,
+)
+
+_FACTOR_TABLES = ("materials", "process_electricity", "grid", "stage_factors")
+
+
+class EmissionFactorCatalogRepository:
+    """Reads and inserts emission-factor catalogs. There is no update method."""
+
+    def __init__(self, session: Session) -> None:
+        self.session = session
+
+    @staticmethod
+    def _to_catalog(row: EmissionFactorCatalogRow) -> EmissionFactorCatalog:
+        return EmissionFactorCatalog(
+            emission_catalog_id=row.emission_catalog_id,
+            name=row.name,
+            version=row.version,
+            description=row.description,
+            is_illustrative=row.is_illustrative,
+            **(row.factors or {}),
+        )
+
+    def list(self) -> list[EmissionFactorCatalogSummary]:
+        rows = self.session.execute(select(EmissionFactorCatalogRow)).scalars().all()
+        ordered = sorted(rows, key=lambda row: (row.emission_catalog_id, version_key(row.version)))
+        return [
+            EmissionFactorCatalogSummary(
+                emission_catalog_id=row.emission_catalog_id,
+                name=row.name,
+                version=row.version,
+                description=row.description,
+                is_illustrative=row.is_illustrative,
+                material_count=len((row.factors or {}).get("materials") or {}),
+                process_count=len((row.factors or {}).get("process_electricity") or {}),
+                regions=sorted((row.factors or {}).get("grid") or {}),
+            )
+            for row in ordered
+        ]
+
+    def get(self, emission_catalog_id: str, version: str | None = None) -> EmissionFactorCatalog:
+        rows = (
+            self.session.execute(
+                select(EmissionFactorCatalogRow).where(
+                    EmissionFactorCatalogRow.emission_catalog_id == emission_catalog_id
+                )
+            )
+            .scalars()
+            .all()
+        )
+        if not rows:
+            known = (
+                self.session.execute(
+                    select(EmissionFactorCatalogRow.emission_catalog_id).distinct()
+                )
+                .scalars()
+                .all()
+            )
+            raise ValueError(
+                f"Unknown emission-factor catalog '{emission_catalog_id}'. Known catalogs: "
+                f"{', '.join(sorted(known)) or 'none'}"
+            )
+        if version is None:
+            resolved = max(rows, key=lambda row: version_key(row.version))
+        else:
+            matches = [row for row in rows if row.version == version]
+            if not matches:
+                known_versions = ", ".join(sorted((row.version for row in rows), key=version_key))
+                raise ValueError(
+                    f"Emission-factor catalog '{emission_catalog_id}' has no version "
+                    f"'{version}'. Known versions: {known_versions}"
+                )
+            resolved = matches[0]
+        return self._to_catalog(resolved)
+
+    def exists(self, emission_catalog_id: str, version: str) -> bool:
+        return (
+            self.session.execute(
+                select(EmissionFactorCatalogRow).where(
+                    EmissionFactorCatalogRow.emission_catalog_id == emission_catalog_id,
+                    EmissionFactorCatalogRow.version == version,
+                )
+            ).scalar_one_or_none()
+            is not None
+        )
+
+    def add(self, catalog: EmissionFactorCatalog) -> None:
+        if self.exists(catalog.emission_catalog_id, catalog.version):
+            raise ValueError(
+                f"Emission-factor catalog '{catalog.emission_catalog_id}' version "
+                f"'{catalog.version}' already exists. Catalog versions are immutable — publish "
+                "a new version instead."
+            )
+        payload = catalog.model_dump(mode="json")
+        self.session.add(
+            EmissionFactorCatalogRow(
+                emission_catalog_id=catalog.emission_catalog_id,
+                version=catalog.version,
+                name=catalog.name,
+                description=catalog.description,
+                is_illustrative=catalog.is_illustrative,
+                factors={key: payload[key] for key in _FACTOR_TABLES},
+            )
+        )
+        self.session.flush()
+
+    def seed(self, catalogs: tuple[EmissionFactorCatalog, ...]) -> int:
+        inserted = 0
+        for catalog in catalogs:
+            if not self.exists(catalog.emission_catalog_id, catalog.version):
+                self.add(catalog)
+                inserted += 1
+        return inserted

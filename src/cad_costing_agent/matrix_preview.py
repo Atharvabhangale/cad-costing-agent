@@ -169,6 +169,10 @@ class MatrixRateSet(BaseModel):
     version: str | None = None
     currency: str | None = None
     is_illustrative: bool | None = None
+    # The factory the rate set says it describes, so a grid of factories reads as
+    # one. A label: absent (not null) when the version states none.
+    region: str | None = Field(default=None, exclude_if=lambda value: value is None)
+    factory_name: str | None = Field(default=None, exclude_if=lambda value: value is None)
 
 
 class MatrixRefusal(BaseModel):

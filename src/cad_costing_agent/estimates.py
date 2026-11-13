@@ -565,6 +565,17 @@ def _run_cost(operation: dict) -> float:
     return float(operation.get("machine_cost") or 0.0) + float(operation.get("labor_cost") or 0.0)
 
 
+def _run_overhead(operation: dict) -> float:
+    """A per-machine overhead charged on run time, as stored; 0.0 when none was stated.
+
+    Kept apart from `_run_cost` so a change in a rate set's overhead is named as
+    one rather than blended into the machine and labour rate.
+    """
+    return float(operation.get("direct_overhead_cost") or 0.0) + float(
+        operation.get("indirect_overhead_cost") or 0.0
+    )
+
+
 def _effective_rate(cost: float, minutes: float) -> float:
     """The blended per-hour rate a set of operations actually worked out at."""
     return (cost / (minutes / 60.0)) if minutes else 0.0
@@ -629,6 +640,28 @@ def decompose(
             driver_label="run minutes",
             rate_before=_effective_rate(run_before, minutes_before),
             rate_after=_effective_rate(run_after, minutes_after),
+            driver_before=minutes_before / 60.0,
+            driver_after=minutes_after / 60.0,
+            driver_display=(minutes_before, minutes_after),
+            currency=currency,
+        )
+    )
+
+    # --- a per-machine overhead, per hour of the same run time. Absent on both
+    # --- sides (every estimate before rate sets could state one) it is 0 × hours
+    # --- and contributes nothing.
+    impacts.extend(
+        _two_factor(
+            rate_category="machine_overhead_rate",
+            driver_category="operation_time",
+            rate_label="machine overhead (direct + indirect) rate/hour",
+            driver_label="run minutes",
+            rate_before=_effective_rate(
+                sum(_run_overhead(before_ops[k]) for k in matched), minutes_before
+            ),
+            rate_after=_effective_rate(
+                sum(_run_overhead(after_ops[k]) for k in matched), minutes_after
+            ),
             driver_before=minutes_before / 60.0,
             driver_after=minutes_after / 60.0,
             driver_display=(minutes_before, minutes_after),

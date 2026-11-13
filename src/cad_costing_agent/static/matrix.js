@@ -54,6 +54,7 @@ function renderMatrixPicker() {
           `<span>${escapeHtml(rateSet.name)} <span class="mono">${escapeHtml(rateSet.rate_set_id)} ` +
           `v${escapeHtml(rateSet.version)}</span></span> ` +
           `<span class="badge currency">${escapeHtml(rateSet.currency)}</span>` +
+          (rateSet.region ? ` <span class="badge">${escapeHtml(rateSet.factory_name || "")} · ${escapeHtml(rateSet.region)}</span>` : "") +
           (rateSet.is_illustrative ? ` <span class="badge illustrative">Illustrative</span>` : "") +
           `</label>`
         );
@@ -135,6 +136,10 @@ function matrixRowHeading(rateSet) {
     `<div class="mono">${escapeHtml(rateSet.rate_set_id)} v${escapeHtml(rateSet.version)}` +
     `${rateSet.requested_version ? "" : " (latest)"}</div>` +
     `<span class="badge currency">${escapeHtml(rateSet.currency)}</span>` +
+    // The factory the rate set describes, as it states it: a label, not a conversion.
+    (rateSet.region
+      ? `<div class="hint matrix-factory">Factory: ${escapeHtml(rateSet.factory_name || "—")} · region ${escapeHtml(rateSet.region)}</div>`
+      : `<div class="hint matrix-factory">No factory stated</div>`) +
     (rateSet.is_illustrative ? ` <span class="badge illustrative">Illustrative rates</span>` : "")
   );
 }

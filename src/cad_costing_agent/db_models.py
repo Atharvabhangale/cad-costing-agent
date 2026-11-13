@@ -225,3 +225,29 @@ class CostActualRow(Base):
     drawing_revision: Mapped[str | None] = mapped_column(String(32), nullable=True)
     notes: Mapped[str] = mapped_column(String(2000), default="")
     supersedes_actual_id: Mapped[str | None] = mapped_column(String(32), nullable=True)
+
+
+# --- Iteration 9: emission-factor catalogs (CO2e) ---------------------------
+
+
+class EmissionFactorCatalogRow(Base):
+    """One immutable version of an emission-factor catalog.
+
+    Stored like a DFM profile: identity in indexed columns, the factors and their
+    cited sources in one JSON column. Nothing stored here is money, and nothing
+    here is written against an estimate.
+    """
+
+    __tablename__ = "emission_factor_catalogs"
+    __table_args__ = (
+        UniqueConstraint("emission_catalog_id", "version", name="uq_emission_catalog_identity"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    emission_catalog_id: Mapped[str] = mapped_column(String(64), index=True)
+    version: Mapped[str] = mapped_column(String(32))
+    name: Mapped[str] = mapped_column(String(128))
+    description: Mapped[str] = mapped_column(String(512), default="")
+    is_illustrative: Mapped[bool] = mapped_column(Boolean, default=True)
+    factors: Mapped[dict] = mapped_column(JSON)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=_utc_now)
