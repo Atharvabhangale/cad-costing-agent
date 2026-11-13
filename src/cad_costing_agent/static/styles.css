@@ -830,3 +830,11 @@ table.mini.drivers-table .driver-bar-cell { width: 22%; padding-left: 12px; }
 .driver-bar.driver-bar-recon { background: var(--muted); }
 tr.driver-unrecorded td { color: var(--muted); font-style: italic; }
 .sr-only { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
+
+/* Pull direction card: the axis inputs sit on one wrapping line. */
+.draw-axis-input { display: flex; flex-wrap: wrap; gap: 6px 12px; align-items: center; margin: 6px 0; }
+.draw-axis-input .tiny-input { width: 5.5em; }
+#draw-candidates tr.is-recommended td { font-weight: 600; }
+.dfm-forming { display: inline-flex; gap: 6px; align-items: center; margin: 4px 0 8px; }
+table.draw-table { width: 100%; border-collapse: collapse; margin-top: 6px; font-size: 13px; }
+table.draw-table th, table.draw-table td { text-align: left; padding: 3px 8px 3px 0; border-top: 1px solid var(--line); vertical-align: top; }

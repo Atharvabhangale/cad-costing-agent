@@ -66,12 +66,33 @@
       </details>`;
   }
 
+  // The pull direction the draft and undercut rules read. Nothing here compares it.
+  function dfmDrawMarkup(draw) {
+    if (!draw) return "";
+    if (!draw.measured) {
+      return `<strong>Draft and undercuts not checked.</strong> ${escapeHtml(draw.not_measured_reason || "")}`;
+    }
+    const limits = (draw.limitations || []).map((line) => `<li>${escapeHtml(line)}</li>`).join("");
+    const source = draw.axis_source === "engineer_entered" ? "the axis you entered" : "the recommended axis";
+    return `<strong>Draft and undercuts checked against pull axis ${escapeHtml(draw.pull_axis_label || "")}</strong>
+      <span class="muted">(${escapeHtml(source)}), because the part is formed by ${escapeHtml(draw.forming_process || "")}
+      — ${escapeHtml(draw.forming_process_source || "")}.</span>
+      ${draw.budget_note ? `<div class="warning-inline">${escapeHtml(draw.budget_note)}</div>` : ""}
+      <details class="detail-toggle"><summary>How the pull direction is measured, and what it can miss</summary>
+        <p>${escapeHtml(draw.recommendation_basis || "")}</p>
+        <p>${escapeHtml(draw.method_description || "")} <span class="mono">${escapeHtml(draw.method || "")}</span></p>
+        <ul>${limits}</ul>
+      </details>`;
+  }
+
+  const DFM_COMPARISON_WORDS = { less_than: "below", greater_than: "above", at_least: "at or above" };
+
   function dfmFlagMarkup(flag, index) {
     const faceted = flag.evidence_type === "faceted";
     const source = flag.source_url
       ? `<a href="${escapeHtml(flag.source_url)}" target="_blank" rel="noopener">${escapeHtml(flag.source_title || flag.source_url)}</a>`
       : `<span class="muted">No published source found — illustrative threshold</span>`;
-    const comparison = flag.comparison === "less_than" ? "below" : "above";
+    const comparison = DFM_COMPARISON_WORDS[flag.comparison] || flag.comparison;
     const { drawable, undrawable, markers } = dfmFeaturesOf(flag);
     const markable = drawable.length || markers.length;
     const button = markable
@@ -178,6 +199,8 @@
     $("dfm-disclaimer").textContent = report.disclaimer;
     $("dfm-wall").innerHTML = dfmWallMarkup(report.wall);
     $("dfm-wall").classList.toggle("hidden", !report.wall);
+    $("dfm-draw").innerHTML = dfmDrawMarkup(report.draw);
+    $("dfm-draw").classList.toggle("hidden", !report.draw);
     list.innerHTML = report.flags.map(dfmFlagMarkup).join("");
     list.classList.toggle("hidden", !report.flags.length);
     $("dfm-marking").classList.toggle("hidden", !report.flags.length);
@@ -205,6 +228,8 @@
     $("dfm-flags").innerHTML = "";
     $("dfm-wall").innerHTML = "";
     $("dfm-wall").classList.add("hidden");
+    $("dfm-draw").innerHTML = "";
+    $("dfm-draw").classList.add("hidden");
     $("dfm-marked").textContent = "";
     $("dfm-marking").classList.add("hidden");
     $("dfm-clear-marks").disabled = true;
@@ -266,6 +291,18 @@
     $("dfm-status").textContent = "Checking features against the thresholds…";
     const body = new FormData();
     body.append("file", state.file);
+    // Draft and undercuts are checked only for a stated forming process: the one
+    // chosen here, or a decided route the server reads from the classification.
+    const forming = $("dfm-forming-process").value;
+    if (forming) body.append("forming_process", forming);
+    if (state.processClassification) {
+      body.append("process_classification", JSON.stringify(state.processClassification));
+    }
+    // The engineer's pull axis from the pull-direction card, sent as typed.
+    const axis = ["draw-axis-x", "draw-axis-y", "draw-axis-z"].map((id) => $(id).value.trim());
+    if (axis.some((value) => value !== "")) {
+      body.append("pull_axis", JSON.stringify(axis.map((value) => (value === "" ? null : Number(value)))));
+    }
     let report;
     try {
       report = await api("/cad/dfm", { method: "POST", body });

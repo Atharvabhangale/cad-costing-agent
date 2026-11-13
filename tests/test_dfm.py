@@ -203,6 +203,8 @@ def test_the_summary_says_exceeded_and_never_calls_an_unmeasured_part_clean():
         "Small internal radii",
         "Many different hole sizes",
         "Thin walls",
+        "Low draft (cast, moulded or forged parts)",
+        "Undercuts (cast, moulded or forged parts)",
     }
 
 
@@ -237,6 +239,7 @@ def test_profiles_are_listed_and_fetchable_with_sources():
     assert [(p["dfm_profile_id"], p["version"]) for p in listing] == [
         (DEFAULT_DFM_PROFILE_ID, "1.0.0"),
         (DEFAULT_DFM_PROFILE_ID, "1.1.0"),
+        (DEFAULT_DFM_PROFILE_ID, "1.2.0"),
     ]
     detail = client.get(f"/dfm-profiles/{DEFAULT_DFM_PROFILE_ID}").json()
     assert all(r["source_url"] for r in detail["rules"] if r["basis"] == BASIS_PUBLISHED)
@@ -247,12 +250,12 @@ def test_a_new_version_changes_the_flags_and_the_old_version_is_untouched():
     data = _deep_hole_plate()
     assert _dfm(data).json()["flags"]  # ratio 5 > 4 under 1.0.0
 
-    # 1.1.0 is seeded (it adds the minimum-wall rule), so the shop's version is 1.2.0.
-    created = client.post(f"/dfm-profiles/{DEFAULT_DFM_PROFILE_ID}/versions", json=_new_version("1.2.0", 6.0))
+    # 1.1.0 (minimum wall) and 1.2.0 (draft, undercuts) are seeded, so the shop's version is 1.3.0.
+    created = client.post(f"/dfm-profiles/{DEFAULT_DFM_PROFILE_ID}/versions", json=_new_version("1.3.0", 6.0))
     assert created.status_code == 201
 
     latest = _dfm(data).json()  # no version -> latest
-    assert latest["dfm_profile_version"] == "1.2.0"
+    assert latest["dfm_profile_version"] == "1.3.0"
     assert not [f for f in latest["flags"] if f["rule_id"] == "dfm_deep_hole"]
 
     pinned = _dfm(data, dfm_profile_version="1.0.0").json()
@@ -302,7 +305,10 @@ def test_running_dfm_and_publishing_a_profile_change_no_cost_and_store_no_estima
     total_before = client.get("/estimates").json()["total"]
 
     assert _dfm(data).json()["flags"]
-    client.post(f"/dfm-profiles/{DEFAULT_DFM_PROFILE_ID}/versions", json=_new_version("1.2.0", 1.0))
+    # 1.2.0 is seeded, so the next version a shop can publish is 1.3.0.
+    assert client.post(
+        f"/dfm-profiles/{DEFAULT_DFM_PROFILE_ID}/versions", json=_new_version("1.3.0", 1.0)
+    ).status_code == 201
     assert _dfm(data).json()["flags"]
 
     after = _cost(data)

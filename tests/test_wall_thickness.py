@@ -220,11 +220,15 @@ def test_over_budget_degrades_only_the_wall_analysis(monkeypatch):
     body = response.json()
     assert body["measured"] is False and body["budget_limited"] is True
 
-    report = _dfm(data).json()
+    # Pinned to 1.1.0: 1.2.0's draft and undercut rules are not evaluated without a stated
+    # forming process, which is a different reason from the one this test is about.
+    report = _dfm(data, dfm_profile_version="1.1.0").json()
     rules = {rule["rule_id"]: rule for rule in report["rules"]}
     assert rules["dfm_min_wall"]["evaluated"] is False
     assert "CAD_COSTING_MAX_WALL_RAYS" in rules["dfm_min_wall"]["skipped_reason"]
-    assert all(rules[r]["evaluated"] for r in rules if r != "dfm_min_wall")
+    absent_from_1_1_0 = ("dfm_min_draft", "dfm_undercut")
+    assert all("sets no threshold" in rules[r]["skipped_reason"] for r in absent_from_1_1_0)
+    assert all(rules[r]["evaluated"] for r in rules if r not in ("dfm_min_wall", *absent_from_1_1_0))
     assert not [f for f in report["flags"] if f["rule_id"] == "dfm_min_wall"]
 
     # The estimate is untouched: the costing path never measures walls.
@@ -314,7 +318,8 @@ def test_a_thin_rib_raises_one_minimum_wall_flag_with_its_measured_location():
     builder, _ = WALL_FIXTURES["thin_rib_part"]
     data = builder()
     body = _dfm(data).json()
-    assert body["dfm_profile_version"] == "1.1.0"
+    # The latest seeded version, 1.2.0, carries 1.1.0's minimum-wall rule unchanged.
+    assert body["dfm_profile_version"] == "1.2.0"
     (flag,) = _wall_flags(body)
     assert flag["measured_value"] == pytest.approx(0.6, abs=EXACT)
     assert flag["measured_unit"] == "mm" and flag["comparison"] == "less_than"
@@ -409,7 +414,7 @@ def test_a_wall_flag_is_listed_beside_feature_flags_without_touching_flagged_fea
 
 
 def test_1_0_0_is_unchanged_and_1_1_0_adds_only_the_wall_rule():
-    first, second = SEED_DFM_PROFILES
+    first, second = SEED_DFM_PROFILES[:2]
     assert (first.version, second.version) == ("1.0.0", "1.1.0")
     assert [r.rule_id for r in first.rules] == [
         RuleId.DEEP_HOLE,
@@ -455,14 +460,17 @@ def test_a_fresh_database_and_one_seeded_before_1_1_0_end_up_identical():
     db_module.init_db(existing)
     after = _profiles(existing)
     assert after == _profiles(fresh)
-    assert [row[1] for row in after] == ["1.0.0", "1.1.0"]
+    assert [row[1] for row in after] == ["1.0.0", "1.1.0", "1.2.0"]
     # The stored 1.0.0 row is the one seeded before; nothing rewrote it.
     assert after[0] == before[0]
 
 
 def test_the_latest_default_profile_is_1_1_0_and_1_0_0_stays_fetchable():
     latest = client.get(f"/dfm-profiles/{DEFAULT_DFM_PROFILE_ID}").json()
-    assert latest["version"] == "1.1.0"
+    # 1.2.0 (draft and undercuts) is now the latest; 1.1.0 stays fetchable and unchanged.
+    assert latest["version"] == "1.2.0"
+    pinned = client.get(f"/dfm-profiles/{DEFAULT_DFM_PROFILE_ID}", params={"version": "1.1.0"}).json()
+    assert [r["rule_id"] for r in pinned["rules"]][-1] == "dfm_min_wall"
     old = client.get(f"/dfm-profiles/{DEFAULT_DFM_PROFILE_ID}", params={"version": "1.0.0"}).json()
     assert "dfm_min_wall" not in {r["rule_id"] for r in old["rules"]}
 
