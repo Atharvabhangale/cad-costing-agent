@@ -325,7 +325,7 @@ def _operation_rows(part_cost: dict) -> list[_Row]:
     return rows
 
 
-def _part_breakdown(estimate_id: str, result: dict) -> CostDriverBreakdown:
+def _part_breakdown(estimate_id: str, result: dict, request: dict | None = None) -> CostDriverBreakdown:
     part_cost = _part_cost_of(result)
     total = _dec(part_cost.get("total_part_cost"))
     material = part_cost.get("material") if isinstance(part_cost.get("material"), dict) else {}
@@ -348,6 +348,16 @@ def _part_breakdown(estimate_id: str, result: dict) -> CostDriverBreakdown:
     if result.get("material_basis") == "bar_stock":
         material_note = (
             "Costed from the confirmed bar stock, not the finished part's own mass. "
+            + material_note
+        ).strip()
+    elif result.get("material_basis") == "sheet_stock":
+        sheet = (request or {}).get("sheet_stock")
+        described = sheet.get("description") if isinstance(sheet, dict) else None
+        material_note = (
+            "Costed from the confirmed sheet share"
+            + (f" ({described})" if described else "")
+            + " — the sheet's mass over the parts nested on it, a bounding-rectangle grid "
+            "estimate — not the finished part's own mass. "
             + material_note
         ).strip()
     if part_cost.get("total_material_cost") is None:
@@ -526,13 +536,20 @@ def _assembly_breakdown(estimate_id: str, result: dict) -> CostDriverBreakdown:
 # --------------------------------------------------------------------- entry
 
 
-def cost_drivers(estimate_id: str, result_snapshot: dict | None) -> CostDriverBreakdown:
-    """The driver table of one stored estimate, from its result snapshot alone."""
+def cost_drivers(
+    estimate_id: str, result_snapshot: dict | None, request_snapshot: dict | None = None
+) -> CostDriverBreakdown:
+    """The driver table of one stored estimate, from its result snapshot.
+
+    The request snapshot is read for one thing only: the name of the confirmed
+    stock a part's material was costed from, for the material line's note.
+    """
     result = result_snapshot if isinstance(result_snapshot, dict) else {}
+    request = request_snapshot if isinstance(request_snapshot, dict) else {}
     if "assembly_name" in result:
         return _assembly_breakdown(estimate_id, result)
     if _part_cost_of(result):
-        return _part_breakdown(estimate_id, result)
+        return _part_breakdown(estimate_id, result, request)
     return CostDriverBreakdown(
         estimate_id=estimate_id,
         estimate_kind=UNKNOWN,

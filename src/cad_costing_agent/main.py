@@ -134,7 +134,14 @@ from cad_costing_agent.operation_suggestions import (
     UserAction,
     suggest_operations,
 )
-from cad_costing_agent.raw_stock import BarStock, propose_bar_stock, record_stock_decision
+from cad_costing_agent.raw_stock import (
+    BAR_STOCK_BASIS,
+    SHEET_STOCK_BASIS,
+    BarStock,
+    SheetStock,
+    propose_bar_stock,
+    record_stock_decision,
+)
 from cad_costing_agent.stage_costing import (
     MATERIAL_SUPPLYING_STAGES,
     StageInput,
@@ -3162,6 +3169,7 @@ class PricedCadPart:
     additional_costs: "AdditionalCostInputs | None"
     resolved_rate_set: "RateSet | None"
     result: CadPartCostEstimateResult
+    sheet_stock: "SheetStock | None" = None
 
 
 def price_cad_part(
@@ -3187,6 +3195,7 @@ def price_cad_part(
     raw_stock: str | None = None,
     process_classification: str | None = None,
     stage_inputs: str | None = None,
+    sheet_stock: str | None = None,
 ) -> PricedCadPart:
     """Price one CAD part exactly as `/cost/cad-part` does, without storing it.
 
@@ -3354,6 +3363,10 @@ def price_cad_part(
                     f"The confirmed bar (Ø{stock.diameter_mm:g} × {stock.length_mm:g} mm) is "
                     "smaller than the part, so material cannot be costed from it."
                 )
+        # A sheet share likewise counts only once confirmed, and is re-measured
+        # from this file before it does (see the sheet stock section).
+        sheet = _sheet_stock_for_costing(data, filename, sheet_stock, stock)
+        stock_basis = sheet if sheet is not None and sheet.confirmed else stock
 
         # Supplying any additional-cost field replaces the rate set's additional
         # costs wholesale; supplying none leaves them to the rate set.
@@ -3462,10 +3475,15 @@ def price_cad_part(
             rate_set_version=rate_set_version,
             rate_set=resolved_rate_set,
             material_stock_volume_mm3=(
-                stock.volume_mm3 if stock is not None and stock.confirmed else None
+                stock_basis.volume_mm3
+                if stock_basis is not None and stock_basis.confirmed
+                else None
             ),
             stage_costs=stage_lines,
             material_supplied_by=material_supplied_by,
+            material_stock_basis=(
+                SHEET_STOCK_BASIS if stock_basis is sheet and sheet is not None else BAR_STOCK_BASIS
+            ),
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -3483,6 +3501,7 @@ def price_cad_part(
         additional_costs=additional_costs,
         resolved_rate_set=resolved_rate_set,
         result=result,
+        sheet_stock=sheet,
     )
 
 
@@ -3574,6 +3593,16 @@ async def cost_cad_part(
             "charged. There is no default tool life; absent, the whole charge falls on this batch."
         ),
     ),
+    sheet_stock: str | None = Form(
+        None,
+        description=(
+            "Optional JSON-encoded SheetStock from /cad/sheet-stock/propose, carrying any decision "
+            "from /cad/sheet-stock/decide. When confirmed, the part is re-measured as sheet metal "
+            "and material is costed from its share of the sheet (thickness x sheet area / parts "
+            "per sheet) instead of the finished part; unconfirmed, it is recorded and changes "
+            "nothing. Refused alongside a confirmed bar."
+        ),
+    ),
     session: Session = Depends(get_session),
 ) -> CadPartCostEstimateResult:
     """CAD-driven part cost estimate: geometry -> mass -> existing part costing.
@@ -3603,6 +3632,7 @@ async def cost_cad_part(
         raw_stock=raw_stock,
         process_classification=process_classification,
         stage_inputs=stage_inputs,
+        sheet_stock=sheet_stock,
     )
     geometry = priced.geometry
     operations_data = priced.operations_data
@@ -3672,6 +3702,12 @@ async def cost_cad_part(
             ),
             # The proposed bar and the engineer's answer, only when one was sent.
             **({"raw_stock": stock.model_dump(mode="json")} if stock is not None else {}),
+            # The sheet share and the engineer's answer, only when one was sent.
+            **(
+                {"sheet_stock": priced.sheet_stock.model_dump(mode="json")}
+                if priced.sheet_stock is not None
+                else {}
+            ),
             # The masses a person entered for per-kg stages, as sent.
             **({"stage_inputs": stage_input_values} if stage_inputs is not None else {}),
         },
@@ -3792,6 +3828,7 @@ async def compare_routes(
     geometry_completion_volume_mm3: float | None = Form(None),
     manufacturing_plan: str | None = Form(None),
     raw_stock: str | None = Form(None),
+    sheet_stock: str | None = Form(None),
     stage_inputs: str | None = Form(None),
     session: Session = Depends(get_session),
 ) -> RouteComparison:
@@ -3862,6 +3899,7 @@ async def compare_routes(
                 geometry_completion_volume_mm3=geometry_completion_volume_mm3,
                 manufacturing_plan=manufacturing_plan,
                 raw_stock=raw_stock,
+                sheet_stock=sheet_stock,
                 process_classification=decided.model_dump_json(),
                 stage_inputs=stage_inputs,
             )
@@ -4303,6 +4341,7 @@ def cost_matrix_preview(
     geometry_completion_volume_mm3: float | None = Form(None),
     manufacturing_plan: str | None = Form(None),
     raw_stock: str | None = Form(None),
+    sheet_stock: str | None = Form(None),
     process_classification: str | None = Form(None),
     stage_inputs: str | None = Form(None),
     session: Session = Depends(get_session),
@@ -4350,6 +4389,7 @@ def cost_matrix_preview(
                     geometry_completion_volume_mm3=geometry_completion_volume_mm3,
                     manufacturing_plan=manufacturing_plan,
                     raw_stock=raw_stock,
+                    sheet_stock=sheet_stock,
                     process_classification=process_classification,
                     stage_inputs=stage_inputs,
                 )
@@ -4517,7 +4557,9 @@ def estimate_cost_drivers(
         stored = EstimateRepository(session).get(estimate_id)
     except ValueError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
-    return cost_drivers.cost_drivers(stored.estimate_id, stored.result_snapshot)
+    return cost_drivers.cost_drivers(
+        stored.estimate_id, stored.result_snapshot, request_snapshot=stored.request_snapshot
+    )
 
 
 # ------------------------------------------------------------- wall thickness
@@ -4854,3 +4896,154 @@ def operations_sheet_metal_lines(
         return sheet_plan_lines(request.analysis, profile=profile)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+# ----------------------------------------------------------------- sheet stock
+#
+# A sheet part's material as its share of the sheet it is nested on: proposed
+# from a rectangular grid nest of the measured flat blank on the engineer's
+# sheet, confirmed (or given the engineer's own parts per sheet) by a person,
+# and only then used for material — exactly as a turned part's bar is. The
+# nest is `sheet_nesting`; the proposal and decision are `raw_stock`'s second
+# kind of stock. Nothing here is stored: the stock travels with the cost
+# request and is recorded on the estimate it produced.
+
+from cad_costing_agent.raw_stock import (  # noqa: E402
+    propose_sheet_stock,
+    record_sheet_stock_decision,
+)
+from cad_costing_agent.sheet_nesting import SheetSize  # noqa: E402
+
+_SHEET_INPUTS = ("sheet_length_mm", "sheet_width_mm", "spacing_mm", "edge_margin_mm")
+
+
+class SheetStockProposalRequest(BaseModel):
+    analysis: SheetMetalAnalysis = Field(
+        description="The /cad/sheet-metal measurement, as returned, with a K-factor entered."
+    )
+    sheet_length_mm: float | None = Field(default=None, description="The sheet the shop buys.")
+    sheet_width_mm: float | None = None
+    spacing_mm: float | None = Field(
+        default=None, description="Between neighbouring blanks; 0 is allowed, absent is not."
+    )
+    edge_margin_mm: float | None = Field(
+        default=None, description="Kept clear at each sheet edge; 0 is allowed, absent is not."
+    )
+
+
+@app.post("/cad/sheet-stock/propose", response_model=SheetStock)
+def propose_sheet_stock_endpoint(request: SheetStockProposalRequest) -> SheetStock:
+    """Nest the measured flat blank on the engineer's sheet and propose its share as material.
+
+    A bounding-rectangle grid in both orientations; the one with more parts per
+    sheet is the estimate's choice. Sheet size, spacing and margin have no
+    default: any not entered is answered `422 needs_sheet_input`. A part that is
+    not a sheet, one with no flat pattern, or a blank that fits neither way is
+    refused with the reason (400). The proposal is unconfirmed and changes no
+    cost; nothing is stored.
+    """
+    missing = [name for name in _SHEET_INPUTS if getattr(request, name) is None]
+    if missing:
+        raise HTTPException(
+            status_code=422,
+            detail={
+                "error": "needs_sheet_input",
+                "message": (
+                    "Enter the sheet size, the part-to-part spacing and the edge margin — none "
+                    "is assumed. Missing: " + ", ".join(missing) + "."
+                ),
+                "needs_input": missing,
+            },
+        )
+    try:
+        sheet = SheetSize(**{name: getattr(request, name) for name in _SHEET_INPUTS})
+    except ValidationError as exc:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "The sheet length and width must be positive, and the spacing and edge margin "
+                f"zero or more, in millimetres: {exc.errors()[0]['msg']}"
+            ),
+        ) from exc
+    try:
+        return propose_sheet_stock(request.analysis, sheet)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+class SheetStockDecisionRequest(BaseModel):
+    stock: SheetStock
+    action: str = Field(description="'confirm', 'edit' (with parts_per_sheet) or 'withdraw'.")
+    parts_per_sheet: float | None = Field(
+        default=None, description="With 'edit': the parts per sheet from your own nest."
+    )
+
+
+@app.post("/cad/sheet-stock/decide", response_model=SheetStock)
+def decide_sheet_stock(request: SheetStockDecisionRequest) -> SheetStock:
+    """Confirm the estimated nest, enter your own parts per sheet, or withdraw.
+
+    Persists nothing on its own; the nest itself is never changed.
+    """
+    try:
+        return record_sheet_stock_decision(
+            request.stock, request.action, parts_per_sheet=request.parts_per_sheet
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+def _sheet_stock_for_costing(
+    data: bytes, filename: str, sheet_stock: str | None, bar: BarStock | None
+) -> SheetStock | None:
+    """The sheet share `price_cad_part` may cost material from, checked against the file.
+
+    Unconfirmed, it is returned as sent: recorded, and it changes nothing. A
+    confirmed one is refused beside a confirmed bar (one part, one stock), and
+    is otherwise rebuilt from this file's own sheet measurement and the sheet
+    the engineer entered: a part `/cad/sheet-metal` does not call a sheet is
+    refused, and a share proposed for a different blank or sheet is refused as
+    stale rather than costed. Raises ValueError, which the pricing path answers
+    with 400.
+    """
+    if sheet_stock is None:
+        return None
+    try:
+        sent = SheetStock.model_validate_json(sheet_stock)
+    except ValidationError as exc:
+        raise ValueError(f"'sheet_stock' is not valid: {exc}") from exc
+    if not sent.confirmed:
+        return sent
+    if bar is not None and bar.confirmed:
+        raise ValueError(
+            "Both a bar and a sheet share were confirmed as this part's stock. A part is cut "
+            "from one stock: withdraw one of them."
+        )
+    try:
+        analysis = analyse_sheet_metal_from_bytes(
+            data, filename, k_factor=sent.k_factor, sheet_excluders=sheet_excluding_features
+        )
+    except ValueError:
+        raise
+    except Exception as exc:  # noqa: BLE001 - reported as a refusal, not a crash
+        raise ValueError(
+            f"The part could not be measured as sheet metal ({type(exc).__name__}), so "
+            "material cannot be costed from a sheet share."
+        ) from exc
+    rebuilt = propose_sheet_stock(analysis, sent.nest.sheet)
+    if rebuilt.nest != sent.nest or rebuilt.thickness_mm != sent.thickness_mm:
+        raise ValueError(
+            "The confirmed sheet share was proposed for a different blank or sheet than this "
+            f"file measures ({rebuilt.description} from this file, against "
+            f"{sent.description} sent). Propose and confirm it again."
+        )
+    decided = rebuilt.model_copy(
+        update={"confirmed": True, "user_parts_per_sheet": sent.user_parts_per_sheet}
+    )
+    if not decided.fits_sheet:
+        raise ValueError(
+            f"{decided.parts_per_sheet} blanks need more than the sheet "
+            f"({decided.utilisation_percent:.1f}% utilisation), so material cannot be costed "
+            "from that share."
+        )
+    return decided

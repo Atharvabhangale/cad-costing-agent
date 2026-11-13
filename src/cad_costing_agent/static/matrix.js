@@ -110,6 +110,7 @@ function matrixBody() {
     body.append("process_classification", JSON.stringify(state.processClassification));
   }
   if (state.rawStock) body.append("raw_stock", JSON.stringify(state.rawStock));
+  if (state.sheetStock) body.append("sheet_stock", JSON.stringify(state.sheetStock));
   if (state.stageInputs && Object.keys(state.stageInputs).length) {
     body.append("stage_inputs", JSON.stringify(state.stageInputs));
   }
