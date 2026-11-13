@@ -188,8 +188,9 @@ def sheet_plan_lines(
     warnings = [
         "These lines are proposals: their times are estimates and are not committed until you "
         "accept them or enter your own.",
-        "Material is still costed from the finished part's CAD mass; the flat blank's area is "
-        "reported but not charged, and no nesting or sheet utilisation is estimated.",
+        "Material is costed from the finished part's CAD mass unless a sheet share — the "
+        "blank nested on your sheet — is confirmed in the sheet card; these lines do not change "
+        "that.",
     ]
     if flat is None:
         warnings.append(

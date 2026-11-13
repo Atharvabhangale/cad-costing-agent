@@ -99,7 +99,7 @@ function assumptionGroups(a) {
     // Named beside the part's own mass, never in its place.
     row(
       "Costed from",
-      a.material_basis === "bar_stock" && a.stock_mass_kg != null
+      (a.material_basis === "bar_stock" || a.material_basis === "sheet_stock") && a.stock_mass_kg != null
         ? `${a.stock_description || "the stock it is cut from"} — ${number(a.stock_mass_kg, 4)} kg per part`
         : null
     ),

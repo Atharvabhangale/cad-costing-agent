@@ -40,6 +40,115 @@
     $("sheet-result").innerHTML = "";
     $("sheet-checks").innerHTML = "";
     $("sheet-add-lines").disabled = true;
+    sheetStockClear();
+    $("sheet-stock-block").classList.add("hidden");
+  }
+
+  // ---------------------------------------------------------------- sheet share
+  //
+  // The flat blank nested on the engineer's sheet. `/cad/sheet-stock/propose`
+  // works out the nest, both orientations and the utilisation; this code shows
+  // them as returned. The share is kept in `state.sheetStock` and sent with the
+  // cost request; the backend costs material from it only once it is confirmed
+  // through `/cad/sheet-stock/decide`, and re-measures the part before it does.
+
+  function sheetStockClear() {
+    state.sheetStock = null;
+    $("sheet-nest").innerHTML = "";
+    $("sheet-stock-confirm").disabled = true;
+    $("sheet-stock-use").disabled = true;
+    $("sheet-stock-withdraw").disabled = true;
+  }
+
+  function sheetStockRender(stock) {
+    state.sheetStock = stock || null;
+    if (!stock) {
+      sheetStockClear();
+      return;
+    }
+    const nest = stock.nest;
+    const status = stock.confirmed
+      ? stock.source === "user"
+        ? `<span class="pill pill-ok">Your count — material costed from the sheet share</span>`
+        : `<span class="pill pill-ok">Confirmed — material costed from the sheet share</span>`
+      : `<span class="pill pill-off">Proposed — not used until confirmed</span>`;
+    const rows = nest.orientations
+      .map(
+        (o) =>
+          `<tr><td>${escapeHtml(o.label)}${o.orientation === nest.chosen_orientation
+            ? ` <span class="muted">— the estimate's choice</span>` : ""}</td>` +
+          `<td>${o.count_along} along × ${o.count_across} across</td>` +
+          `<td><strong>${o.parts_per_sheet}</strong></td></tr>`
+      )
+      .join("");
+    $("sheet-nest").innerHTML =
+      `<p><strong>${escapeHtml(stock.description)}</strong> ${status}</p>` +
+      `<table class="mini" style="width:auto"><thead><tr><th>Orientation</th><th>Grid</th>` +
+      `<th>Parts per sheet</th></tr></thead><tbody>${rows}</tbody></table>` +
+      `<p class="hint">Material per part ${number(stock.volume_mm3, 0)} mm³ — the sheet's volume ` +
+      `shared by the ${stock.parts_per_sheet} parts on it` +
+      (stock.source === "user"
+        ? ` · the estimate was ${stock.system_parts_per_sheet} per sheet, ` +
+          `${number(nest.utilisation_percent, 1)}% utilisation`
+        : "") +
+      `. ${escapeHtml(nest.choice_note)}</p>` +
+      (stock.confirmed
+        ? ""
+        : `<p class="hint">Until you confirm it, material is costed from the finished part's mass,
+            as before — which leaves out the spacing, the margins and the skeleton.</p>`) +
+      `<ul class="declined-list">${nest.limitations.map((l) => `<li>${escapeHtml(l)}</li>`).join("")}</ul>` +
+      `<details class="detail-toggle"><summary>How the nest was counted</summary>` +
+      `<ul class="declined-list">${stock.basis.map((l) => `<li>${escapeHtml(l)}</li>`).join("")}</ul></details>`;
+    $("sheet-parts").value = stock.parts_per_sheet;
+    $("sheet-stock-confirm").disabled = stock.confirmed && stock.source === "system";
+    $("sheet-stock-use").disabled = false;
+    $("sheet-stock-withdraw").disabled = !stock.confirmed;
+  }
+
+  function sheetInput(id) {
+    const raw = $(id).value.trim();
+    return raw === "" ? null : Number(raw);
+  }
+
+  async function sheetNestRun() {
+    if (!sheet.analysis || !sheet.analysis.flat_pattern) return;
+    clearError();
+    try {
+      sheetStockRender(
+        await api("/cad/sheet-stock/propose", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          // A blank field is sent as null: the server then asks for it rather
+          // than assuming a sheet, a spacing or a margin.
+          body: JSON.stringify({
+            analysis: sheet.analysis,
+            sheet_length_mm: sheetInput("sheet-length"),
+            sheet_width_mm: sheetInput("sheet-width"),
+            spacing_mm: sheetInput("sheet-spacing"),
+            edge_margin_mm: sheetInput("sheet-margin"),
+          }),
+        })
+      );
+    } catch (error) {
+      sheetStockClear();
+      showError(error.message);
+    }
+  }
+
+  async function sheetStockDecide(action, extra) {
+    if (!state.sheetStock) return;
+    clearError();
+    try {
+      sheetStockRender(
+        await api("/cad/sheet-stock/decide", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ stock: state.sheetStock, action, ...(extra || {}) }),
+        })
+      );
+    } catch (error) {
+      showError(error.message);
+    }
   }
 
   function sheetRender(a) {
@@ -99,6 +208,9 @@
         ? "Measured from the exact B-Rep. Adding the lines proposes them with estimated times; nothing is committed until you accept a time."
         : "";
     $("sheet-add-lines").disabled = a.status !== "sheet";
+    // A new measurement is a new blank: an earlier nest no longer describes it.
+    sheetStockClear();
+    $("sheet-stock-block").classList.toggle("hidden", !a.flat_pattern);
   }
 
   async function sheetMeasure() {
@@ -168,6 +280,12 @@
 
   $("sheet-measure").addEventListener("click", sheetMeasure);
   $("sheet-add-lines").addEventListener("click", sheetAddLines);
+  $("sheet-nest-run").addEventListener("click", sheetNestRun);
+  $("sheet-stock-confirm").addEventListener("click", () => sheetStockDecide("confirm"));
+  $("sheet-stock-withdraw").addEventListener("click", () => sheetStockDecide("withdraw"));
+  $("sheet-stock-use").addEventListener("click", () =>
+    sheetStockDecide("edit", { parts_per_sheet: sheetInput("sheet-parts") })
+  );
   // The route stage rows' "+ Add from flat pattern" buttons are drawn by plan.js.
   document.addEventListener("click", (event) => {
     if (event.target.closest("button.add-sheet-lines")) sheetAddLines();

@@ -19,9 +19,15 @@ The engineer can confirm the proposed bar or enter the bar they actually use.
 part's mass as it always was. The proposal never overwrites itself with the
 engineer's answer; both are kept, as everywhere else in this codebase.
 
-This module imports nothing but the feature models. It computes a bar's
-volume, never its mass or its price: density and price per kilogram stay with
-the material in the rate set, and `/cost/cad-part` hands the costing a volume.
+A sheet part is the second kind of stock (`SheetStock`, below): its material
+is its share of the sheet it is nested on. The same contract holds — the
+system proposes (a grid nest from `sheet_nesting`), the engineer confirms it or
+enters their own parts per sheet beside it, and nothing changes until they do.
+
+This module imports nothing but the feature models and the nest arithmetic.
+It computes a stock's volume, never its mass or its price: density and price
+per kilogram stay with the material in the rate set, and `/cost/cad-part`
+hands the costing a volume.
 """
 
 from __future__ import annotations
@@ -32,8 +38,15 @@ from pydantic import BaseModel, ConfigDict, Field, computed_field
 
 from cad_costing_agent.features.model import Feature
 from cad_costing_agent.features.rotational import rotational_form
+from cad_costing_agent.features.sheet_metal import SheetMetalAnalysis
+from cad_costing_agent.sheet_nesting import SheetNest, SheetSize, nest_blank, utilisation_percent
 
 ROUND_BAR = "round_bar"
+SHEET = "sheet"
+
+# What `CadPartCostEstimateResult.material_basis` says for each kind of stock.
+BAR_STOCK_BASIS = "bar_stock"
+SHEET_STOCK_BASIS = "sheet_stock"
 
 
 class BarStockRule(BaseModel):
@@ -173,11 +186,177 @@ def record_stock_decision(
     raise ValueError(f"Unknown stock action '{action}'. Use 'confirm', 'edit' or 'withdraw'.")
 
 
+# ------------------------------------------------------------------------- sheet
+
+
+def _mm(value: float) -> str:
+    """A thickness as a sheet is named: 2.0 mm, 1.5 mm, 0.75 mm."""
+    return f"{value:.1f}" if round(value, 1) == value else f"{value:g}"
+
+
+class SheetStock(BaseModel):
+    """A sheet part's share of the sheet it is nested on, proposed, and the engineer's answer.
+
+    The share is the sheet's volume divided by the parts on it, so each part
+    carries an equal part of the spacing, the margins and the skeleton. The
+    blank's own area is never what is charged.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    shape: str = SHEET
+    thickness_mm: float = Field(gt=0, description="The sheet's thickness: the part's measured one.")
+    k_factor: float = Field(
+        description="The K-factor the flat pattern, and so the blank, was unfolded for."
+    )
+    nest: SheetNest
+    basis: list[str] = Field(default_factory=list)
+
+    # The engineer's answer. `confirmed` is what makes the sheet count at all.
+    confirmed: bool = False
+    user_parts_per_sheet: int | None = Field(
+        default=None,
+        ge=1,
+        description="Parts per sheet from the engineer's own nest, kept beside the estimate's.",
+    )
+
+    @computed_field
+    @property
+    def system_parts_per_sheet(self) -> int:
+        return self.nest.parts_per_sheet
+
+    @computed_field
+    @property
+    def parts_per_sheet(self) -> int:
+        if self.user_parts_per_sheet is not None:
+            return self.user_parts_per_sheet
+        return self.nest.parts_per_sheet
+
+    @computed_field
+    @property
+    def utilisation_percent(self) -> float:
+        return utilisation_percent(
+            self.nest.blank_net_area_mm2, self.parts_per_sheet, self.nest.sheet.area_mm2
+        )
+
+    @computed_field
+    @property
+    def volume_mm3(self) -> float:
+        """The material one part consumes: sheet thickness x sheet area / parts per sheet."""
+        return round(self.thickness_mm * self.nest.sheet.area_mm2 / self.parts_per_sheet, 3)
+
+    @computed_field
+    @property
+    def source(self) -> str:
+        """'system' while the estimate's nest stands, 'user' once parts per sheet were entered."""
+        return "user" if self.user_parts_per_sheet is not None else "system"
+
+    @computed_field
+    @property
+    def fits_sheet(self) -> bool:
+        """Whether that many blanks' net area fits the sheet at all. More cannot be costed."""
+        return self.utilisation_percent <= 100.0
+
+    @computed_field
+    @property
+    def description(self) -> str:
+        sheet = self.nest.sheet
+        return (
+            f"{_mm(self.thickness_mm)} mm sheet {sheet.sheet_length_mm:g} × "
+            f"{sheet.sheet_width_mm:g}, {self.parts_per_sheet} per sheet"
+            + (" (entered)" if self.source == "user" else "")
+            + f", {self.utilisation_percent:.1f}% utilisation"
+        )
+
+
+def propose_sheet_stock(analysis: SheetMetalAnalysis, sheet: SheetSize) -> SheetStock:
+    """The sheet share a measured sheet part would be costed from, unconfirmed.
+
+    Raises ValueError, with the reason, for a part that is not a sheet, one with
+    no flat pattern (no K-factor entered, or an unfold that is unsupported), or a
+    blank that fits the sheet in neither orientation.
+    """
+    if analysis.status != SHEET or analysis.thickness_mm is None:
+        reasons = " ".join(analysis.reasons) or f"its status is '{analysis.status}'."
+        raise ValueError(
+            "This part is not one /cad/sheet-metal calls a sheet, so it has no sheet share: "
+            + reasons
+        )
+    flat = analysis.flat_pattern
+    if flat is None:
+        raise ValueError(
+            "There is no flat pattern to nest: "
+            + (analysis.flat_pattern_note or "enter the K-factor and measure the part again.")
+        )
+    nest = nest_blank(flat.rectangle_length_mm, flat.rectangle_width_mm, flat.net_area_mm2, sheet)
+    chosen = next(o for o in nest.orientations if o.orientation == nest.chosen_orientation)
+    return SheetStock(
+        thickness_mm=analysis.thickness_mm,
+        k_factor=flat.k_factor,
+        nest=nest,
+        basis=[
+            f"flat blank {flat.rectangle_length_mm:g} × {flat.rectangle_width_mm:g} mm bounding "
+            f"rectangle ({flat.rectangle_orientation}), {flat.net_area_mm2:g} mm² net of holes, "
+            f"unfolded for the entered K = {flat.k_factor:g}",
+            f"sheet {sheet.sheet_length_mm:g} × {sheet.sheet_width_mm:g} mm, {sheet.spacing_mm:g} mm "
+            f"spacing, {sheet.edge_margin_mm:g} mm edge margin — all entered, none assumed",
+            *(f"{o.label}: {o.working} → {o.parts_per_sheet} per sheet" for o in nest.orientations),
+            f"uses {chosen.label}: more parts per sheet (0° on a tie) — the estimate's choice",
+            f"utilisation {nest.utilisation_formula}",
+            f"material per part = {_mm(analysis.thickness_mm)} mm × {nest.sheet.area_mm2:g} mm² / "
+            f"{nest.parts_per_sheet} — the sheet's volume shared equally by the parts on it",
+        ],
+    )
+
+
+def record_sheet_stock_decision(
+    stock: SheetStock, action: str, *, parts_per_sheet: int | None = None
+) -> SheetStock:
+    """Confirm the estimate's nest, enter your own parts per sheet, or withdraw.
+
+    The nest itself is never changed. Entering the estimate's own count is a
+    confirmation, not a correction. A count whose blanks' net area exceeds the
+    sheet is refused.
+    """
+    if action == "withdraw":
+        return stock.model_copy(update={"confirmed": False, "user_parts_per_sheet": None})
+    if action == "confirm":
+        if parts_per_sheet is not None:
+            raise ValueError("Parts per sheet may only be supplied with 'edit'.")
+        return stock.model_copy(update={"confirmed": True, "user_parts_per_sheet": None})
+    if action == "edit":
+        if parts_per_sheet is None:
+            raise ValueError("An edited nest needs the number of parts per sheet.")
+        if (
+            isinstance(parts_per_sheet, bool)
+            or not float(parts_per_sheet).is_integer()
+            or parts_per_sheet < 1
+        ):
+            raise ValueError("Parts per sheet must be a whole number, at least 1.")
+        count = int(parts_per_sheet)
+        user = None if count == stock.nest.parts_per_sheet else count
+        edited = stock.model_copy(update={"confirmed": True, "user_parts_per_sheet": user})
+        if not edited.fits_sheet:
+            raise ValueError(
+                f"{count} blanks of {stock.nest.blank_net_area_mm2:g} mm² need more than the "
+                f"{stock.nest.sheet.area_mm2:g} mm² sheet ({edited.utilisation_percent:.1f}% "
+                "utilisation)."
+            )
+        return edited
+    raise ValueError(f"Unknown sheet stock action '{action}'. Use 'confirm', 'edit' or 'withdraw'.")
+
+
 __all__ = [
+    "BAR_STOCK_BASIS",
     "DEFAULT_RULE",
     "ROUND_BAR",
+    "SHEET",
+    "SHEET_STOCK_BASIS",
     "BarStock",
     "BarStockRule",
+    "SheetStock",
     "propose_bar_stock",
+    "propose_sheet_stock",
+    "record_sheet_stock_decision",
     "record_stock_decision",
 ]

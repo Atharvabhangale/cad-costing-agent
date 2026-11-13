@@ -316,13 +316,18 @@ def extract_assumptions(detail: EstimateDetail) -> EstimateAssumptions:
     additional = part_cost.get("additional_costs") or {}
     geometry = result.get("geometry") or request.get("geometry") or {}
 
-    from_stock = result.get("material_basis") == "bar_stock"
+    basis = result.get("material_basis")
+    from_stock = basis in ("bar_stock", "sheet_stock")
     stock = request.get("raw_stock") or {}
     stock_description = (
         f"round bar Ø{stock['diameter_mm']:g} × {stock['length_mm']:g} mm"
-        if from_stock and stock.get("diameter_mm") and stock.get("length_mm")
+        if basis == "bar_stock" and stock.get("diameter_mm") and stock.get("length_mm")
         else None
     )
+    if basis == "sheet_stock":
+        # The sheet share names itself ("2.0 mm sheet 2500 × 1250, 37 per sheet,
+        # 71.4% utilisation"), stored with the estimate as it was costed.
+        stock_description = (request.get("sheet_stock") or {}).get("description")
 
     plan = _get(detail.plan_snapshot, "plan", default={}) or {}
     setups = plan.get("setups") or []
@@ -793,6 +798,9 @@ _COMPARABLE_FIELDS: tuple[tuple[str, str, bool, str], ...] = (
     # and it moves the material cost without the part's mass changing at all.
     ("material_basis", "Material costed from", True, "material"),
     ("stock_mass_kg", "Stock mass (kg)", True, "material"),
+    # Which bar, or which sheet and how many per sheet: a different stock of
+    # the same kind is the same input as its mass.
+    ("stock_description", "Stock", True, "material"),
     ("material_cost_per_kg", "Material cost/kg", True, "rates"),
     ("rate_set_id", "Costing profile", True, "rates"),
     ("rate_set_version", "Costing profile version", True, "rates"),

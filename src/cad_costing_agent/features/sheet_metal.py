@@ -62,8 +62,9 @@ conical bends, a bend running into another bend, a closed ring of bends, a
 sharp corner with no bend radius, a cut-out across a bend and outline edges
 that are not lines or arcs are reported as unsupported with the reason — never
 approximated. Whether flanges collide with each other when folded is not
-checked, nesting and sheet utilisation are not estimated, and no mass or
-material cost is derived from the blank here.
+checked, and no nesting, mass or material cost is derived from the blank here:
+`sheet_nesting` estimates a grid nest from the flat pattern, and `raw_stock`
+proposes the sheet share for a person to confirm.
 
 This module imports only the feature layer's own topology descriptors and no
 OpenCASCADE: the shape is scanned once by `features.topology`.
@@ -227,8 +228,8 @@ class SheetMetalAnalysis(BaseModel):
 SCOPE_NOTES = (
     "Measured from exact B-Rep surfaces. Straight bends between planar flanges only; hems, "
     "conical bends, closed rings of bends and cut-outs across a bend are reported as unsupported.",
-    "Whether the flanges collide when folded is not checked. Nesting and sheet utilisation are "
-    "not estimated, and no mass or material cost is derived from the blank here.",
+    "Whether the flanges collide when folded is not checked. No mass or material cost is derived "
+    "from the blank here; a sheet share is proposed from it separately, for you to confirm.",
 )
 
 

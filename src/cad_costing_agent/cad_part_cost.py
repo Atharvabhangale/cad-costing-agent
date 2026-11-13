@@ -43,6 +43,14 @@ class CadPartCostEstimateResult(BaseModel):
     stock_mass: GeometryMassResult | None = None
 
 
+# How each kind of confirmed stock is named in a refusal, and the route that
+# would suit it instead.
+_STOCK_WORDS = {
+    "bar_stock": ("bar", "machines from stock"),
+    "sheet_stock": ("sheet share", "cuts the part from sheet"),
+}
+
+
 def calculate_cad_part_cost(
     geometry: GeometryProperties,
     material_name: str,
@@ -59,20 +67,27 @@ def calculate_cad_part_cost(
     material_stock_volume_mm3: float | None = None,
     stage_costs: list[StageCostLine] | None = None,
     material_supplied_by: str | None = None,
+    material_stock_basis: str = "bar_stock",
 ) -> CadPartCostEstimateResult:
     """`material_stock_volume_mm3`, when given, is the stock a person confirmed
     the part is cut from; material is costed from its mass instead of the
     finished part's, at the same density and price. Omitted, nothing changes.
+    `material_stock_basis` names that stock — `bar_stock` or `sheet_stock` (a
+    sheet part's share of the sheet it is nested on) — and is reported as the
+    result's `material_basis`.
 
     `stage_costs` are the route's non-machining stages, already priced, and
     `material_supplied_by` the stage whose rate includes the material. Both are
     passed to the part costing unchanged.
     """
+    if material_stock_basis not in _STOCK_WORDS:
+        raise ValueError(f"Unknown material stock basis '{material_stock_basis}'.")
     if material_supplied_by is not None and material_stock_volume_mm3 is not None:
+        stock, alternative = _STOCK_WORDS[material_stock_basis]
         raise ValueError(
-            f"A bar was confirmed as the stock, but the route starts with "
-            f"{material_supplied_by}, whose rate includes the material. Withdraw the bar or "
-            "choose a route that machines from stock."
+            f"A {stock} was confirmed as the stock, but the route starts with "
+            f"{material_supplied_by}, whose rate includes the material. Withdraw the {stock} or "
+            f"choose a route that {alternative}."
         )
     # When a rate set is in play it is the source of material data, density
     # included. Resolving here means a profile's own materials can actually be
@@ -125,6 +140,6 @@ def calculate_cad_part_cost(
         geometry=geometry,
         mass=mass_result,
         part_cost=part_cost,
-        material_basis="bar_stock" if stock_mass is not None else "finished_part",
+        material_basis=material_stock_basis if stock_mass is not None else "finished_part",
         stock_mass=stock_mass,
     )

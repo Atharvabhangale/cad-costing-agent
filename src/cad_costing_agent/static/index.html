@@ -347,6 +347,36 @@
           </div>
           <p id="sheet-status" class="hint"></p>
           <div id="sheet-result"></div>
+          <!-- The flat blank nested on the engineer's sheet: a grid estimate from
+               /cad/sheet-stock/propose, used for material only once confirmed
+               through /cad/sheet-stock/decide. Shown once a flat pattern exists. -->
+          <div id="sheet-stock-block" class="hidden">
+            <p><strong>Sheet and nest</strong>
+              <span class="muted">— material as the blank's share of the sheet it is cut from</span></p>
+            <div class="grid2">
+              <label>Sheet length (mm) <input id="sheet-length" type="number" min="0" step="any"
+                placeholder="yours — no default"></label>
+              <label>Sheet width (mm) <input id="sheet-width" type="number" min="0" step="any"
+                placeholder="yours — no default"></label>
+              <label>Part-to-part spacing (mm) <input id="sheet-spacing" type="number" min="0" step="any"
+                placeholder="yours — 0 if none"></label>
+              <label>Edge margin (mm) <input id="sheet-margin" type="number" min="0" step="any"
+                placeholder="yours — 0 if none"></label>
+            </div>
+            <div class="viewer-tools">
+              <button type="button" id="sheet-nest-run" class="secondary tiny">Estimate the nest</button>
+              <button type="button" id="sheet-stock-confirm" class="secondary tiny" disabled>Confirm sheet share</button>
+              <button type="button" id="sheet-stock-withdraw" class="secondary tiny" disabled>Back to finished-part material</button>
+            </div>
+            <div id="sheet-nest"></div>
+            <div class="grid2">
+              <label>Your parts per sheet <input id="sheet-parts" type="number" min="1" step="1"
+                placeholder="from your own nest, if different"></label>
+              <div class="viewer-tools">
+                <button type="button" id="sheet-stock-use" class="secondary tiny" disabled>Use this count</button>
+              </div>
+            </div>
+          </div>
           <details class="detail-toggle" id="sheet-checks-toggle">
             <summary>What was checked, and what is not</summary>
             <div id="sheet-checks"></div>

@@ -35,6 +35,7 @@ const state = {
   plan: null,        // the manufacturing plan, owned by plan.js
   processClassification: null,// recommended family and route + the engineer's answer, owned by process.js
   rawStock: null,    // proposed bar for a turned part + the engineer's answer, owned by stock.js
+  sheetStock: null,  // a sheet part's share of its nested sheet + the engineer's answer, owned by sheet.js
   result: null,
   assumptions: null,        // what the current estimate rested on
   previousEstimateId: null, // so a new estimate can be explained against it
@@ -782,6 +783,10 @@ $("calculate").addEventListener("click", async () => {
   if (state.rawStock) {
     body.append("raw_stock", JSON.stringify(state.rawStock));
   }
+  // Likewise the sheet share a sheet part's blank takes of its nested sheet.
+  if (state.sheetStock) {
+    body.append("sheet_stock", JSON.stringify(state.sheetStock));
+  }
   // Masses typed for per-kg route stages, only those entered. The backend
   // decides whether the route can be priced with them.
   if (state.stageInputs && Object.keys(state.stageInputs).length) {
@@ -877,6 +882,10 @@ function renderResult(response) {
     `${number(response.mass.mass_kg, 4)} kg per part` +
     (response.material_basis === "bar_stock" && response.stock_mass
       ? ` · material costed from the bar: ${number(response.stock_mass.mass_kg, 4)} kg per part`
+      : "") +
+    (response.material_basis === "sheet_stock" && response.stock_mass
+      ? ` · material costed from the sheet share: ${number(response.stock_mass.mass_kg, 4)} kg per part` +
+        (state.sheetStock ? ` (${state.sheetStock.description})` : "")
       : "");
   $("r-id").textContent = cost.estimate_id || "—";
 

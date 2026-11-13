@@ -324,7 +324,8 @@ function renderProvenance(quote) {
       <dt>Material</dt><dd>${escapeHtml(provenance.material || "—")}${
     provenance.density_kg_m3 ? ` · ${number(provenance.density_kg_m3, 0)} kg/m³` : ""
   }${provenance.mass_kg ? ` · ${number(provenance.mass_kg, 4)} kg per part` : ""}${
-    provenance.material_basis === "bar_stock" && provenance.stock_mass_kg
+    (provenance.material_basis === "bar_stock" || provenance.material_basis === "sheet_stock") &&
+    provenance.stock_mass_kg
       ? ` · costed from ${escapeHtml(provenance.stock_description || "the stock it is cut from")}, ` +
         `${number(provenance.stock_mass_kg, 4)} kg per part`
       : ""
