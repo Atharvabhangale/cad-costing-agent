@@ -89,13 +89,14 @@ MATERIAL_SUPPLYING_STAGES = frozenset(
 # stage is left out of `price_stages` — its cost comes from its operations —
 # so it can never be charged twice.
 #
-# Weld finishing (grinding and cleaning) is timed by the same weld operations:
-# each weld's `weld_finishing_minutes`, when its profile states a finishing
-# rate. It may be timed only together with welding — timing it alone would put
-# the welds' whole time, arc included, beside a welding stage rate. Whether the
-# welds actually carry finishing time is checked where the plan is costed.
-TIMEABLE_STAGES = {"welding": "welding", "weld_finishing": "welding"}
-TIMED_ONLY_WITH = {"weld_finishing": "welding"}
+# Fit-up (clamping and tacking) and weld finishing (grinding and cleaning) are
+# timed by the same weld operations: each weld's `welding_tack_minutes_per_weld`
+# and `weld_finishing_minutes`, when its profile states them. Each may be timed
+# only together with welding — timing one alone would put the welds' whole
+# time, arc included, beside a welding stage rate. Whether the welds actually
+# carry that time is checked where the plan is costed.
+TIMEABLE_STAGES = {"welding": "welding", "fit_up": "welding", "weld_finishing": "welding"}
+TIMED_ONLY_WITH = {"fit_up": "welding", "weld_finishing": "welding"}
 STAGE_RATE_PRICING = "stage_rate"
 TIMED_PRICING = "timed"
 
@@ -119,8 +120,8 @@ def timed_stages(stage_input_values: dict, route_stage_ids: list[str]) -> dict[s
         if stage_id not in TIMEABLE_STAGES:
             raise ValueError(
                 f"Stage '{stage_id}' cannot be priced by time: only welding has a time model "
-                "(weld finishing may be timed with it, from each weld's finishing time). It is "
-                "priced from its stage rate."
+                "(fit-up and weld finishing may be timed with it, from each weld's tack and "
+                "finishing time). It is priced from its stage rate."
             )
         if stage_id in route_stage_ids:
             timed[stage_id] = TIMEABLE_STAGES[stage_id]

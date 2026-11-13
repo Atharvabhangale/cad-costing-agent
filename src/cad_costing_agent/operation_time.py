@@ -272,7 +272,8 @@ class TimeAssumptions(BaseModel):
         le=1000.0,
         description=(
             "Time to clamp and tack the joint before a weld is run, added once to each weld's "
-            "cycle time."
+            "cycle time. On a route whose fit-up stage is priced by its stage rate, a weld "
+            "carrying this time is refused at costing: tacking would be charged twice."
         ),
     )
     # Length-driven preparation and finishing. Optional on their own, like the
@@ -955,10 +956,22 @@ _WELDING_PARAMETERS = (
 )
 
 # Added to a weld's cycle time when the profile supplies them, and not required
-# for a weld to be timed: (field, what the explanation calls it).
+# for a weld to be timed: (field, what the explanation calls it, what it says
+# about the route). Tacking is the work a route's fit-up stage prices, so the
+# costing charges it in the weld only when fit-up is priced by weld time;
+# repositioning is no stage's work and is never guarded.
 _WELDING_HANDLING = (
-    ("welding_reposition_minutes_per_weld", "repositioning"),
-    ("welding_tack_minutes_per_weld", "clamping and tacking"),
+    (
+        "welding_reposition_minutes_per_weld",
+        "repositioning",
+        "; not fit-up work — no route stage prices it, so it stays in the weld's time",
+    ),
+    (
+        "welding_tack_minutes_per_weld",
+        "clamping and tacking",
+        "; the work a route's fit-up stage prices, so it is charged here only when fit-up is "
+        "priced by weld time",
+    ),
 )
 
 
@@ -1017,17 +1030,18 @@ def _welding(weld: WeldSpec | None, a: TimeAssumptions):
     # either leaves the cycle, the explanation and the recorded parameters
     # exactly as they were.
     handling = [
-        (field, label, getattr(a, field))
-        for field, label in _WELDING_HANDLING
+        (field, label, note, getattr(a, field))
+        for field, label, note in _WELDING_HANDLING
         if getattr(a, field) is not None
     ]
     # Each addition is (minutes, how the cycle line writes it).
     added: list[tuple[float, str]] = []
-    for field, label, minutes in handling:
+    for field, label, note, minutes in handling:
         added.append((minutes, f"{minutes:g}"))
         parameters[field] = minutes
         assumptions.append(
             f"{label} {minutes:g} min per weld, added to the cycle time (per part, not setup)"
+            + note
         )
     # Edge preparation: a butt joint is bevelled before it is welded; a fillet
     # is welded on square edges, so it is never charged preparation.

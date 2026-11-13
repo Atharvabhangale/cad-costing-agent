@@ -25,6 +25,11 @@ Versions (a published version is immutable, so a change is always a new one):
          finishing time, so /cost/cad-part refuses it while that stage is priced by its stage
          rate; price weld finishing by weld time instead (it is then charged once, there).
 
+The clamp-and-tack time in 1.1.0 and 1.2.0 is likewise the work of a route's fit-up stage
+("Fit-up and tacking"): with welding timed, /cost/cad-part refuses a weld carrying it while
+fit-up is priced by its stage rate, so price fit-up by weld time too. Repositioning is no
+stage's work and is never refused. The published versions themselves are unchanged.
+
 Running it is idempotent. Every version above that the server does not have is published, in
 order; one it already has is left exactly as it is and reported, after checking that its
 welding parameters are the ones listed here. So a database that already holds 1.0.0 gains

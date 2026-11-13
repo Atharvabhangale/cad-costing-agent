@@ -9,7 +9,8 @@ timeable stage may be timed; and that sending no pricing choice is exactly the
 stage-rate behaviour it always was. And that butt-weld edge preparation and
 weld finishing are timed from the weld's length, and that weld finishing is
 charged once: inside the welds' time or by its stage rate, never both, never
-neither.
+neither — and that clamping and tacking is charged once against the fit-up
+stage in the same way.
 """
 
 from __future__ import annotations
@@ -169,11 +170,11 @@ def test_a_weld_time_does_not_follow_the_line_into_another_process():
 
 
 def test_only_welding_can_be_timed():
-    # Weld finishing is timeable too, but only as part of the welds' own time
-    # (section 7), so its operations are welding operations.
-    assert TIMEABLE_STAGES == {"welding": "welding", "weld_finishing": "welding"}
+    # Fit-up and weld finishing are timeable too, but only as part of the welds'
+    # own time (sections 7 and 8), so their operations are welding operations.
+    assert TIMEABLE_STAGES == {"welding": "welding", "fit_up": "welding", "weld_finishing": "welding"}
     with pytest.raises(ValueError, match="only welding has a time model"):
-        timed_stages({"fit_up": {"pricing": "timed"}}, ["cutting", "fit_up", "welding"])
+        timed_stages({"cutting": {"pricing": "timed"}}, ["cutting", "fit_up", "welding"])
     with pytest.raises(ValueError, match="must be 'stage_rate' or 'timed'"):
         timed_stages({"welding": {"pricing": "hourly"}}, ["welding"])
 
@@ -272,8 +273,9 @@ def test_timed_welding_without_a_welding_rate_is_refused_with_that_reason():
 
 
 def test_timing_a_stage_without_a_time_model_is_refused():
+    # Cutting, not fit-up: fit-up is now timeable with welding (section 8).
     publish_weld_shop()
-    response = cost(stage_inputs={"fit_up": {"pricing": "timed"}})
+    response = cost(stage_inputs={"cutting": {"pricing": "timed"}})
     assert response.status_code == 400
     assert "only welding has a time model" in response.json()["detail"]
 
@@ -329,12 +331,15 @@ def test_per_weld_handling_is_added_to_the_cycle_time_and_never_to_the_setup():
     assert estimate.parameters[TACK] == 1.25
     assert estimate.parameters["weld_arc_cycle_minutes"] == 8.0
     assert estimate.parameters["weld_passes"] == 2.0
-    assert "repositioning 0.5 min per weld, added to the cycle time (per part, not setup)" in (
-        estimate.assumptions
-    )
-    assert "clamping and tacking 1.25 min per weld, added to the cycle time (per part, not setup)" in (
-        estimate.assumptions
-    )
+    assert (
+        "repositioning 0.5 min per weld, added to the cycle time (per part, not setup); not "
+        "fit-up work — no route stage prices it, so it stays in the weld's time"
+    ) in estimate.assumptions
+    assert (
+        "clamping and tacking 1.25 min per weld, added to the cycle time (per part, not setup); "
+        "the work a route's fit-up stage prices, so it is charged here only when fit-up is "
+        "priced by weld time"
+    ) in estimate.assumptions
     assert "cycle 9.75 min = 4.00 / 0.5 + 0.5 + 1.25" in estimate.assumptions
 
 
@@ -454,15 +459,29 @@ def test_the_estimate_names_the_profile_and_the_snapshot_records_the_handling_pa
     line = line.accepted(use_estimated_time=True)
     plan = committed_plan(NAME)
     plan = plan.model_copy(update={"operations": [*plan.operations, line]})
-    costed = client.post(
-        "/cost/cad-part",
-        files={"file": (f"{NAME}.step", step(NAME), "application/octet-stream")},
-        data={**FORM, "rate_set_id": "weld-shop",
-              "process_classification": json.dumps(classification_for("cutting_welding")),
-              "manufacturing_plan": plan.model_dump_json(),
-              "stage_inputs": json.dumps({"welding": {"pricing": "timed"}})},
-    )
+
+    def post(stage_inputs):
+        return client.post(
+            "/cost/cad-part",
+            files={"file": (f"{NAME}.step", step(NAME), "application/octet-stream")},
+            data={**FORM, "rate_set_id": "weld-shop",
+                  "process_classification": json.dumps(classification_for("cutting_welding")),
+                  "manufacturing_plan": plan.model_dump_json(),
+                  "stage_inputs": json.dumps(stage_inputs)},
+        )
+
+    # This weld's 9.75 min holds 1.25 min of clamping and tacking, and the route's
+    # fit-up stage ("Fit-up and tacking") is a stage-rate line. Timing welding
+    # alone used to be accepted here and charged tacking twice; it is refused.
+    twice = post({"welding": {"pricing": "timed"}})
+    assert twice.status_code == 422, twice.text
+    assert twice.json()["detail"]["error"] == "fit_up_charged_twice"
+    # Timing fit-up with welding charges tacking once, in the weld.
+    costed = post({"welding": {"pricing": "timed"}, "fit_up": {"pricing": "timed"}})
     assert costed.status_code == 200, costed.text
+    assert [s["stage"] for s in costed.json()["part_cost"]["stage_costs"]] == [
+        "cutting", "weld_finishing"
+    ]
     weld = [o for o in costed.json()["part_cost"]["operations"] if o["process_type"] == "welding"]
     assert weld[0]["cycle_time_minutes"] == 9.75
 
@@ -680,7 +699,13 @@ def test_a_weld_carrying_finishing_beside_a_priced_finishing_stage_is_refused_no
     assert detail["error"] == "weld_finishing_charged_twice"
     assert detail["stage"] == "weld_finishing"
     assert detail["operations"] == ["OP-WELD-1"]
-    assert "charged twice" in detail["message"]
+    # Pinned word for word: generalising the guard to fit-up changed none of it.
+    assert detail["message"] == (
+        "No estimate was produced: 1 costed weld(s) carry a finishing time from their time "
+        "profile, and Weld grinding and cleaning is also priced by its stage rate, so the same "
+        "grinding would be charged twice. Choose one: price weld finishing by weld time, or time "
+        "the welds with a profile that has no finishing rate."
+    )
     assert client.get("/estimates").json()["total"] == before
 
 
@@ -804,3 +829,169 @@ def test_the_illustrative_profile_adds_prep_and_finishing_in_a_third_version():
 def test_the_seeded_baseline_has_no_prep_or_finishing_rate():
     baseline = client.get("/time-profiles/poc-baseline-time").json()["assumptions"]
     assert baseline[PREP] is None and baseline[FINISHING] is None
+
+
+# --- 8. tacking is charged once: by the fit-up stage rate or inside the welds --
+
+FIT_UP_TIMED = {"welding": {"pricing": "timed"}, "fit_up": {"pricing": "timed"}}
+
+
+def tack_weld_line():
+    return finishing_weld_line(WELD, extra={TACK: 1.25})
+
+
+def test_fit_up_is_timed_only_together_with_welding():
+    route = ["cutting", "fit_up", "welding", "weld_finishing"]
+    assert timed_stages(FIT_UP_TIMED, route) == {"welding": "welding", "fit_up": "welding"}
+    with pytest.raises(ValueError, match="'fit_up' can be priced by time only when 'welding' is too"):
+        timed_stages({"fit_up": {"pricing": "timed"}}, route)
+
+
+def test_the_tack_component_is_recorded_under_its_parameter_and_repositioning_is_unguarded():
+    estimate = timed(WELD, **HANDLING)
+    # The tack minutes are the component fit-up's guard reads; repositioning is
+    # in the cycle too, but it is no stage's work.
+    assert estimate.parameters[TACK] == 1.25
+    assert any(line.startswith("repositioning 0.5 min") and "not fit-up work" in line
+               for line in estimate.assumptions)
+    assert any(line.startswith("clamping and tacking 1.25 min")
+               and "only when fit-up is priced by weld time" in line
+               for line in estimate.assumptions)
+
+
+def test_a_weld_carrying_tack_beside_a_priced_fit_up_stage_is_refused_not_charged_twice():
+    publish_weld_shop()
+    before = client.get("/estimates").json()["total"]
+    response = cost_with(tack_weld_line(), WELDING_TIMED)
+    assert response.status_code == 422, response.text
+    detail = response.json()["detail"]
+    assert detail["error"] == "fit_up_charged_twice"
+    assert detail["stage"] == "fit_up"
+    assert detail["operations"] == ["OP-WELD-1"]
+    assert detail["message"] == (
+        "No estimate was produced: 1 costed weld(s) carry a tack time from their time profile, "
+        "and Fit-up and tacking is also priced by its stage rate, so the same tacking would be "
+        "charged twice. Choose one: price fit-up by weld time, or time the welds with a profile "
+        "that has no tack time."
+    )
+    assert client.get("/estimates").json()["total"] == before
+
+
+def test_repositioning_alone_is_never_refused_beside_a_priced_fit_up_stage():
+    publish_weld_shop()
+    line = finishing_weld_line(WELD, extra={REPOSITION: 0.5})
+    response = cost_with(line, WELDING_TIMED)
+    assert response.status_code == 200, response.text
+    assert [s["stage"] for s in response.json()["part_cost"]["stage_costs"]] == [
+        "cutting", "fit_up", "weld_finishing"
+    ]
+
+
+def test_fit_up_timed_with_a_weld_that_carries_no_tack_is_refused_not_dropped():
+    publish_weld_shop()
+    response = cost_with(weld_line(), FIT_UP_TIMED)  # timed by a profile with no tack time
+    assert response.status_code == 422, response.text
+    detail = response.json()["detail"]
+    assert detail["error"] == "timed_stage_not_costed"
+    assert detail["stages"] == ["fit_up"]
+    assert detail["operations"] == ["OP-WELD-1"]
+    assert "their tacking would be charged nowhere" in detail["message"]
+
+
+def test_fit_up_timed_without_welding_timed_is_refused():
+    publish_weld_shop()
+    response = cost_with(tack_weld_line(), {"fit_up": {"pricing": "timed"}})
+    assert response.status_code == 400
+    assert "only when 'welding' is too" in response.json()["detail"]
+
+
+def test_a_typed_weld_time_is_the_engineers_whole_figure_for_tacking_too():
+    publish_weld_shop()
+    typed = tack_weld_line().model_copy(update={"user_cycle_time": 14.0})
+    for stage_inputs in (WELDING_TIMED, FIT_UP_TIMED):
+        response = cost_with(typed, stage_inputs)
+        assert response.status_code == 200, response.text
+
+
+def test_timed_fit_up_on_the_hand_entered_path_is_refused():
+    """With operation requirements instead of a plan, no weld can show a tack time."""
+    publish_weld_shop()
+    requirements = json.dumps([{
+        "operation_id": "W1", "operation_name": "Weld", "process_type": "welding",
+        "setup_time_minutes": 15, "cycle_time_minutes": 10, "quantity": 5,
+    }])
+
+    def post(stage_inputs):
+        return client.post(
+            "/cost/cad-part",
+            files={"file": (f"{NAME}.step", step(NAME), "application/octet-stream")},
+            data={**FORM, "rate_set_id": "weld-shop",
+                  "process_classification": json.dumps(classification_for("cutting_welding")),
+                  "operation_requirements": requirements,
+                  "stage_inputs": json.dumps(stage_inputs)},
+        )
+
+    refused = post(FIT_UP_TIMED)
+    assert refused.status_code == 422, refused.text
+    detail = refused.json()["detail"]
+    assert detail["error"] == "timed_stage_not_costed"
+    assert detail["stages"] == ["fit_up"]
+    assert "needs a manufacturing plan whose welds carry a tack time" in detail["message"]
+    both = post({**FIT_UP_TIMED, "weld_finishing": {"pricing": "timed"}})
+    assert both.status_code == 422
+    assert both.json()["detail"]["stages"] == ["fit_up", "weld_finishing"]
+    # Welding alone timed on this path is as before: costed, every stage rate kept.
+    plain = post(WELDING_TIMED)
+    assert plain.status_code == 200, plain.text
+    assert [s["stage"] for s in plain.json()["part_cost"]["stage_costs"]] == [
+        "cutting", "fit_up", "weld_finishing"
+    ]
+
+
+def test_welding_and_fit_up_timed_under_the_illustrative_v1_1_0_charge_tacking_once():
+    script = _publish_script()
+    baseline = client.get("/time-profiles/poc-baseline-time").json()["assumptions"]
+    for version in ("1.0.0", "1.1.0"):
+        assert client.post("/time-profiles", json=script.build_profile(baseline, version)).status_code == 201
+    response = client.post(
+        f"/operations/estimate-time?time_profile_id={script.PROFILE_ID}&time_profile_version=1.1.0",
+        json={"operations": [{"operation_id": "W1", "operation_type": "welding",
+                              "weld": WELD.model_dump()}]},
+    )
+    estimate = response.json()["estimates"][0]["estimate"]
+    # 600 x 2 / 300 = 4 min arc; / 0.45 = 8.889; + 0.5 reposition + 1.0 tack = 10.39.
+    assert estimate["cycle_time_minutes"] == 10.39
+    assert estimate["parameters"][TACK] == 1.0
+    line = manual_operation(
+        operation_id="OP-WELD-1", sequence_position=1, operation_type="welding",
+        operation_name="Fillet weld",
+    ).with_weld(WELD, OperationTimeEstimate.model_validate(estimate)).accepted(
+        use_estimated_time=True
+    )
+    publish_weld_shop()
+    assert cost_with(line, WELDING_TIMED).json()["detail"]["error"] == "fit_up_charged_twice"
+    response = cost_with(line, FIT_UP_TIMED)
+    assert response.status_code == 200, response.text
+    part_cost = response.json()["part_cost"]
+    # No fit-up stage line: 5 off x (25 cutting + 50 weld finishing).
+    assert [s["stage"] for s in part_cost["stage_costs"]] == ["cutting", "weld_finishing"]
+    assert part_cost["total_stage_cost"] == pytest.approx(5 * (25 + 50))
+    weld = [o for o in part_cost["operations"] if o["process_type"] == "welding"][0]
+    assert weld["cycle_time_minutes"] == 10.39
+    run_hours = 10.39 * 5 / 60
+    expected = 400 * run_hours + 400 * weld["setup_time_minutes"] / 60 + 150 * run_hours
+    assert weld["total_operation_cost"] == pytest.approx(expected, abs=0.01)
+
+
+def test_all_three_weld_stages_timed_under_v1_2_0_leave_only_cutting_on_a_stage_rate():
+    publish_weld_shop()
+    line = finishing_weld_line(BUTT, extra={**HANDLING, **PREP_AND_FINISHING})
+    # A weld with tack and finishing, with fit-up timed but finishing on its rate.
+    assert cost_with(line, FIT_UP_TIMED).json()["detail"]["error"] == "weld_finishing_charged_twice"
+    response = cost_with(line, {**FIT_UP_TIMED, "weld_finishing": {"pricing": "timed"}})
+    assert response.status_code == 200, response.text
+    part_cost = response.json()["part_cost"]
+    assert [s["stage"] for s in part_cost["stage_costs"]] == ["cutting"]
+    # 8 + 0.5 + 1.25 + 6 prep + 3 finishing.
+    weld = [o for o in part_cost["operations"] if o["process_type"] == "welding"][0]
+    assert weld["cycle_time_minutes"] == 18.75
