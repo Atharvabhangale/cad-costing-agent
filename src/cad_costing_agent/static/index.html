@@ -616,6 +616,18 @@
             <div id="drivers-body"></div>
           </div>
 
+          <!-- Iteration 9: illustrative CO2e of the stored estimate, in kg — not
+               money. co2e.js renders the server's lines; it adds nothing up. -->
+          <div class="card hidden" id="co2e-card">
+            <h2>CO2e <span class="badge illustrative">Illustrative</span></h2>
+            <p class="hint">Kilograms of CO2e read from this estimate's stored figures and an
+              illustrative, cited emission-factor catalog. It changes no cost and is added to no total.</p>
+            <label>Grid region
+              <select id="co2e-region"><option value="">The rate set's factory region</option></select>
+            </label>
+            <div id="co2e-body"></div>
+          </div>
+
           <div class="card" id="assumptions-card">
             <h2>Assumptions behind this estimate</h2>
             <p class="hint">Read back from what this estimate stored, not recomputed — so it shows what
@@ -632,11 +644,16 @@
 
         <div class="card">
           <h2>Rate set</h2>
+          <label>Factory region
+            <select id="rate_region"><option value="">All regions</option></select>
+            <span class="sub">Filters the list by the factory a rate set says it describes. A label only: nothing is converted.</span>
+          </label>
           <div class="grid2">
             <label>Rate set <select id="rate_set_id"></select></label>
             <label>Version <select id="rate_set_version"></select></label>
           </div>
           <div id="rate-badges" class="badges"></div>
+          <p id="rate-factory" class="hint hidden"></p>
           <p id="rate-desc" class="hint"></p>
           <p class="hint">Rates decide what an hour costs. How long the work takes comes from the
             time profile in <em>Manufacturing</em> — a separate, separately versioned thing.</p>
@@ -863,6 +880,16 @@
         </select>
         <span class="sub">Estimates made with an illustrative profile carry an unmissable warning.</span>
       </label>
+      <fieldset class="factory-fields">
+        <legend>Factory <span class="muted">(optional)</span></legend>
+        <div class="grid2">
+          <label>Factory name <input id="p-factory-name" placeholder="e.g. Pune Plant 2"></label>
+          <label>Region <input id="p-region" placeholder="IN or IN-MH">
+            <span class="sub">ISO 3166 code: a country (IN) or a state (IN-MH). A label only — currency and rates are never converted from it.</span></label>
+        </div>
+        <label class="stack">Site notes <input id="p-site-notes" placeholder="Shift pattern, machine park, anything a reader should know."></label>
+        <span class="sub">Leave both name and region blank if these rates do not describe one factory.</span>
+      </fieldset>
     </div>
 
     <div class="card wpane hidden" id="wpane-materials">
@@ -895,6 +922,8 @@
           <th>Process</th>
           <th>Machine rate / hour (<span class="cur-symbol">₹</span>)</th>
           <th>Labour rate / hour (<span class="cur-symbol">₹</span>)</th>
+          <th>Direct overhead / run hour (<span class="cur-symbol">₹</span>) <span class="muted">optional</span></th>
+          <th>Indirect overhead / run hour (<span class="cur-symbol">₹</span>) <span class="muted">optional</span></th>
           <th></th>
         </tr></thead>
         <tbody id="operations-body"></tbody>
@@ -1268,6 +1297,7 @@
 <script src="dfm.js"></script>
 <script src="draw.js"></script>
 <script src="drivers.js"></script>
+<script src="co2e.js"></script>
 <script src="estimateflow.js"></script>
 <script type="module" src="viewer.js"></script>
 </body>

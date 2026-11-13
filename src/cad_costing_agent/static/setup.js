@@ -46,6 +46,7 @@ function blankDraft() {
       tooling_cost_per_batch: 0,
     },
     stage_rates: [],
+    factory: { factory_name: "", region: "", site_notes: "" },
   };
 }
 
@@ -206,7 +207,16 @@ async function startNewVersion(rateSetId) {
       process_type: process,
       machine_rate_per_hour: rate.machine_rate_per_hour,
       labor_rate_per_hour: rate.labor_rate_per_hour,
+      // Optional overhead: blank when the previous version stated none, so a
+      // new version copied from it states none either.
+      direct_overhead_per_hour: rate.direct_overhead_per_hour ?? "",
+      indirect_overhead_per_hour: rate.indirect_overhead_per_hour ?? "",
     })),
+    factory: {
+      factory_name: (previous.factory || {}).factory_name || "",
+      region: (previous.factory || {}).region || "",
+      site_notes: (previous.factory || {}).site_notes || "",
+    },
     additional_costs: { ...previous.additional_costs },
     stage_rates: Object.entries(previous.stage_rates || {}).map(([stage, rate]) => ({
       stage,
@@ -299,6 +309,10 @@ function writeDraftToForm() {
   $("p-overhead").value = draft.additional_costs.overhead_rate_percent;
   $("p-scrap").value = draft.additional_costs.scrap_rate_percent;
   $("p-tooling").value = draft.additional_costs.tooling_cost_per_batch;
+  const factory = draft.factory || {};
+  $("p-factory-name").value = factory.factory_name || "";
+  $("p-region").value = factory.region || "";
+  $("p-site-notes").value = factory.site_notes || "";
   updateCurrencySymbols();
 }
 
@@ -315,6 +329,11 @@ function readFormIntoDraft() {
     overhead_rate_percent: numberOrNaN($("p-overhead").value),
     scrap_rate_percent: numberOrNaN($("p-scrap").value),
     tooling_cost_per_batch: numberOrNaN($("p-tooling").value),
+  };
+  draft.factory = {
+    factory_name: $("p-factory-name").value.trim(),
+    region: $("p-region").value.trim().toUpperCase(),
+    site_notes: $("p-site-notes").value.trim(),
   };
   readMaterialRows();
   readOperationRows();
@@ -391,6 +410,8 @@ function renderOperations() {
         <td><input class="o-process" list="process-suggestions" value="${escapeHtml(operation.process_type)}" placeholder="e.g. Milling"></td>
         <td><input class="o-machine" type="number" step="any" value="${operation.machine_rate_per_hour ?? ""}"></td>
         <td><input class="o-labor" type="number" step="any" value="${operation.labor_rate_per_hour ?? ""}"></td>
+        <td><input class="o-direct-oh" type="number" step="any" min="0" value="${operation.direct_overhead_per_hour ?? ""}" placeholder="none"></td>
+        <td><input class="o-indirect-oh" type="number" step="any" min="0" value="${operation.indirect_overhead_per_hour ?? ""}" placeholder="none"></td>
         <td><button type="button" class="secondary tiny" data-remove-operation="${index}">Remove</button></td>
       </tr>`
     )
@@ -407,12 +428,26 @@ function readOperationRows() {
     process_type: row.querySelector(".o-process").value.trim(),
     machine_rate_per_hour: numberOrNaN(row.querySelector(".o-machine").value),
     labor_rate_per_hour: numberOrNaN(row.querySelector(".o-labor").value),
+    // Blank stays blank: an overhead nobody entered is not charged, not zero-rated.
+    direct_overhead_per_hour: blankOrNumber(row.querySelector(".o-direct-oh").value),
+    indirect_overhead_per_hour: blankOrNumber(row.querySelector(".o-indirect-oh").value),
   }));
+}
+
+function blankOrNumber(raw) {
+  const text = String(raw).trim();
+  return text === "" ? "" : Number(text);
 }
 
 $("add-process").addEventListener("click", () => {
   readOperationRows();
-  setup.draft.operations.push({ process_type: "", machine_rate_per_hour: "", labor_rate_per_hour: "" });
+  setup.draft.operations.push({
+    process_type: "",
+    machine_rate_per_hour: "",
+    labor_rate_per_hour: "",
+    direct_overhead_per_hour: "",
+    indirect_overhead_per_hour: "",
+  });
   renderOperations();
 });
 
@@ -555,6 +590,12 @@ function validateStep(step) {
           "that profile, or choose a different ID."
       );
     }
+    const factory = draft.factory || {};
+    if (factory.factory_name || factory.region || factory.site_notes) {
+      if (!factory.factory_name) problems.push("A factory needs a name (or clear the region and notes).");
+      if (!/^[A-Z]{2}(-[A-Z0-9]{1,3})?$/.test(factory.region || ""))
+        problems.push(`Region "${factory.region || ""}" must be an ISO 3166 code such as IN or IN-MH.`);
+    }
   }
 
   if (step === "materials") {
@@ -595,6 +636,11 @@ function validateStep(step) {
         problems.push(`${row}: machine rate per hour must be greater than zero.`);
       if (!(operation.labor_rate_per_hour > 0))
         problems.push(`${row}: labour rate per hour must be greater than zero.`);
+      ["direct_overhead_per_hour", "indirect_overhead_per_hour"].forEach((field) => {
+        const value = operation[field];
+        if (value !== "" && value !== undefined && !(value >= 0))
+          problems.push(`${row}: ${field.startsWith("direct") ? "direct" : "indirect"} overhead cannot be negative (leave blank for none).`);
+      });
     });
 
     const seenStages = new Map();
@@ -657,6 +703,13 @@ function draftToRateSet() {
     operations[operation.process_type.trim().toLowerCase()] = {
       machine_rate_per_hour: operation.machine_rate_per_hour,
       labor_rate_per_hour: operation.labor_rate_per_hour,
+      // Sent only when entered; absent means no overhead is charged.
+      ...(operation.direct_overhead_per_hour === "" || operation.direct_overhead_per_hour === undefined
+        ? {}
+        : { direct_overhead_per_hour: operation.direct_overhead_per_hour }),
+      ...(operation.indirect_overhead_per_hour === "" || operation.indirect_overhead_per_hour === undefined
+        ? {}
+        : { indirect_overhead_per_hour: operation.indirect_overhead_per_hour }),
     };
   });
   // Stage rates keyed by stage id. An absent unit rate is left out rather than
@@ -680,6 +733,10 @@ function draftToRateSet() {
     operations,
     additional_costs: draft.additional_costs,
     stage_rates,
+    // A factory label only when one was named; otherwise the key is absent.
+    ...(draft.factory && (draft.factory.factory_name || draft.factory.region)
+      ? { factory: { ...draft.factory } }
+      : {}),
   };
 }
 

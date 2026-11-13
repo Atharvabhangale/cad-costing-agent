@@ -17,3 +17,12 @@ class ManufacturingOperation(BaseModel):
     cycle_time_minutes: float = Field(gt=0, description="Cycle time per part.")
     quantity: int = Field(gt=0, default=1)
     is_illustrative_rate: bool = True
+    # Optional per-machine overhead per hour of run time (see `OperationRate`).
+    # Absent is left out of every dump, so an operation without it serializes
+    # exactly as before the fields existed.
+    direct_overhead_per_hour: float | None = Field(
+        default=None, ge=0, allow_inf_nan=False, exclude_if=lambda value: value is None
+    )
+    indirect_overhead_per_hour: float | None = Field(
+        default=None, ge=0, allow_inf_nan=False, exclude_if=lambda value: value is None
+    )

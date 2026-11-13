@@ -153,5 +153,10 @@ def init_db(engine: Engine | None = None) -> int:
         inserted = RateSetRepository(session).seed(SEED_RATE_SETS)
         inserted += TimeProfileRepository(session).seed(SEED_TIME_PROFILES)
         inserted += DfmProfileRepository(session).seed(SEED_DFM_PROFILES)
+        # Iteration 9: the illustrative emission-factor catalog (CO2e, not money).
+        from cad_costing_agent.emission_factors import SEED_EMISSION_CATALOGS
+        from cad_costing_agent.repository import EmissionFactorCatalogRepository
+
+        inserted += EmissionFactorCatalogRepository(session).seed(SEED_EMISSION_CATALOGS)
         session.commit()
     return inserted

@@ -20,12 +20,18 @@ from cad_costing_agent.db import (
 )
 from cad_costing_agent.db_models import Base, EstimateRow, RateSetRow
 from cad_costing_agent.dfm import SEED_DFM_PROFILES
+from cad_costing_agent.emission_factors import SEED_EMISSION_CATALOGS
 from cad_costing_agent.rate_sets import SEED_RATE_SETS
 from cad_costing_agent.time_profiles import SEED_TIME_PROFILES
 
 # `init_db` seeds both catalogs — rate sets (money) and time profiles
 # (duration) — so its return value counts versions across both.
-SEEDED_VERSIONS = len(SEED_RATE_SETS) + len(SEED_TIME_PROFILES) + len(SEED_DFM_PROFILES)
+SEEDED_VERSIONS = (
+    len(SEED_RATE_SETS)
+    + len(SEED_TIME_PROFILES)
+    + len(SEED_DFM_PROFILES)
+    + len(SEED_EMISSION_CATALOGS)
+)
 from cad_costing_agent.repository import EstimateRepository, RateSetRepository
 
 HEAD_REVISION = "0011"
@@ -205,7 +211,9 @@ def test_init_db_on_a_pre_alembic_database_preserves_data_and_reseeds_nothing():
     # The rate sets were already seeded, so none is re-inserted. The time-profile
     # catalog did not exist before Step 21, so adopting this database back-fills
     # the baseline profile — the catalog has to exist for a time to be estimated.
-    assert init_db(engine) == len(SEED_TIME_PROFILES) + len(SEED_DFM_PROFILES)
+    assert init_db(engine) == (
+        len(SEED_TIME_PROFILES) + len(SEED_DFM_PROFILES) + len(SEED_EMISSION_CATALOGS)
+    )
 
     with sessionmaker(bind=engine)() as session:
         assert len(session.execute(select(RateSetRow)).scalars().all()) == rate_set_count

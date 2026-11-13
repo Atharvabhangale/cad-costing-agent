@@ -70,13 +70,71 @@ class MaterialRate(BaseModel):
     density_kg_m3: float = Field(gt=0)
 
 
+def _absent(value) -> bool:
+    """`exclude_if` predicate: an optional field nobody set is left out of a dump.
+
+    That is what keeps a rate set version published before these fields existed
+    serializing — into its stored row, its estimate snapshots and every response —
+    exactly as it always has.
+    """
+    return value is None
+
+
 class OperationRate(BaseModel):
-    """Machine and labor rates for one process type. ILLUSTRATIVE POC VALUES."""
+    """Machine and labor rates for one process type. ILLUSTRATIVE POC VALUES.
+
+    The two overhead rates are optional and per hour of **run** time — the
+    machine's cutting hours, the same hours its labour is charged on. They are a
+    shop's per-machine burden (aPriori calls them a machine's direct and indirect
+    overhead): direct for what the machine itself consumes — power, maintenance,
+    tooling wear — and indirect for its share of the building, supervision and
+    support. Absent means none is charged, and every figure is what it was
+    before the fields existed. Neither is converted or inferred from anything.
+    """
 
     model_config = ConfigDict(frozen=True)
 
     machine_rate_per_hour: float = Field(gt=0, description="ILLUSTRATIVE POC VALUE.")
     labor_rate_per_hour: float = Field(gt=0, description="ILLUSTRATIVE POC VALUE.")
+    direct_overhead_per_hour: float | None = Field(
+        default=None,
+        ge=0,
+        allow_inf_nan=False,
+        exclude_if=_absent,
+        description="Optional per-machine direct overhead per hour of run time.",
+    )
+    indirect_overhead_per_hour: float | None = Field(
+        default=None,
+        ge=0,
+        allow_inf_nan=False,
+        exclude_if=_absent,
+        description="Optional per-machine indirect overhead per hour of run time.",
+    )
+
+
+# ISO 3166-1 alpha-2 country ("IN") or ISO 3166-2 subdivision ("IN-MH"). Only the
+# shape is checked: the code is a label someone stated, and nothing — currency,
+# rates, emission factors — is converted or inferred from it.
+REGION_CODE_PATTERN = r"^[A-Z]{2}(-[A-Z0-9]{1,3})?$"
+
+
+class FactoryProfile(BaseModel):
+    """Which shop a rate set describes: a label, never an input to arithmetic.
+
+    aPriori's "digital factories" are per-region labour, overhead and material
+    data. Here a rate set already is one shop's rates; this says which shop and
+    where, so rate sets can be listed and compared by factory. The currency stays
+    the rate set's own and is never converted because of a region.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    region: str = Field(
+        pattern=REGION_CODE_PATTERN,
+        description="ISO 3166 code: a country ('IN') or a subdivision ('IN-MH').",
+    )
+    factory_name: str = Field(min_length=1, max_length=128)
+    site_notes: str = Field(default="", max_length=1000)
 
 
 PER_KG = "per_kg"
@@ -181,6 +239,14 @@ class RateSet(BaseModel):
             "containing such a stage cannot be priced with it."
         ),
     )
+    factory: FactoryProfile | None = Field(
+        default=None,
+        exclude_if=_absent,
+        description=(
+            "Which factory and region these rates describe. A label only: nothing is converted "
+            "or inferred from it. Absent on every version published before it existed."
+        ),
+    )
 
     def reference(self) -> RateSetReference:
         return RateSetReference(
@@ -209,6 +275,7 @@ class RateSetVersionCreate(BaseModel):
     operations: dict[str, OperationRate] = Field(default_factory=dict)
     additional_costs: AdditionalCostInputs = Field(default_factory=AdditionalCostInputs)
     stage_rates: dict[str, StageRate] = Field(default_factory=dict)
+    factory: FactoryProfile | None = None
 
 
 class RateSetSummary(BaseModel):
@@ -228,6 +295,10 @@ class RateSetSummary(BaseModel):
     material_count: int = 0
     process_count: int = 0
     stage_rate_count: int = 0
+    # The factory label, for grouping and filtering a picker. Absent (not null)
+    # for a version that states none, so older listings read as they always did.
+    region: str | None = Field(default=None, exclude_if=_absent)
+    factory_name: str | None = Field(default=None, exclude_if=_absent)
 
 
 class RateSetValidation(BaseModel):
@@ -376,4 +447,6 @@ def resolve_operation(
         cycle_time_minutes=requirement.cycle_time_minutes,
         quantity=requirement.quantity,
         is_illustrative_rate=rate_set.is_illustrative,
+        direct_overhead_per_hour=rate.direct_overhead_per_hour,
+        indirect_overhead_per_hour=rate.indirect_overhead_per_hour,
     )

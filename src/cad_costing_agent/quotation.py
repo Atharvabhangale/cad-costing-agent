@@ -746,6 +746,22 @@ def _part_totals(detail: EstimateDetail, assumptions: EstimateAssumptions) -> Qu
         float(op.get("machine_cost") or 0.0) + float(op.get("labor_cost") or 0.0)
         for op in operations
     )
+    # A per-machine overhead the rate set stated, as stored on each operation.
+    # Its own line, and only when some operation carries one, so a document for
+    # an estimate without it has exactly the lines it always had.
+    overhead_keys = ("direct_overhead_cost", "indirect_overhead_cost")
+    machine_overhead_lines = (
+        [
+            _line(
+                "operation_machine_overhead",
+                "Manufacturing — machine overhead",
+                sum(float(op.get(key) or 0.0) for op in operations for key in overhead_keys),
+                "Direct and indirect overhead per machine run hour, as the rate set states it.",
+            )
+        ]
+        if any(key in op for op in operations for key in overhead_keys)
+        else []
+    )
 
     # Non-machining route stages, present only when the estimate priced some, so
     # a document for an estimate without them has exactly the lines it always had.
@@ -789,6 +805,7 @@ def _part_totals(detail: EstimateDetail, assumptions: EstimateAssumptions) -> Qu
             "Charged once per setup, not per operation.",
         ),
         _line("operation_run", "Manufacturing — run", run_cost, "Cycle time x quantity."),
+        *machine_overhead_lines,
         _line("overhead", "Overhead", additional.get("overhead_cost")),
         _line("scrap", "Scrap allowance", additional.get("scrap_cost")),
         _line("tooling", "Tooling", additional.get("tooling_cost")),
@@ -1042,6 +1059,10 @@ def _operation_rows(detail: EstimateDetail) -> list[QuoteOperation]:
         source = TIME_FROM_ENGINEER if by_user else TIME_FROM_SYSTEM
         machine = float(op.get("machine_cost") or 0.0)
         labor = float(op.get("labor_cost") or 0.0)
+        # Overhead is charged per run hour, so a row's run includes it.
+        overhead = float(op.get("direct_overhead_cost") or 0.0) + float(
+            op.get("indirect_overhead_cost") or 0.0
+        )
         rows.append(
             QuoteOperation(
                 operation_id=op.get("operation_id", ""),
@@ -1054,7 +1075,7 @@ def _operation_rows(detail: EstimateDetail) -> list[QuoteOperation]:
                 time_source=source if planned else "",
                 time_source_label=TIME_SOURCE_LABELS.get(source, "") if planned else "",
                 setup_cost=_money(op.get("setup_cost")),
-                run_cost=machine + labor,
+                run_cost=machine + labor + overhead,
                 total_cost=_money(op.get("total_operation_cost")),
                 system_suggested_operation=origin.get("system_suggested_operation"),
                 system_suggested_cycle_time=origin.get("system_suggested_cycle_time"),

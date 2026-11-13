@@ -19,7 +19,7 @@ The revision id is 0011 and it revises 0008 for now: 0009 and 0010 are being
 added on another branch, and this revision is re-chained onto them at merge.
 
 Revision ID: 0011
-Revises: 0008
+Revises: 0010
 Create Date: 2026-11-13
 """
 
@@ -30,7 +30,7 @@ import sqlalchemy as sa
 
 
 revision: str = '0011'
-down_revision: str | None = '0008'
+down_revision: str | None = '0010'
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 

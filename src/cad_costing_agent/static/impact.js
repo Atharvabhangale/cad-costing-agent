@@ -17,6 +17,7 @@ const IMPACT_LABELS = {
   material_rate: "Material rate",
   material_quantity: "Material mass × quantity",
   operation_rate: "Operation rates",
+  machine_overhead_rate: "Machine overhead rate",
   operation_time: "Operation time",
   operation_added: "Operation added",
   operation_removed: "Operation removed",
