@@ -896,8 +896,13 @@ sequence; and the four new mutating endpoints from the other two agents were add
 role table, which a structural test requires. Full suite on the merged code: **2739 passed, 8
 skipped** in about 3.5 min (Linux, Python 3.13, no `cadmodels/`). Each feature's live numbers
 below were observed by its agent against a running server on a scratch database before the
-merge; **the three were not exercised together live after the merge**, and no real model was
-measured.
+merge, and no real model was measured. The merged app was then started on a scratch database:
+with auth off the status read "Auth off — actions recorded as local", a new estimate read `draft`
+created by `local`, four audit rows were written, and `/cad/casting-modulus` measured a block with
+a side hole at 3.311 mm; with auth on, mutating routes from all three agents answered 401 and
+`/health` 200. **That run found a defect in the merged code**: the CO2e module read only the
+nested snapshot of a CAD estimate, so a hand-entered `/cost/part` estimate was reported as an
+assembly roll-up with nothing to estimate. Fixed, with a test (2.5 kg x 4 x 1.91 = 19.1 kg).
 
 **High-pressure die casting, and proposed cores.** Die casting is its own family that nothing
 detects — a person chooses it, as cast or cast then machined, with degating after. Its shot is
