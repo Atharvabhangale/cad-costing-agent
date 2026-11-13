@@ -172,6 +172,16 @@ class DfmReport(BaseModel):
     profile_is_illustrative: bool
     disclaimer: str = DFM_DISCLAIMER
     flags: list[DfmFlag]
+    flagged_features: list[Feature] = Field(
+        default_factory=list,
+        description=(
+            "Every recognized feature some flag names in `feature_ids`, once each, in "
+            "recognition order and exactly as recognition reported it. It is here so a flag "
+            "can be pointed at on the 3D model from this response alone: `location` and "
+            "`axis` are the recognizer's own, and a feature with no `location` cannot be "
+            "drawn. Nothing is added to or derived from these features."
+        ),
+    )
     rules: list[DfmRuleReport]
     warnings: list[str] = Field(default_factory=list)
 
@@ -337,12 +347,23 @@ def evaluate_dfm(features: list[Feature], profile: DfmProfile, filename: str = "
             DfmRuleReport(rule_id=rule_id, evaluated=True, features_checked=checked, flags=len(found))
         )
 
+    # The features the flags name, handed back unchanged so the panel can point at them
+    # without a second recognition request. Membership is by id; order is recognition's.
+    named = {feature_id for flag in flags for feature_id in flag.feature_ids}
+    seen: set[str] = set()
+    flagged_features: list[Feature] = []
+    for f in features:
+        if f.feature_id in named and f.feature_id not in seen:
+            seen.add(f.feature_id)
+            flagged_features.append(f)
+
     return DfmReport(
         filename=filename,
         dfm_profile_id=profile.dfm_profile_id,
         dfm_profile_version=profile.version,
         profile_is_illustrative=profile.is_illustrative,
         flags=flags,
+        flagged_features=flagged_features,
         rules=reports,
     )
 

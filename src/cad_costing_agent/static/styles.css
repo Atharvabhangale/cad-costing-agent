@@ -766,6 +766,20 @@ table.mini.actual-variance td.num, table.mini.actual-variance th.num { padding-l
 /* Advisory design-for-manufacturing flags. */
 .dfm-flags { list-style: none; margin: 10px 0 0; padding: 0; display: grid; gap: 10px; }
 .dfm-flag { border: 1px solid var(--line); border-left: 3px solid var(--warn-line); border-radius: 6px; padding: 10px 12px; display: grid; gap: 4px; font-size: 13.5px; }
+/* A flag row points at its feature(s) on the model. One flag colour only: a flag
+   has no severity. The marked row also says so in words, never by colour alone. */
+.dfm-flag.is-markable { cursor: pointer; }
+.dfm-flag.is-markable:hover { background: #fbf6f9; }
+.dfm-flag.is-marked { border-color: #c2185b; border-left-color: #c2185b; background: #fdf2f7; }
+.dfm-flag-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+.dfm-marking { margin-top: 10px; display: grid; gap: 6px; }
+.dfm-marking-controls { display: flex; flex-wrap: wrap; gap: 8px; }
+.dfm-legend { margin: 0; font-size: 12.5px; color: var(--muted); }
+.dfm-swatch { display: inline-block; width: 10px; height: 10px; vertical-align: baseline; margin: 0 2px 0 6px; }
+.dfm-swatch:first-child { margin-left: 0; }
+.dfm-swatch-flag { background: #c2185b; transform: rotate(45deg); }
+.dfm-swatch-select { background: #ffa726; border-radius: 50%; }
+#dfm-marked { margin: 0; }
 
 /* Route comparison: a stage's mass box stays compact, its source tag inline. */
 .route-compare .route-mass { display: flex; flex-wrap: wrap; align-items: center; gap: 4px; font-size: 12px; margin-top: 4px; }

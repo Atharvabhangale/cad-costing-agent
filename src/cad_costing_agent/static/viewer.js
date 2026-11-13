@@ -278,7 +278,18 @@ function clear() {
 
 const MARKER_COLOR = 0xffa726;
 
+// A feature a DFM flag was raised on. There is exactly one flag colour because a
+// flag carries no severity; and the marker is a diamond rather than a dot so the
+// two kinds of marker are not told apart by colour alone.
+const FLAG_MARKER_COLOR = 0xc2185b;
+
 let markerGroup = null;
+
+// Whoever drew the last marker owns it. A panel that says "marked on the model"
+// listens for this so it can stop saying so once something else replaces it.
+function announceMarker(flagged) {
+  document.dispatchEvent(new CustomEvent("cadviewer:marker", { detail: { flagged } }));
+}
 
 function clearMarker() {
   if (!markerGroup) return;
@@ -287,6 +298,7 @@ function clearMarker() {
     if (child.material) child.material.dispose();
   });
   markerGroup.clear();
+  announceMarker(false);
   requestRender();
 }
 
@@ -294,16 +306,26 @@ function clearMarker() {
  * Mark a recognized feature on the model: a dot at its location plus, where the
  * feature has one, a line along its axis — a hole's drilling direction, or a
  * planar face's outward normal.
+ *
+ * It is a pointer at the feature's reported location, not a highlight of the
+ * feature's faces: the display mesh does not record which triangles belong to
+ * which CAD face.
+ *
+ * `options.flagged` draws the DFM-flag marker instead of the ordinary one, and
+ * `options.keep` adds to the markers already drawn. Returns whether a marker
+ * was drawn, so a caller can say when nothing could be shown.
  */
-function markFeature(feature) {
+function markFeature(feature, options) {
+  const { flagged = false, keep = false } = options || {};
   initialise();
-  if (unavailableReason || !boundingSphere) return;
+  if (unavailableReason || !boundingSphere) return false;
   if (!markerGroup) {
     markerGroup = new THREE.Group();
     scene.add(markerGroup);
   }
-  clearMarker();
-  if (!feature || !feature.location) return;
+  if (!keep) clearMarker();
+  if (!feature || !feature.location) return false;
+  const color = flagged ? FLAG_MARKER_COLOR : MARKER_COLOR;
 
   // Sized from the model so the marker stays visible on a 10 mm insert and on a
   // 2 m frame alike.
@@ -311,9 +333,13 @@ function markFeature(feature) {
   const point = new THREE.Vector3(feature.location.x, feature.location.y, feature.location.z);
 
   const dot = new THREE.Mesh(
-    new THREE.SphereGeometry(size, 20, 14),
-    new THREE.MeshBasicMaterial({ color: MARKER_COLOR })
+    flagged ? new THREE.OctahedronGeometry(size * 1.6) : new THREE.SphereGeometry(size, 20, 14),
+    new THREE.MeshBasicMaterial({ color, depthTest: !flagged })
   );
+  // A flag marker is drawn over the part. A through hole's reported location is
+  // on the far face and a slot's is on its floor, so a depth-tested marker would
+  // sit behind material in most views and a flag would appear to mark nothing.
+  if (flagged) dot.renderOrder = 10;
   dot.position.copy(point);
   markerGroup.add(dot);
 
@@ -321,18 +347,32 @@ function markFeature(feature) {
     const direction = new THREE.Vector3(feature.axis.x, feature.axis.y, feature.axis.z);
     if (direction.lengthSq() > 0) {
       const reach = size * 7;
-      markerGroup.add(
-        new THREE.Line(
-          new THREE.BufferGeometry().setFromPoints([
-            point.clone().addScaledVector(direction, -reach),
-            point.clone().addScaledVector(direction, reach),
-          ]),
-          new THREE.LineBasicMaterial({ color: MARKER_COLOR })
-        )
+      const line = new THREE.Line(
+        new THREE.BufferGeometry().setFromPoints([
+          point.clone().addScaledVector(direction, -reach),
+          point.clone().addScaledVector(direction, reach),
+        ]),
+        new THREE.LineBasicMaterial({ color, depthTest: !flagged })
       );
+      if (flagged) line.renderOrder = 10;
+      markerGroup.add(line);
     }
   }
+  announceMarker(flagged);
   requestRender();
+  return true;
+}
+
+/**
+ * Mark every feature in the list as DFM-flagged, replacing whatever was marked.
+ * Which features are flagged is the caller's server response; nothing is decided
+ * here. Returns how many markers were drawn — a feature with no location, or a
+ * preview that is not showing a model, draws none.
+ */
+function markFlaggedFeatures(features) {
+  clearMarker();
+  return (features || []).filter((feature) => markFeature(feature, { flagged: true, keep: true }))
+    .length;
 }
 
 // ---------------------------------------------------------------- framing
@@ -772,6 +812,7 @@ window.CadViewer = {
   fit,
   reset,
   markFeature,
+  markFlaggedFeatures,
   clearMarker,
   showAssembly,
   highlightComponent,

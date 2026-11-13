@@ -219,10 +219,12 @@ function featureById(id) {
 }
 
 function selectFeature(feature, options) {
-  const { scroll = false } = options || {};
+  // `flagged` is set only by the DFM panel, for a feature the server's flags
+  // name; it changes the marker drawn and the sentence below, nothing else.
+  const { scroll = false, flagged = false } = options || {};
 
   // Point at it on the model.
-  if (window.CadViewer) window.CadViewer.markFeature?.(feature);
+  if (window.CadViewer) window.CadViewer.markFeature?.(feature, { flagged });
 
   // Light up its row, and only its row.
   const body = $("features-body");
@@ -257,7 +259,9 @@ function selectFeature(feature, options) {
     `${escapeHtml(featureLabel(feature))} — ${escapeHtml(formatDimensions(feature.dimensions))}<br>` +
     `${where} · ${at} · axis ${escapeHtml(formatAxis(feature.axis))} · ` +
     `confidence ${escapeHtml(feature.confidence)} · source ${escapeHtml(feature.source_type)}` +
-    `<br><span class="muted">Marked on the 3D model. The marker is a pointer, not a ` +
+    `<br><span class="muted">${
+      flagged ? "Marked on the 3D model as a DFM-flagged feature." : "Marked on the 3D model."
+    } The marker is a pointer, not a ` +
     `measurement — every dimension above comes from the CAD file.</span>`;
   $("selected-feature").classList.remove("hidden");
 }
@@ -272,8 +276,11 @@ function selectFeature(feature, options) {
  * than silently showing only part of the answer.
  */
 function selectFeatures(featureIds, options) {
-  const { label = "" } = options || {};
-  const found = featureIds
+  // `features` lets a caller that already holds the server's feature objects
+  // (the DFM report carries the ones it flagged) select them without the
+  // features panel having been analysed first.
+  const { label = "", features = null, flagged = false } = options || {};
+  const found = features || featureIds
     .map((id) => featureById(id))
     .filter(Boolean);
 
@@ -282,9 +289,16 @@ function selectFeatures(featureIds, options) {
     return;
   }
 
-  selectFeature(found[0], { scroll: true });
+  selectFeature(found[0], { scroll: !flagged, flagged });
 
-  if (found.length > 1) {
+  if (found.length > 1 && flagged) {
+    const names = found.map((feature) => feature.feature_id);
+    $("selected-feature").innerHTML +=
+      `<br><strong>${escapeHtml(label || "This flag")}</strong> covers ` +
+      `${found.length} features: <span class="mono">${escapeHtml(names.join(", "))}</span>. ` +
+      `<span class="muted">The details above are the first; the DFM panel marks each one ` +
+      `that has a location.</span>`;
+  } else if (found.length > 1) {
     const names = found.map((feature) => feature.feature_id);
     $("selected-feature").innerHTML +=
       `<br><strong>${escapeHtml(label || "This setup")}</strong> covers ` +
