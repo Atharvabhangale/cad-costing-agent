@@ -3,8 +3,10 @@
     CAD file -> B-Rep (the shape recognition already read) -> **wall thickness**
 
 Analysis only. This module measures; it decides nothing. It is read by the
-`/cad/wall-thickness` endpoint and by the minimum-wall DFM rule, and by nothing
-that reaches a mass, a time, a route or a cost. It imports `features.model`,
+`/cad/wall-thickness` endpoint and by the minimum-wall DFM rule; its governing
+wall (below) is the one figure that reaches a time — the moulding cooling time
+— and only as a number `main.py` hands to the moulding line, never through an
+import. Nothing here reaches a mass, a route or a cost. It imports `features.model`,
 `features.topology`'s tolerance and `limits` from this package and nothing
 else; a structural test holds that.
 
@@ -255,11 +257,17 @@ def measure_wall_thickness(
     filename: str = "",
     max_rays: int | None = None,
     grid_side: int = DEFAULT_GRID_SIDE,
+    spans: list | None = None,
 ) -> WallThicknessResult:
     """Measure the walls of every solid in an already-read B-Rep shape.
 
     `shape` is the `TopoDS_Shape` feature recognition ran on; this reads no
     file. Pure in the sense that matters: the same shape gives the same result.
+
+    `spans`, when a list is passed, receives every measured wall as
+    `(thickness, from_face, to_face, start, end, solid_index)` in the order the
+    rays were cast — what `measure_governing_wall` builds on, so the walls are
+    cast once, by this one ray caster. The result is identical either way.
     """
     from OCP.Bnd import Bnd_Box
     from OCP.BRepAdaptor import BRepAdaptor_Surface
@@ -493,6 +501,8 @@ def measure_wall_thickness(
                 distance, to_face, end = exit_hit
                 samples += 1
                 all_values.append(distance)
+                if spans is not None:
+                    spans.append((distance, face_id, to_face, start, end, solid_index))
                 if face_min is None or distance < face_min[0]:
                     face_min = (distance, to_face)
                 # Ties keep the first found, in face-id then grid order.
@@ -569,8 +579,193 @@ def measure_wall_thickness(
     )
 
 
+# ---------------------------------------------------------------------------
+# The governing wall: the thickest region found, for a cooling time.
+# ---------------------------------------------------------------------------
+
+GOVERNING_METHOD = "largest_inscribed_ball_at_wall_midpoints"
+
+GOVERNING_DESCRIPTION = (
+    "Every wall the minimum-wall measurement samples is a straight span through material, from "
+    "a sampled point to the face the ray leaves through. At the middle of each span the "
+    "distance to the nearest face of the solid is measured exactly; twice that distance is the "
+    "diameter of a ball that fits inside the material there. The governing wall is the largest "
+    "such diameter found: the thickest region the samples reach, which is what a slab cooling "
+    "time is governed by. A span along a wall's length (from a rim, a rib top or a plate edge) "
+    "is not mistaken for a thickness, because the ball at its middle is limited by the wall's "
+    "two sides."
+)
+
+GOVERNING_LIMITATIONS: tuple[str, ...] = (
+    "Only the middles of sampled walls are tested. A thick region no sampled wall passes "
+    "through the middle of — a boss or a junction between sample points — is not seen, so the "
+    "governing wall reported is the thickest found: the part's true thickest region can only be "
+    "thicker than this, never thinner, because every value is a ball that really fits inside "
+    "the material.",
+    "A wall junction (a rib root, a corner, a boss on a wall) is thicker than either wall, and "
+    "is found only when a sampled span happens to pass through its middle.",
+    "The ball's diameter is a thickness, not a shape: a round boss and a flat slab of the same "
+    "thickness report the same figure, although a round section cools faster than a slab.",
+    "Only exact B-Rep geometry bounding a closed solid is measured, exactly as for the "
+    "minimum wall.",
+)
+
+
+class GoverningWall(BaseModel):
+    """The thickest region found in an exact solid, measured as an inscribed ball."""
+
+    filename: str = ""
+    measured: bool
+    method: str = GOVERNING_METHOD
+    method_description: str = GOVERNING_DESCRIPTION
+    limitations: list[str] = Field(default_factory=lambda: list(GOVERNING_LIMITATIONS))
+    not_measured_reason: str | None = None
+
+    thickness_mm: float | None = Field(
+        default=None,
+        description="Diameter of the largest ball found inside the material. Null when nothing was measured.",
+    )
+    centre: Point3D | None = Field(default=None, description="Where that ball sits: a marker point.")
+    from_face: int | None = Field(default=None, description="The sampled face of the span it sits on.")
+    to_face: int | None = None
+    span_mm: float | None = Field(
+        default=None,
+        description="Length of that span. Longer than the thickness where it runs along a wall.",
+    )
+    minimum_wall_mm: float | None = Field(
+        default=None, description="The thinnest wall found by the same samples, for context."
+    )
+    spans_sampled: int = 0
+    balls_measured: int = Field(
+        default=0,
+        description=(
+            "Spans whose middle was measured. A span no longer than twice the largest ball "
+            "already found cannot hold a larger one, so it is not measured."
+        ),
+    )
+    grid_side: int = 0
+    budget_limited: bool = False
+    budget_note: str | None = None
+    warnings: list[str] = Field(default_factory=list)
+    elapsed_ms: float = 0.0
+
+
+def governing_not_measured(reason: str, *, filename: str = "") -> GoverningWall:
+    return GoverningWall(filename=filename, measured=False, not_measured_reason=reason)
+
+
+def measure_governing_wall(
+    shape,
+    *,
+    filename: str = "",
+    max_rays: int | None = None,
+    grid_side: int = DEFAULT_GRID_SIDE,
+) -> GoverningWall:
+    """The thickest region found in an already-read B-Rep shape.
+
+    Casts the same rays as `measure_wall_thickness` (by calling it), then at
+    the middle of each span measures the exact distance to the solid's faces.
+    Spans are taken longest first; once a span is no longer than twice the
+    largest ball found, no remaining span can hold a larger one (its middle is
+    half a span from the face it started on), so the search stops there.
+    Deterministic: the order is fixed and ties keep the first found.
+    """
+    from OCP.BRep import BRep_Builder
+    from OCP.BRepBuilderAPI import BRepBuilderAPI_MakeVertex
+    from OCP.BRepExtrema import BRepExtrema_DistShapeShape
+    from OCP.TopAbs import TopAbs_ShapeEnum
+    from OCP.TopExp import TopExp_Explorer
+    from OCP.TopoDS import TopoDS_Compound
+    from OCP.gp import gp_Pnt
+
+    started = time.perf_counter()
+    spans: list = []
+    walls = measure_wall_thickness(
+        shape, filename=filename, max_rays=max_rays, grid_side=grid_side, spans=spans
+    )
+    common = dict(
+        filename=filename,
+        grid_side=walls.grid_side,
+        budget_limited=walls.budget_limited,
+        budget_note=walls.budget_note,
+        warnings=list(walls.warnings),
+        spans_sampled=len(spans),
+    )
+    if not walls.measured or not spans:
+        return GoverningWall(
+            measured=False,
+            not_measured_reason=walls.not_measured_reason
+            or "No sampled wall was found, so no thickest region can be measured.",
+            **common,
+        )
+
+    # Each solid's faces as a compound, not the solid: a distance to a solid is
+    # zero from a point inside it, and the distance wanted is to its boundary.
+    boundaries = []
+    explorer = TopExp_Explorer(shape, TopAbs_ShapeEnum.TopAbs_SOLID)
+    while explorer.More():
+        compound = TopoDS_Compound()
+        builder = BRep_Builder()
+        builder.MakeCompound(compound)
+        faces = TopExp_Explorer(explorer.Current(), TopAbs_ShapeEnum.TopAbs_FACE)
+        while faces.More():
+            builder.Add(compound, faces.Current())
+            faces.Next()
+        boundaries.append(compound)
+        explorer.Next()
+
+    order = sorted(range(len(spans)), key=lambda index: (-spans[index][0], index))
+    best: tuple[float, int] | None = None
+    best_centre = None
+    measured = 0
+    for index in order:
+        length, _, _, start, end, solid_index = spans[index]
+        if best is not None and length / 2.0 <= best[0]:
+            break
+        centre = gp_Pnt(
+            (start.X() + end.X()) / 2.0, (start.Y() + end.Y()) / 2.0, (start.Z() + end.Z()) / 2.0
+        )
+        distance = BRepExtrema_DistShapeShape(
+            BRepBuilderAPI_MakeVertex(centre).Vertex(), boundaries[solid_index]
+        )
+        measured += 1
+        if not distance.IsDone():
+            continue
+        radius = min(distance.Value(), length / 2.0)
+        if best is None or radius > best[0]:
+            best = (radius, index)
+            best_centre = centre
+
+    if best is None:
+        return GoverningWall(
+            measured=False,
+            not_measured_reason="No distance from a sampled wall's middle to the solid's faces could be measured.",
+            balls_measured=measured,
+            **common,
+        )
+    radius, index = best
+    length, from_face, to_face, _, _, _ = spans[index]
+    return GoverningWall(
+        measured=True,
+        thickness_mm=round(2.0 * radius, OUTPUT_DECIMALS),
+        centre=_p(best_centre.X(), best_centre.Y(), best_centre.Z()),
+        from_face=from_face,
+        to_face=to_face,
+        span_mm=round(length, OUTPUT_DECIMALS),
+        minimum_wall_mm=walls.minimum.thickness_mm if walls.minimum else None,
+        balls_measured=measured,
+        elapsed_ms=round((time.perf_counter() - started) * 1000.0, 3),
+        **common,
+    )
+
+
 __all__ = [
     "DEFAULT_GRID_SIDE",
+    "GOVERNING_LIMITATIONS",
+    "GOVERNING_METHOD",
+    "GoverningWall",
+    "governing_not_measured",
+    "measure_governing_wall",
     "HISTOGRAM_EDGES_MM",
     "LIMITATIONS",
     "METHOD",

@@ -173,15 +173,17 @@ def test_only_welding_can_be_timed():
     # Fit-up and weld finishing are timeable too, but only as part of the welds'
     # own time (sections 7 and 8), so their operations are welding operations.
     # Sheet cutting and bending have their own time model, measured from the flat
-    # pattern (tests/test_sheet_pricing.py); stock cutting still has none.
+    # pattern (tests/test_sheet_pricing.py); injection moulding from the measured
+    # governing wall (tests/test_moulding_times.py); stock cutting still has none.
     assert TIMEABLE_STAGES == {
         "welding": "welding",
         "fit_up": "welding",
         "weld_finishing": "welding",
         "sheet_cutting": "sheet_cutting",
         "bending": "bending",
+        "moulding": "injection_moulding",
     }
-    with pytest.raises(ValueError, match="only welding, sheet cutting and bending have a time model"):
+    with pytest.raises(ValueError, match="only welding, sheet cutting, bending and injection moulding have a time model"):
         timed_stages({"cutting": {"pricing": "timed"}}, ["cutting", "fit_up", "welding"])
     with pytest.raises(ValueError, match="must be 'stage_rate' or 'timed'"):
         timed_stages({"welding": {"pricing": "hourly"}}, ["welding"])
@@ -285,7 +287,7 @@ def test_timing_a_stage_without_a_time_model_is_refused():
     publish_weld_shop()
     response = cost(stage_inputs={"cutting": {"pricing": "timed"}})
     assert response.status_code == 400
-    assert "only welding, sheet cutting and bending have a time model" in response.json()["detail"]
+    assert "only welding, sheet cutting, bending and injection moulding have a time model" in response.json()["detail"]
 
 
 def test_a_yield_on_a_timed_stage_is_refused_not_dropped():

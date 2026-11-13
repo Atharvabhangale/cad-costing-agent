@@ -142,8 +142,10 @@ from cad_costing_agent.raw_stock import (
     propose_bar_stock,
     record_stock_decision,
 )
+from cad_costing_agent.operation_time import moulding_material_row
 from cad_costing_agent.stage_costing import (
     MATERIAL_SUPPLYING_STAGES,
+    TIMED_KEEPS_MATERIAL_AND_TOOL,
     StageInput,
     material_supplying_stage,
     price_stages,
@@ -2632,6 +2634,15 @@ class ProcessRouteCatalog(BaseModel):
             "an engineer-entered yield; the page offers the input for these and no others."
         ),
     )
+    timed_material_stages: list[str] = Field(
+        default_factory=list,
+        description=(
+            "Stage ids that keep a stage line when priced by time (injection moulding): the line "
+            "carries the material at the rate set's material price and the one-off tool charge, "
+            "and the time prices only the press. The page offers their mass, yield, tool life and "
+            "cavity inputs while they are timed."
+        ),
+    )
 
 
 @app.get("/process-routes", response_model=ProcessRouteCatalog)
@@ -2649,6 +2660,7 @@ def process_routes() -> ProcessRouteCatalog:
         routes=route_catalog(),
         not_assessed=list(NOT_ASSESSED),
         yield_stages=sorted(MATERIAL_SUPPLYING_STAGES),
+        timed_material_stages=sorted(TIMED_KEEPS_MATERIAL_AND_TOOL),
     )
 
 
@@ -3147,6 +3159,116 @@ def _entered_amortisation_quantity(stage_id: str, entry) -> int | None:
     return int(value)
 
 
+def _entered_cavities(entry) -> int | None:
+    """The cavity count a person entered for the moulding stage, or None when absent."""
+    if not isinstance(entry, dict) or entry.get("cavities") is None:
+        return None
+    value = entry["cavities"]
+    if (
+        isinstance(value, bool)
+        or not isinstance(value, (int, float))
+        or not math.isfinite(value)
+        or value != int(value)
+        or value < 1
+    ):
+        raise ValueError(
+            "'cavities' for stage 'moulding' must be a whole number, at least 1 — how many parts "
+            f"one shot of the mould makes; got {value!r}."
+        )
+    return int(value)
+
+
+def _check_moulding_line(
+    plan: "ManufacturingPlan | None",
+    classification,
+    timed: dict[str, str],
+    stage_input_values: dict,
+    material: str,
+    session: Session,
+) -> None:
+    """A moulding time must be for this mould and this material, or it is refused.
+
+    The cavity count is the engineer's and is entered on the moulding stage. It
+    only means something when moulding is priced by time — a stage rate is per
+    kg or per piece already — so it is refused on a stage-rate route rather
+    than ignored. A costed moulding line whose committed time is the system's
+    must have been timed for the cavities entered and for the part's material
+    (its recorded thermal figures must be the profile's row for it); a time the
+    engineer typed is their whole figure and is taken as entered.
+    """
+    route = classification.route if classification is not None else None
+    route_ids = [stage.stage for stage in route.stages] if route is not None else []
+    cavities = _entered_cavities(stage_input_values.get("moulding"))
+    if "moulding" not in route_ids:
+        return  # entered for a route being compared, not this one
+    if "moulding" not in timed:
+        if cavities is not None:
+            raise ValueError(
+                f"{cavities} cavities were entered for injection moulding, but it is priced by "
+                "its stage rate, which is per kg or per piece already, so a cavity count changes "
+                "nothing. Remove it, or price moulding by time."
+            )
+        return
+    if plan is None:
+        return  # the timed-stage check has already refused a plan with no moulding line
+    lines = [
+        operation
+        for operation in plan.operations
+        if plan.counts_toward_cost(operation)
+        and operation.operation_type == "injection_moulding"
+        and operation.time_source is TimeSource.SYSTEM
+    ]
+    for line in lines:
+        timed_for = line.system_time_parameters.get("cavities")
+        if cavities is None or timed_for is None or int(timed_for) != cavities:
+            raise HTTPException(
+                status_code=422,
+                detail={
+                    "error": "moulding_cavities_disagree",
+                    "message": (
+                        f"No estimate was produced: the moulding line {line.operation_id} was "
+                        f"timed for {int(timed_for) if timed_for else 'no'} cavities, and "
+                        + (f"{cavities} were" if cavities is not None else "none were")
+                        + " entered on the moulding stage. Enter the cavity count on the stage "
+                        "and generate the moulding line again for it."
+                    ),
+                    "operations": [line.operation_id],
+                },
+            )
+        try:
+            profile = TimeProfileRepository(session).get(
+                line.system_time_profile_id, line.system_time_profile_version
+            )
+        except (ValueError, TypeError):
+            profile = None
+        row = moulding_material_row(profile.assumptions, material) if profile else None
+        recorded = line.system_time_parameters
+        if row is None or (
+            row.thermal_diffusivity_mm2_per_s,
+            row.melt_temperature_c,
+            row.mould_temperature_c,
+            row.eject_temperature_c,
+        ) != (
+            recorded.get("moulding_thermal_diffusivity_mm2_per_s"),
+            recorded.get("moulding_melt_temperature_c"),
+            recorded.get("moulding_mould_temperature_c"),
+            recorded.get("moulding_eject_temperature_c"),
+        ):
+            raise HTTPException(
+                status_code=422,
+                detail={
+                    "error": "moulding_time_for_another_material",
+                    "message": (
+                        f"No estimate was produced: the moulding line {line.operation_id} was "
+                        f"timed with thermal data that is not the time profile's row for "
+                        f"'{material}', the material being costed. Generate the moulding line "
+                        "again for this material."
+                    ),
+                    "operations": [line.operation_id],
+                },
+            )
+
+
 @dataclass
 class PricedCadPart:
     """Everything `/cost/cad-part` works out before it stores an estimate.
@@ -3342,13 +3464,15 @@ def price_cad_part(
                     "message": (
                         f"No estimate was produced: {labels} is priced by time, and the plan has "
                         "no operation of it with a committed time. Add its operations — the "
-                        "welds, or the cut and bend lines from the measured flat pattern — and "
-                        "accept or enter their times, or price it from its stage rate."
+                        "welds, the cut and bend lines from the measured flat pattern, or the "
+                        "moulding line from the measured wall — and accept or enter their times, "
+                        "or price it from its stage rate."
                     ),
                     "stages": untimed,
                 },
             )
         _refuse_weld_component_charged_twice(plan, classification, timed)
+        _check_moulding_line(plan, classification, timed, stage_input_values, material, session)
 
         # A bar counts only once a person confirmed it; an unconfirmed proposal
         # is recorded but material is costed from the finished part as before.
@@ -3393,6 +3517,10 @@ def price_cad_part(
         # would be dropped without a word. It is refused instead: a yield divides
         # the mass a per-kg rate is charged on, and this stage has no such charge.
         for stage_id in timed:
+            if stage_id in TIMED_KEEPS_MATERIAL_AND_TOOL:
+                # Its line stays, carrying the material and the mould, so a
+                # yield (runner and sprue) and a tool life still apply to it.
+                continue
             if stage_yields.get(stage_id) is not None:
                 raise ValueError(
                     f"A yield of {stage_yields[stage_id]:g}% was entered for "
@@ -3419,10 +3547,12 @@ def price_cad_part(
                     mass_kg=(stage_input_values.get(stage.stage) or {}).get("mass_kg"),
                     yield_percent=stage_yields.get(stage.stage),
                     amortisation_quantity=stage_amortisation.get(stage.stage),
+                    timed=stage.stage in timed,
+                    material_name=material if stage.stage in timed else None,
                 )
                 for stage in classification.route.stages
                 if (stage.stage not in STAGES or STAGES[stage.stage][1] is None)
-                and stage.stage not in timed
+                and (stage.stage not in timed or stage.stage in TIMED_KEEPS_MATERIAL_AND_TOOL)
             ]
             finished = calculate_mass_from_geometry(
                 geometry,
@@ -5280,3 +5410,124 @@ def _sheet_stock_for_costing(
             "from that share."
         )
     return decided
+
+
+# ------------------------------------------------------------ injection moulding
+#
+# The governing wall of an exact B-Rep part (the thickest region the wall
+# measurement found, `features.wall_thickness.measure_governing_wall`) and the
+# one moulding line a part priced by time adds to its plan. The wall is measured
+# on the shape recognition reads, through `_import` and
+# `recognize_features_with_shape`, exactly as `/cad/wall-thickness` measures —
+# no other loader and no other ray caster. Nothing here is stored or priced:
+# the line's time is a proposal, unaccepted, and reaches a cost only through the
+# plan, on a route whose moulding stage is priced by time.
+
+from cad_costing_agent.moulding_operations import (  # noqa: E402
+    MouldingPlanLines,
+    moulding_plan_lines,
+)
+
+
+@app.post("/cad/governing-wall", response_model=wall_thickness.GoverningWall)
+async def cad_governing_wall(file: UploadFile = File(...)) -> wall_thickness.GoverningWall:
+    """The thickest region found in an uploaded exact B-Rep part: the wall a moulding
+    cooling time is governed by, with the method and what it can miss.
+
+    Read-only analysis; changes nothing and persists nothing. Refused (400) for
+    geometry it cannot measure honestly, with the same reasons as the wall
+    thickness.
+    """
+    data = await file.read()
+    if len(data) > MAX_UPLOAD_BYTES:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"CAD file is {len(data) / 1024 / 1024:.1f} MB, above the "
+                f"{MAX_UPLOAD_BYTES // 1024 // 1024} MB limit for this POC."
+            ),
+        )
+    filename = file.filename or ""
+    _import(data, filename, CAPABILITY_FEATURES, with_geometry=False)
+    try:
+        recognized = recognize_features_with_shape(data, filename)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:  # noqa: BLE001 - a bad model must not take the app down
+        raise HTTPException(
+            status_code=500,
+            detail=(
+                f"This model could not be read for analysis ({type(exc).__name__}). "
+                "Geometry, the 3D preview and costing are unaffected."
+            ),
+        ) from exc
+    reason = wall_thickness.refusal_reason(
+        recognized.recognition.representation, recognized.shape is not None
+    )
+    if reason is not None:
+        raise HTTPException(status_code=400, detail=reason)
+    try:
+        return wall_thickness.measure_governing_wall(recognized.shape, filename=filename)
+    except Exception as exc:  # noqa: BLE001 - a bad model must not take the app down
+        raise HTTPException(
+            status_code=500,
+            detail=(
+                f"Governing-wall measurement failed unexpectedly on this model "
+                f"({type(exc).__name__}). Geometry, the 3D preview and costing are unaffected."
+            ),
+        ) from exc
+
+
+class MouldingLineRequest(BaseModel):
+    governing_wall: wall_thickness.GoverningWall = Field(
+        description="The /cad/governing-wall measurement the line is proposed from, as returned."
+    )
+    material: str = Field(
+        min_length=1, description="The part's material, which picks the profile's thermal row."
+    )
+    cavities: int | None = Field(
+        default=None,
+        ge=1,
+        description="Parts per shot — the engineer's. Omitted, the line's time needs input.",
+    )
+
+
+@app.post("/operations/moulding-line", response_model=MouldingPlanLines)
+def operations_moulding_line(
+    request: MouldingLineRequest,
+    time_profile_id: str | None = Query(
+        None, description="Published profile to estimate under. Omit for the built-in baseline."
+    ),
+    time_profile_version: str | None = Query(
+        None, description="Exact profile version to pin. Omit to use the latest."
+    ),
+    session: Session = Depends(get_session),
+) -> MouldingPlanLines:
+    """The moulding operation a measured part adds to its plan, with its estimated time.
+
+    Takes the measurement rather than the file. The line is a system proposal:
+    its time is estimated under the selected profile and **not accepted**. It
+    reaches a cost only once someone accepts it or enters a time, on a route
+    whose moulding stage is priced by time. Nothing is stored and nothing priced.
+    """
+    wall = request.governing_wall
+    if not wall.measured or wall.thickness_mm is None:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "No governing wall was measured, so no cooling time can be estimated: "
+                + (wall.not_measured_reason or "the measurement found no wall.")
+            ),
+        )
+    profile = None
+    if time_profile_id:
+        try:
+            profile = TimeProfileRepository(session).get(time_profile_id, time_profile_version)
+        except ValueError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+    try:
+        return moulding_plan_lines(
+            wall.thickness_mm, material=request.material, cavities=request.cavities, profile=profile
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc

@@ -182,12 +182,16 @@ function renderStageInputs() {
   const rows = c.route.stages
     .filter((stage) => !stage.cost_model_available)
     .map((stage) => {
-      const rate = rateSet && rateSet.stage_rates ? rateSet.stage_rates[stage.stage] : null;
-      if (!rate) {
+      const published = rateSet && rateSet.stage_rates ? rateSet.stage_rates[stage.stage] : null;
+      // Moulding keeps a line when priced by time (material and mould), so it is
+      // offered even without a stage rate; the server's list says which stages.
+      const keepsLine = ((processRoutes && processRoutes.timed_material_stages) || []).includes(stage.stage);
+      if (!published && !keepsLine) {
         return `<tr><th>${escapeHtml(stage.label)}</th><td colspan="2" class="warning-inline">
           No rate in ${rateSet ? `${escapeHtml(rateSet.name)} v${escapeHtml(rateSet.version)}` : "the selected rate set"}.
           Publish a version with one under Rate sets.</td></tr>`;
       }
+      const rate = published || {};
       const parts = [];
       if (rate.unit_rate !== null && rate.unit_rate !== undefined) {
         parts.push(`${money(rate.unit_rate, currency)} ${rate.unit_basis === "per_kg" ? "per kg" : "per piece"}`);
@@ -200,13 +204,16 @@ function renderStageInputs() {
       // Which stages may carry a yield is the server's list, read with the
       // routes; the page keeps none of its own.
       const yieldStages = (processRoutes && processRoutes.yield_stages) || [];
+      // Timed moulding charges its material per kg on this line, so its mass
+      // and yield (runner and sprue) are still asked for.
+      const materialLine = keepsLine && timed;
       const input =
-        rate.unit_basis === "per_kg" && !timed
+        (rate.unit_basis === "per_kg" && !timed) || materialLine
           ? `<label>Mass charged on, kg per part
                <input type="number" step="any" min="0" class="stage-mass" data-stage="${escapeHtml(stage.stage)}"
                  value="${entered ?? ""}" placeholder="from CAD unless entered"></label>` +
             (yieldStages.includes(stage.stage)
-              ? `<label>Yield, % of the metal poured or billet bought
+              ? `<label>${keepsLine ? "Yield, % of the shot that is parts (runner and sprue are the rest)" : "Yield, % of the metal poured or billet bought"}
                    <input type="number" step="any" min="0" max="100" class="stage-yield" data-stage="${escapeHtml(stage.stage)}"
                      value="${enteredYield ?? ""}" placeholder="none unless entered"></label>`
               : "")
@@ -214,7 +221,7 @@ function renderStageInputs() {
       // Only a stage whose published rate has a one-off charge can have it
       // amortised; the rate set says which. The share is the server's to work out.
       const amortise =
-        rate.batch_charge && !timed
+        rate.batch_charge && (!timed || materialLine)
           ? `<label>Tool life, pieces the pattern/die will make
                <input type="number" step="1" min="1" class="stage-amortisation" data-stage="${escapeHtml(stage.stage)}"
                  value="${enteredToolLife ?? ""}" placeholder="whole charge to this batch"></label>`
@@ -222,7 +229,20 @@ function renderStageInputs() {
       // A stage with a time model can be priced by time instead: its welds, or
       // its cut and bend lines, are then operations in the plan, costed at the
       // rate set's hourly rate.
-      const timeWord = TIMED_STAGE_PROCESSES[stage.stage] === "welding" ? "weld" : "measured";
+      const timeWord =
+        TIMED_STAGE_PROCESSES[stage.stage] === "welding" ? "weld" : keepsLine ? "shot" : "measured";
+      const cavities = materialLine
+        ? `<label>Cavities, parts per shot
+             <input type="number" step="1" min="1" class="stage-cavities" data-stage="${escapeHtml(stage.stage)}"
+               value="${(state.stageInputs[stage.stage] || {}).cavities ?? ""}" placeholder="none assumed"></label>`
+        : "";
+      const timedText = materialLine
+        ? `<span class="muted">press priced by shot time; this line charges the material at the rate ` +
+          `set's price per kg${rate.batch_charge ? ` + the mould, ${money(rate.batch_charge, currency)}` : " — no mould charge published"}</span>`
+        : `<span class="muted">not used — priced by ${timeWord} time</span>`;
+      const rateText = published
+        ? parts.join(" + ")
+        : `<span class="warning-inline">No rate in ${rateSet ? `${escapeHtml(rateSet.name)} v${escapeHtml(rateSet.version)}` : "the selected rate set"}; price it by time, or publish one.</span>`;
       const pricing = TIMED_STAGE_PROCESSES[stage.stage]
         ? `<label>Priced by <select class="stage-pricing" data-stage="${escapeHtml(stage.stage)}">
              <option value="stage_rate"${timed ? "" : " selected"}>this stage rate</option>
@@ -233,9 +253,9 @@ function renderStageInputs() {
            </select></label>`
         : "";
       return `<tr><th>${escapeHtml(stage.label)}</th>
-        <td>${timed ? `<span class="muted">not used — priced by ${timeWord} time</span>` : parts.join(" + ")}${
+        <td>${timed ? timedText : rateText}${
           rate.note && !timed ? `<div class="hint">${escapeHtml(rate.note)}</div>` : ""}</td>
-        <td>${pricing || input || amortise ? `<div class="stage-input-fields">${pricing}${input}${amortise}</div>` : ""}</td></tr>`;
+        <td>${pricing || input || amortise || cavities ? `<div class="stage-input-fields">${pricing}${cavities}${input}${amortise}</div>` : ""}</td></tr>`;
     })
     .join("");
   host.innerHTML =
@@ -261,6 +281,15 @@ function renderStageInputs() {
       const raw = input.value.trim();
       setStageInput(input.dataset.stage, "yield_percent", raw === "" ? null : Number(raw));
       if (typeof renderPlanRoute === "function") renderPlanRoute();
+    })
+  );
+  // The cavity count is the engineer's; blank is "not entered", and the moulding
+  // line's time then needs input. Changing it makes an existing line stale: the
+  // server refuses a line timed for another count.
+  host.querySelectorAll("input.stage-cavities").forEach((input) =>
+    input.addEventListener("input", () => {
+      const raw = input.value.trim();
+      setStageInput(input.dataset.stage, "cavities", raw === "" ? null : Number(raw));
     })
   );
   host.querySelectorAll("input.stage-amortisation").forEach((input) =>
@@ -311,3 +340,66 @@ $("process-override").addEventListener("click", () =>
 );
 $("process-unknown").addEventListener("click", () => decideProcess("edited", "unknown"));
 $("process-reset").addEventListener("click", () => decideProcess("pending"));
+
+// The moulding line, from the part's measured governing wall (the thickest region
+// found) and the cavities entered on the moulding stage. The server measures,
+// estimates and returns the line unaccepted; this only puts it in the plan,
+// replacing any earlier one by its fixed id. Nothing is worked out here.
+(function () {
+  async function addMouldLine() {
+    if (!state.file) {
+      showError("Choose the CAD file first: the moulding line comes from its measured wall.");
+      return;
+    }
+    const cavities = ((state.stageInputs || {}).moulding || {}).cavities;
+    let wall;
+    let lines;
+    try {
+      const body = new FormData();
+      body.append("file", state.file);
+      wall = await api("/cad/governing-wall", { method: "POST", body });
+      lines = await api(`/operations/moulding-line${timeProfileQuery()}`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          governing_wall: wall,
+          material: $("material").value,
+          cavities: cavities === undefined ? null : cavities,
+        }),
+      });
+    } catch (error) {
+      showError(error.message);
+      return;
+    }
+    if (!state.plan) {
+      state.plan = {
+        setups: [], operations: [], units: "mm", source_filename: state.file.name,
+        route_processes: decidedRouteProcesses(), as_formed_feature_types: decidedAsFormedTypes(),
+      };
+    }
+    const operationIds = new Set(lines.operations.map((o) => o.operation_id));
+    const setupIds = new Set(lines.setups.map((s) => s.setup_id));
+    state.plan.operations = state.plan.operations.filter((o) => !operationIds.has(o.operation_id));
+    state.plan.setups = (state.plan.setups || []).filter((s) => !setupIds.has(s.setup_id));
+    const after = state.plan.setups.length;
+    lines.setups.forEach((setup, index) => state.plan.setups.push({ ...setup, sequence_position: after + index + 1 }));
+    lines.operations.forEach((operation) => state.plan.operations.push({ ...operation }));
+    if (!state.plan.time_profile_id) {
+      state.plan.time_profile_id = lines.time_profile_id;
+      state.plan.time_profile_version = lines.time_profile_version;
+      state.plan.time_profile_name = lines.time_profile_name;
+    }
+    state.planWarnings = [
+      `Governing wall ${wall.thickness_mm} mm — ${wall.method_description}`,
+      ...(wall.limitations || []),
+      ...(lines.warnings || []),
+    ];
+    renumberSetups();
+    renderPlan();
+  }
+
+  // The route stage row's "+ Add from measured wall" button is drawn by plan.js.
+  document.addEventListener("click", (event) => {
+    if (event.target.closest("button.add-moulding-line")) addMouldLine();
+  });
+})();

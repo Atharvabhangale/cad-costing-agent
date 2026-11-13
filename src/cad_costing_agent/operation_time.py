@@ -103,6 +103,22 @@ Both default to *absent* exactly as welding does, and the cut perimeter, pierce
 count, thickness and bend count are read from `features.sheet_metal`'s
 measurement — a K-factor the engineer entered decides the perimeter.
 
+**Injection moulding** — one shot, from the measured governing wall::
+
+    cooling = s² / (π² · α) · ln((4/π) · (T_melt − T_mould) / (T_eject − T_mould))
+    shot    = fill + pack + cooling + open_eject           (seconds)
+    cycle   = shot / cavities / 60                         (minutes per part)
+
+The standard one-dimensional slab result: a plate of thickness `s` cooled from
+both faces, held at the mould temperature, until its centre reaches the
+ejection temperature (first term of the series solution). `s` is the governing
+wall — the thickest region found by `features.wall_thickness` — and `α` and the
+three temperatures are the profile's row for the part's material, keyed by the
+material's name: material properties, never inferred from the CAD and never
+defaulted. The cavity count is the engineer's; absent, no time is given. A
+moulding cycle is seconds per part, so it is reported to 0.0001 min rather than
+the 0.01 min (0.6 s) every machining time is rounded to.
+
 Setup time is a flat per-process figure, and is per *operation line* rather than
 per physical setup — six drilled holes listed separately carry six setups. That
 is stated in the assumptions rather than being quietly consolidated, because
@@ -175,6 +191,39 @@ class SheetCuttingPoint(BaseModel):
     thickness_mm: float = Field(gt=0, le=200.0, allow_inf_nan=False)
     cut_speed_mm_per_min: float = Field(gt=0, le=100_000.0, allow_inf_nan=False)
     pierce_seconds: float = Field(ge=0, le=600.0, allow_inf_nan=False)
+
+
+class MouldingMaterial(BaseModel):
+    """One material's thermal data for the moulding cooling time, keyed by its name.
+
+    Material properties, not shop figures: the profile carries them because the
+    same polymer cools the same way in any shop, and keying them by the material
+    name the cost request already uses means nothing about them is read from the
+    CAD or assumed for a material the profile does not list.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    material: str = Field(
+        min_length=1,
+        max_length=100,
+        description="The material name as the cost request and rate set name it, e.g. 'abs'.",
+    )
+    thermal_diffusivity_mm2_per_s: float = Field(gt=0, le=100.0, allow_inf_nan=False)
+    melt_temperature_c: float = Field(gt=-273.15, le=2000.0, allow_inf_nan=False)
+    mould_temperature_c: float = Field(gt=-273.15, le=2000.0, allow_inf_nan=False)
+    eject_temperature_c: float = Field(gt=-273.15, le=2000.0, allow_inf_nan=False)
+    note: str = Field(default="", max_length=500, description="Where the figures came from.")
+
+    @model_validator(mode="after")
+    def _ordered(self) -> "MouldingMaterial":
+        if not self.melt_temperature_c > self.eject_temperature_c > self.mould_temperature_c:
+            raise ValueError(
+                f"'{self.material}': the melt temperature must be above the ejection temperature, "
+                "and the ejection temperature above the mould temperature — a part is ejected "
+                "hotter than the mould and colder than the melt."
+            )
+        return self
 
 
 class TimeAssumptions(BaseModel):
@@ -369,6 +418,44 @@ class TimeAssumptions(BaseModel):
         description="Loading and unloading the part at the brake, added once per part. Optional.",
     )
 
+    # --- injection moulding ---
+    #
+    # None by default, like welding and sheet: the built-in baseline describes a
+    # machining shop, and no moulding figure is assumed on its behalf. The wall
+    # the cooling time is governed by is measured (`features.wall_thickness`),
+    # and the cavity count is the engineer's.
+    moulding_materials: tuple[MouldingMaterial, ...] | None = Field(
+        default=None,
+        description=(
+            "Thermal data per material, keyed by material name: diffusivity and the melt, mould "
+            "and ejection temperatures the cooling time is worked out from. A material the profile "
+            "does not list gets no moulding time."
+        ),
+    )
+    moulding_fill_seconds: float | None = Field(
+        default=None, ge=0, le=600.0, allow_inf_nan=False, description="Injecting one shot."
+    )
+    moulding_pack_seconds: float | None = Field(
+        default=None,
+        ge=0,
+        le=600.0,
+        allow_inf_nan=False,
+        description="Packing and holding pressure after the fill, before cooling is timed.",
+    )
+    moulding_open_eject_seconds: float | None = Field(
+        default=None,
+        ge=0,
+        le=600.0,
+        allow_inf_nan=False,
+        description="Opening the mould, ejecting the shot and closing again.",
+    )
+    moulding_setup_minutes: float | None = Field(
+        default=None,
+        ge=0,
+        le=10000.0,
+        description="Hanging the mould, heating it and proving the first shots, once per setup.",
+    )
+
     # --- shared spindle limits ---
     #
     # These two are the one place the model deliberately *clamps* rather than
@@ -396,6 +483,21 @@ class TimeAssumptions(BaseModel):
                 "sheet_cutting_table rows must be listed thinnest first, each thickness once — "
                 f"got {', '.join(f'{t:g}' for t in thicknesses)} mm."
             )
+        return self
+
+    @model_validator(mode="after")
+    def _check_moulding_materials(self) -> "TimeAssumptions":
+        rows = self.moulding_materials
+        if rows is None:
+            return self
+        if not rows:
+            raise ValueError(
+                "moulding_materials must have at least one row, or be left out for a profile that "
+                "times no moulding."
+            )
+        names = [row.material.strip().lower() for row in rows]
+        if len(set(names)) != len(names):
+            raise ValueError("moulding_materials lists a material more than once.")
         return self
 
     @model_validator(mode="after")
@@ -1339,6 +1441,125 @@ def _bending(dimensions: dict[str, float], a: TimeAssumptions):
     return cycle, "bending_time_v1", evidence, assumptions, parameters
 
 
+_MOULDING_PARAMETERS = (
+    "moulding_materials",
+    "moulding_fill_seconds",
+    "moulding_pack_seconds",
+    "moulding_open_eject_seconds",
+    "moulding_setup_minutes",
+)
+
+# A moulding cycle is seconds per part; 0.01 min (0.6 s) would be more than 10%
+# of a multi-cavity part's share of a shot. Reported to 0.0001 min (0.006 s).
+MOULDING_TIME_DECIMALS = 4
+
+
+def moulding_cooling_seconds(
+    wall_mm: float,
+    diffusivity_mm2_per_s: float,
+    melt_c: float,
+    mould_c: float,
+    eject_c: float,
+) -> float:
+    """t = s² / (π²·α) · ln((4/π)·(T_melt − T_mould)/(T_eject − T_mould)), in seconds."""
+    return (wall_mm**2) / (math.pi**2 * diffusivity_mm2_per_s) * math.log(
+        (4.0 / math.pi) * (melt_c - mould_c) / (eject_c - mould_c)
+    )
+
+
+def moulding_material_row(a: TimeAssumptions, material: str | None) -> MouldingMaterial | None:
+    """The profile's thermal row for this material name, or None."""
+    key = (material or "").strip().lower()
+    return next(
+        (row for row in (a.moulding_materials or ()) if row.material.strip().lower() == key), None
+    )
+
+
+def _moulding(dimensions: dict[str, float], material: str | None, a: TimeAssumptions):
+    """One shot of an injection mould, shared by its cavities."""
+    absent = [name for name in _MOULDING_PARAMETERS if getattr(a, name) is None]
+    if absent:
+        return _needs_input(
+            "This time profile has no moulding parameters (" + ", ".join(absent) + "), so no "
+            "moulding time is estimated. Select a profile that publishes them, or enter the time.",
+            absent,
+            a.is_illustrative,
+        )
+    wall = _positive(dimensions, "governing_wall_mm")
+    cavities = _count(dimensions, "cavities")
+    missing = [
+        name
+        for name, value in (
+            ("governing_wall_mm", wall),
+            ("cavities", cavities),
+            ("material", (material or "").strip() or None),
+        )
+        if value is None
+    ]
+    if missing:
+        return _needs_input(
+            "A moulding time needs the governing wall measured from the CAD model, the number of "
+            "cavities in the mould (the engineer's — none is assumed, not even one) and the part's "
+            f"material. Missing: {', '.join(missing)}.",
+            missing,
+            a.is_illustrative,
+        )
+    row = moulding_material_row(a, material)
+    if row is None:
+        listed = ", ".join(r.material for r in a.moulding_materials)
+        return _needs_input(
+            f"This time profile has no thermal data for '{material}' (it lists {listed}), so its "
+            "cooling time cannot be worked out. Nothing is borrowed from another material: publish "
+            "a profile version with a row for it, or enter the time.",
+            ["moulding_materials"],
+            a.is_illustrative,
+        )
+    alpha = row.thermal_diffusivity_mm2_per_s
+    melt, mould, eject = row.melt_temperature_c, row.mould_temperature_c, row.eject_temperature_c
+    cooling = moulding_cooling_seconds(wall, alpha, melt, mould, eject)
+    fill, pack = a.moulding_fill_seconds, a.moulding_pack_seconds
+    open_eject = a.moulding_open_eject_seconds
+    shot = fill + pack + cooling + open_eject
+    per_part = shot / cavities
+    cycle = per_part / 60.0
+    plural = "y" if cavities == 1 else "ies"
+    evidence = [
+        f"governing wall {wall:g} mm — the thickest region found in the CAD model (the largest "
+        "ball that fits inside the material at a sampled wall)",
+        f"{cavities} cavit{plural} — entered by the engineer, not read from the CAD",
+    ]
+    assumptions = [
+        f"{row.material}: thermal diffusivity {alpha:g} mm²/s, melt {melt:g} °C, mould {mould:g} "
+        f"°C, ejection {eject:g} °C — the profile's row for this material"
+        + (f" ({row.note})" if row.note else ""),
+        f"cooling {cooling:.6f} s = {wall:g}² / (π² × {alpha:g}) × ln((4/π) × ({melt:g} − "
+        f"{mould:g}) / ({eject:g} − {mould:g})) — a slab of the governing wall cooled from both "
+        "faces until its centre reaches the ejection temperature",
+        f"shot {shot:.6f} s = fill {fill:g} + pack {pack:g} + cooling {cooling:.6f} + open and "
+        f"eject {open_eject:g}",
+        f"per part {per_part:.6f} s = shot / {cavities} cavit{plural}; cycle {cycle:.4f} min",
+        "a round boss of the same thickness cools faster than the slab assumed here, so a wall "
+        "that is really a boss errs long; a thick region the wall measurement did not find errs "
+        "short",
+    ]
+    parameters = {
+        "moulding_fill_seconds": fill,
+        "moulding_pack_seconds": pack,
+        "moulding_open_eject_seconds": open_eject,
+        "moulding_setup_minutes": a.moulding_setup_minutes,
+        "moulding_thermal_diffusivity_mm2_per_s": alpha,
+        "moulding_melt_temperature_c": melt,
+        "moulding_mould_temperature_c": mould,
+        "moulding_eject_temperature_c": eject,
+        "governing_wall_mm": wall,
+        "cavities": float(cavities),
+        "moulding_cooling_seconds": round(cooling, 6),
+        "moulding_shot_seconds": round(shot, 6),
+        "moulding_seconds_per_part": round(per_part, 6),
+    }
+    return cycle, "injection_moulding_time_v1", evidence, assumptions, parameters
+
+
 _SETUP_MINUTES = {
     "drilling": lambda a: a.drilling_setup_minutes,
     "milling": lambda a: a.milling_setup_minutes,
@@ -1346,6 +1567,7 @@ _SETUP_MINUTES = {
     "welding": lambda a: a.welding_setup_minutes,
     "sheet_cutting": lambda a: a.sheet_cutting_setup_minutes,
     "bending": lambda a: a.bending_setup_minutes,
+    "injection_moulding": lambda a: a.moulding_setup_minutes,
 }
 
 # The one-line reason an estimate gives, by process. Machining's is generic.
@@ -1359,6 +1581,10 @@ _TIME_REASONS = {
         "profile's cutting table."
     ),
     "bending": "Bending time derived from the measured bend count and the profile's bending parameters.",
+    "injection_moulding": (
+        "Injection-moulding time derived from the measured governing wall, the material's thermal "
+        "data and the profile's shot times, shared by the engineer's cavity count."
+    ),
 }
 
 
@@ -1378,8 +1604,12 @@ def estimate_operation_time(
     drilling_steps: list[float] | None = None,
     stock_diameter_mm: float | None = None,
     weld: WeldSpec | None = None,
+    material: str | None = None,
 ) -> OperationTimeEstimate:
     """Estimate setup and cycle time for one operation. Deterministic.
+
+    For injection moulding, `material` is the part's material name, which picks
+    the profile's thermal row; every other process ignores it.
 
     For welding, `weld` is the engineer's description of the weld; nothing
     about a weld is read from the geometry.
@@ -1451,6 +1681,8 @@ def estimate_operation_time(
         outcome = _sheet_cutting(dimensions, a)
     elif process == "bending":
         outcome = _bending(dimensions, a)
+    elif process == "injection_moulding":
+        outcome = _moulding(dimensions, material, a)
     elif process == "turning" and (feature_type or "").lower() == "plane":
         outcome = _facing(dimensions, a)
     elif process == "turning":
@@ -1470,15 +1702,21 @@ def estimate_operation_time(
         else _weakest(suggestion_confidence, METHOD_CONFIDENCE_CEILING)
     )
 
-    cycle = _round(cycle)
-    setup = _round(setup)
+    if process == "injection_moulding":
+        cycle = round(cycle, MOULDING_TIME_DECIMALS)
+        setup = _round(setup)
+        total = round(setup + cycle, MOULDING_TIME_DECIMALS)
+    else:
+        cycle = _round(cycle)
+        setup = _round(setup)
+        total = _round(setup + cycle)
 
     return OperationTimeEstimate(
         time_status=TimeStatus.ESTIMATED,
         estimated=True,
         setup_time_minutes=setup,
         cycle_time_minutes=cycle,
-        total_time_minutes=_round(setup + cycle),
+        total_time_minutes=total,
         confidence=confidence,
         method=method,
         reason=_TIME_REASONS.get(
@@ -1530,6 +1768,10 @@ __all__ = [
     "drilling_options",
     "drilling_steps",
     "METHOD_CONFIDENCE_CEILING",
+    "MOULDING_TIME_DECIMALS",
+    "MouldingMaterial",
+    "moulding_cooling_seconds",
+    "moulding_material_row",
     "NEEDS_INPUT_NOTE",
     "OperationTimeEstimate",
     "SheetCuttingPoint",
@@ -1570,6 +1812,10 @@ class OperationTimeInput(BaseModel):
     )
     weld: WeldSpec | None = Field(
         default=None, description="Welding only: the weld as the engineer described it."
+    )
+    material: str | None = Field(
+        default=None,
+        description="Injection moulding only: the part's material, which picks the thermal row.",
     )
 
 
@@ -1645,6 +1891,7 @@ def estimate_operations(request: OperationTimeRequest, *, profile=None) -> Opera
                 drilling_steps=operation.drilling_steps,
                 stock_diameter_mm=request.stock_diameter_mm,
                 weld=operation.weld,
+                material=operation.material,
             ),
         )
         for index, operation in enumerate(request.operations, start=1)
