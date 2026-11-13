@@ -18,7 +18,7 @@ uvicorn cad_costing_agent.main:app --reload
 # whatever it is pointed at.
 CAD_COSTING_DATABASE_URL=sqlite:///./scratch.db uvicorn cad_costing_agent.main:app --port 8710
 
-# Tests (2499 collected; measured without cadmodels/: 2491 pass, 8 skip; full run about 2.5-12 min)
+# Tests (2633 collected; measured without cadmodels/: 2625 pass, 8 skip; full run about 3-12 min)
 # cadquery-ocp must stay below 8 (pinned): 8.x drops names this code imports.
 # A git worktree has no cadmodels/ (git-ignored), so tests needing real models
 # skip there (8 skips instead of 1). Judge a branch by a run in the main tree.
@@ -465,8 +465,8 @@ checks recognized features against a versioned, immutable `DfmProfile` (table
 reach a plan, a time or a cost.
 
 - **A rule needs a measured input.** Never add one for a quantity no recognizer measures
-  (pocket corner radius). Wall thickness is now measured (`features/wall_thickness.py`) and
-  feeds exactly one rule, `dfm_min_wall`. A feature missing the dimension is not checked; a
+  (pocket corner radius). Wall thickness (`features/wall_thickness.py`) feeds `dfm_min_wall`;
+  draft and undercuts (`features/draw_direction.py`) feed `dfm_min_draft` and `dfm_undercut`. A feature missing the dimension is not checked; a
   rule absent from a profile is reported as not evaluated.
 - **A threshold cites a source or says none was found** (`no_published_source_found_illustrative`).
   Publishing one marked published without a title and URL is refused (422). Never present
@@ -516,6 +516,39 @@ the reason. Each reads the shape through the single STEP/IGES readers.
 - `sheet.js` declares no global functions (an IIFE) and wraps `renderProcessClassification` /
   `resetFeaturesPanel` the way `dfm.js` does. The time-setup editor must round-trip
   `sheet_cutting_table`.
+
+### Iteration 8: pull direction, moulding time, sheet nesting
+
+- **One ray caster: `features/rays.py`.** `approach.py`, `draw_direction.py` and the wall
+  measurement's spans use it; `blocked_along` must stay equal to `first_hit` (a test holds it).
+  Never add a ray caster to a feature module.
+- **Draft and undercuts are measured, never evidence of a process.** `draw_direction.py` imports
+  `limits`, `features.model` and `features.rays` only; only `main.py` reads it. The recommended
+  axis is a ranking by two counts — never call it the pull. `dfm_min_draft` / `dfm_undercut` run
+  only for a stated forming process (`forming_process`, or a decided route starting with
+  casting, forging or moulding); `_stated_forming_process` reads those two request fields and
+  nothing measured. DFM profile 1.2.0 is immutable; the next version is 1.3.0.
+- **The governing wall is the largest inscribed ball found at sampled wall midpoints**, never the
+  largest per-face minimum (that reads a rim or plate edge as its length). It can only
+  under-report. `measure_governing_wall` uses `measure_wall_thickness(spans=...)`; never a
+  second set of rays.
+- **Moulding thermal data is a profile row keyed by material**; never default it or borrow
+  another material's. **Cavities are the engineer's**: absent is needs-input, never 1.
+  `_check_moulding_line` refuses a system-timed line timed for other cavities or another
+  material's row, and cavities on a stage-rate route. A moulding cycle is rounded to 0.0001 min.
+- **Timed moulding keeps its stage line** (`TIMED_KEEPS_MATERIAL_AND_TOOL`) for the material
+  (the rate set's material price, `unit_rate_source: "material_rate"`, the engineer's runner
+  yield) and the mould's one-off charge (amortisable — the one timed stage where yield and tool
+  life are allowed). Its stage unit rate is never charged. Never drop the line when timing
+  moulding (the material would vanish) and never also charge the material line. `process.js`
+  reads `/process-routes`' `timed_material_stages`; do not add a JS mirror of it.
+- **A sheet part's material is its sheet share, once a person says so.** The nest is a
+  bounding-rectangle grid estimate, never presented as a real nest; sheet size, spacing and
+  margin are the engineer's, with no defaults; `user_parts_per_sheet` sits beside the nest and
+  never overwrites it. A confirmed share is re-measured from the file in
+  `_sheet_stock_for_costing` — never trust the browser's blank. `sheet_nesting.py` imports
+  nothing from the package; `SheetStock` reuses the bar's fields (`material_stock_volume_mm3`,
+  `stock_mass`, `material_basis`, `stock_description`). One part has one confirmed stock.
 
 ### A cost-driver table reads one estimate; it never ranks
 
@@ -806,7 +839,7 @@ features — the status that path has always returned).
 
 ### Resource budgets
 
-`limits.py` holds ten separately configurable budgets (the ninth is the matrix preview's cell cap, the tenth `CAD_COSTING_MAX_WALL_RAYS`) (`CAD_COSTING_MAX_*`) because they answer
+`limits.py` holds eleven separately configurable budgets (including the matrix preview's cell cap, `CAD_COSTING_MAX_WALL_RAYS` and `CAD_COSTING_MAX_DRAW_RAYS`) (`CAD_COSTING_MAX_*`) because they answer
 different questions, plus one threshold that is not a budget at all —
 `CAD_COSTING_MIN_FEEDBACK_SAMPLE`, the observation count below which the analytics prints a sentence
 instead of a number. The module docstring lists seven of the nine; if you add one, list it there. The ordering that matters: **a model too complex to draw or
@@ -836,6 +869,7 @@ actuals.js    actual costs and their variance, in the History detail
 routecompare.js  route comparison table in the route card; "Use this route"
               goes through /cad/process/decide
 drivers.js    the cost-driver table (Cost section, History detail, roll-up card)
+draw.js       the pull-direction card (CAD): axis, draft, undercut markers
 sheet.js      the sheet-metal card (Manufacturing): K, bends, flat pattern, cut/bend lines
 matrix.js     the Matrix preview disclosure in the Cost section; shows the server's grid
 bulk.js       the Bulk preview tab; shows the server's rows and CSV

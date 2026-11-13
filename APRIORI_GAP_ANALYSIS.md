@@ -47,7 +47,7 @@ sheet unfolding.
 | Prismatic stock (bar or plate) with per-face allowances and utilisation | Bar-stock proposal for turned parts | Bounding-box stock, per-face allowances, utilisation and a saw operation | M |
 | Feeds and speeds by material hardness, tool size picked from the feature | One fixed parameter profile | A material-keyed cutting-data table and tool diameter chosen from pocket or slot size | M |
 | 2-model machining: a cast or forged blank model plus the finished model | As-formed defaults on a decided route, no blank model | A second model input and removed volume per feature | L |
-| Injection-moulding cycle: cooling ∝ wall², clamp force, cavities | A flat per-kg or per-piece stage rate | Wall-thickness measurement, cycle formulas, a machine table and a runner model | L |
+| Injection-moulding cycle: cooling ∝ wall², clamp force, cavities | **Done (Iteration 8):** cooling ∝ governing wall², fill/pack/eject, engineer's cavities, priceable by time | Clamp force, machine selection | M |
 | Mould and tooling cost | A one-off batch charge | A tooling model (steel, size, actions, finish) | L |
 | Heat treatment, surface treatment, inspection and packaging by area or batch | Flat per-kg or per-piece stage rates | Surface area and masked holes from the B-Rep, rack/hanger capacity, hourly rate × cycle | M |
 | Powder metal, additive, rotational and blow moulding | None | No public algorithm was found. Out of scope | n/a |
@@ -59,7 +59,7 @@ sheet unfolding.
 | Laser/plasma cut time from cut perimeter, pierces and thickness | **Done (Iteration 7):** unfolding (K entered), cut perimeter, pierces, a cut-speed table by thickness, priceable by time | Nesting; hems/jogs | — |
 | Bend-brake cycle: bends × (bend time + handling by mass) | **Done (Iteration 7):** bend count from the B-Rep, bends × time + repositioning, priceable by time | Handling by part mass | — |
 | Turret hits, nibbling and tooling | None | Hole and edge geometry and a tool library | L |
-| Nesting and utilisation | Sheet candidate detection only | A rectangular nesting estimate with an override | M |
+| Nesting and utilisation | **Done (Iteration 8):** rectangular grid nest on the engineer's sheet, utilisation, sheet share as confirmed material | True-shape nesting | M |
 | Weld time from length × passes / travel speed × arc factor | **Same formula**, with welds the engineer types in | Passes already come from size / size-per-pass. Travel speed by throat size and filler is still open | S |
 | Weld repositioning, clamping and robotic programming time | None | **Done (Iteration 5)** for reposition and clamp/tack per weld; no robotic programming (no robot input) | — |
 | Weld prep, grind and clean-up from weld length | Per-piece stage rates | **Done (Iteration 6):** butt-weld prep and finishing rates per mm of weld, each charged once against the fit-up / weld-finishing stages | — |
@@ -76,9 +76,9 @@ sheet unfolding.
 | Cavities and setup amortised over the batch | A one-off batch charge | Amortisation done (Iteration 6). A cavity count is not added: flat stage rates have no cycle for it to act on, so it needs a moulding cycle model (L) | L |
 | Melt, pour and cool steps priced by mass, energy and time | One per-kg rate | Per-step rates. Cooling time needs wall thickness | M |
 | Forging: flash, press force, tooling per die station, billet | A per-kg stage plus a batch charge | Projected area along a parting direction and a flash allowance | M |
-| Cooling time from maximum wall thickness | Wall thickness is measured (Iteration 7) | A cooling-time model and material properties that use it | M |
-| Core making for features hidden from the draw direction | None | Draw-direction computation | L |
-| Draft, undercut and minimum-wall DFM | Minimum-wall rule done (Iteration 7) | Draw direction and face-normal draft, undercuts | M–L |
+| Cooling time from maximum wall thickness | **Done (Iteration 8)** for injection moulding: cooling from the governing wall² with profile thermal rows | Die casting (latent heat) | M |
+| Core making for features hidden from the draw direction | Undercut faces are found (Iteration 8); no core-making time or cost | A core time/cost model | M |
+| Draft, undercut and minimum-wall DFM | **Done (Iteration 8):** pull axis, draft per face, undercut faces; DFM rules gated on a stated forming process | Parting line | — |
 | Machining after casting or forging | Done: as-formed defaults with an engineer override | — | — |
 
 ## Policy conflicts
@@ -96,9 +96,9 @@ decision, not a gap to close by default:
 
 All four items below were built in Iteration 5, and tooling amortisation, the cost-driver table
 and weld prep/finishing in Iteration 6 (see `PROJECT_STATUS.md`). Iteration 7 added wall thickness, setups from
-tool access and sheet unfolding. What remains: draw/parting direction (draft, undercut, cores),
-casting/moulding cycle models that use the measured wall, nesting, per-region factory data, CO2e,
-and roles/approvals.
+tool access and sheet unfolding. Iteration 8 added pull direction with draft and
+undercuts, injection-moulding cycle time and sheet nesting. What remains: die casting and core
+cost models, parting lines, true-shape nesting, per-region factory data, CO2e, and roles/approvals.
 
 1. **Casting/forging yield on per-kg stages (S).** One editable, labelled field. It closes a real
    under-costing gap: casting is charged on finished mass with no gating or loss. Planning for this is

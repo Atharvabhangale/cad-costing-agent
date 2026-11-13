@@ -1,11 +1,16 @@
 # Project Status
 
-Last updated: 2026-11-13 (Iteration 7 — wall thickness, setups from tool access, sheet-metal unfolding)
+Last updated: 2026-11-13 (Iteration 8 — pull direction and draft, moulding cycle time, sheet nesting)
 
 `CHECKPOINT.md` is a point-in-time handoff written at the Step 30 pause and is not
 updated in place; this file is the step-by-step record.
 
 ## Current stage
+
+**Iteration 8: three more large gaps from `APRIORI_GAP_ANALYSIS.md`** — pull direction with
+draft and undercut DFM for formed parts, injection-moulding cycle time from the measured wall
+(priceable by time, with cavities), and sheet nesting with the sheet share as the material
+basis. Built by three agents, reviewed and merged. Details in *Iteration 8* below.
 
 **Iteration 7: the first three *large* gaps from `APRIORI_GAP_ANALYSIS.md` — each needed new
 geometric measurement on the exact B-Rep** — measured wall thickness (and a minimum-wall DFM rule),
@@ -873,6 +878,70 @@ all. One test added. Suite: **1,760 passing**, 1 skipped.
   assertions that pinned the old numbering. Suite: 1,716 to **1,721 passing**
   (1,722 collected, 1 skipped). One file added, `static/estimateflow.js`. **No
   Python file changed, no endpoint, no schema, no migration.**
+
+### Iteration 8 — pull direction and draft, moulding cycle time, sheet nesting
+
+Three agents, each in its own worktree from the pushed branch, reviewed and merged into
+`timed-welding` (all three stopped once on a usage limit before changing a file and were resumed).
+The last merge conflicted only at the imports and where two agents appended a section to the end
+of `main.py`; both sides were kept and the moulding section checked byte-for-byte against its
+branch. `price_cad_part` was changed by both the nesting and the moulding agents and merged
+without a textual conflict. Full suite on the merged code: **2625 passed, 8 skipped** in about 4
+min (Linux, Python 3.13, no `cadmodels/`). On the merged app the three new endpoints gave the
+agents' own numbers: the 2 mm plate with a 6 mm boss had a governing wall of 6.0 mm (minimum
+2.0), a 2° drafted cup recommended +/-Z with no undercut and a 2.0° minimum draft, and a 100 x 60
+plate nested 63 per sheet at 73.62%; the page loaded with no script error. **No real model was
+measured** — `cadmodels/` is absent here; everything is on generated fixtures.
+
+**Pull direction, draft and undercuts.** `features/draw_direction.py` evaluates two-half pull
+axes on the exact B-Rep — the file's axes, distinct inertia axes and the three largest planar
+face normals, deduplicated, all reported — sampling every face on a fixed 5x5 grid. Draft is
+exact for planes and for cylinders and cones on the pull axis, the sampled minimum otherwise; a
+face with a point no straight pull releases is an undercut. The recommendation is the fewest
+undercut faces, then the least zero-draft area, and says it is a ranking by two counts, not a
+design decision; an engineer's axis overrides it. No parting line is estimated, and the response
+says why. `POST /cad/draw-direction` is read-only. DFM profile `dfm-general-guidelines` 1.2.0
+adds `dfm_min_draft` (1°) and `dfm_undercut` (at least one face), quoting Protolabs' injection
+moulding guide — both quotes re-fetched and confirmed during review. **They are evaluated only
+when a forming process is stated** (a `forming_process` field or a decided route starting with
+casting, forging or moulding); otherwise they are "not evaluated: no forming process stated",
+never guessed from the shape. The 1° is a moulding figure applied to castings and forgings too,
+and the flag says castings and forgings commonly need more. The ray caster moved from
+`features/approach.py` into `features/rays.py`, now shared, with a batched box-filtered test held
+equal to the original ray for ray. Live: six fixtures as expected; a 90-face part in 2.9 s.
+
+**Injection-moulding cycle time, priceable by time.** The governing wall is the largest ball
+found inside the material at the midpoint of a sampled wall span (`measure_governing_wall`, on
+the wall measurement's own rays): 2.0, 6.0 and 4.0 mm on a 2 mm box, a 2 mm plate with a 6 mm
+boss and a 4 mm plate. It can only under-report — a thick corner or junction no span passes
+through is missed (a box's 2.34 mm corner reads 2.0). Cooling = s^2/(pi^2 alpha) x
+ln((4/pi)(Tmelt-Tmould)/(Teject-Tmould)), plus fill, pack and open/eject, divided by the
+engineer's **cavity count, which has no default** (absent is needs-input, not 1). Thermal data is
+a time-profile row keyed by material name, never defaulted or borrowed; every parameter is None
+in the seeded profile, and `illustrative-moulding-2026` publishes estimated ABS and PP rows with
+no published source. Moulding is a timeable stage: one fixed-id line, never auto-accepted, is
+charged at the hourly `injection_moulding` rate, while the moulding stage line stays to charge
+the material (the rate set's price per kg, divided by the engineer's runner/sprue yield) and the
+mould's one-off charge (amortisable) — each once; the stage's own unit rate is not charged.
+Live: a 1000-off 2 mm ABS box at 4 cavities, 80% yield and a 100,000-shot mould cost 10,199.16
+(material 3,674.16, mould share 3,000, degating 500, press 3,025), matching the hand calculation.
+Die casting was **not** added: its solidification is dominated by latent heat, which this
+conduction formula does not model.
+
+**Sheet nesting, and the sheet share as material.** `sheet_nesting.py` (no package imports)
+grid-nests the measured flat blank's bounding rectangle on the engineer's sheet, spacing and edge
+margin — no defaults — in both orientations, uses the one with more parts per sheet, and reports
+utilisation as net flat area x parts / sheet area. Its limits travel with every result: no
+true-shape nesting, mixed orientations, common-line cutting or remnant credit, so a real nest is
+usually better. `raw_stock.SheetStock` is a second kind of stock with the bar's contract:
+proposed, then confirmed, given the engineer's own count, or withdrawn; unconfirmed it changes
+nothing (the whole estimate is equal); confirmed it is re-measured from the uploaded file and
+costs material from thickness x sheet area / parts per sheet as `material_basis: sheet_stock`,
+with `mass` unchanged. It is refused beside a confirmed bar, on a material-supplying route, on a
+part that is not a sheet, or when stale. Live: the plate on 1000 x 500 / 5 / 10 nests 63 at
+73.62% and the L-bracket 105 at 72.21%, both matching hand counts; confirming the plate's share
+raised its material from 0.0917 to 0.1246 kg per part. Comparisons now list `stock_description`
+as an input for bar stock too.
 
 ### Iteration 7 — wall thickness, setups from tool access, sheet-metal unfolding
 
