@@ -15,6 +15,7 @@ are different questions and now have different answers.
     CAD_COSTING_MAX_BULK_FILES          CAD files one bulk preview will accept
     CAD_COSTING_MAX_BULK_TOTAL_MB       combined size of one bulk preview's CAD files
     CAD_COSTING_MAX_MATRIX_CELLS        rate set x quantity cells one matrix preview will price
+    CAD_COSTING_MAX_WALL_RAYS           rays one wall-thickness measurement will cast
 
 The ordering that matters: a model can be **too complex to draw and still
 perfectly costable**. Geometry and mass need a volume, which is cheap; the
@@ -127,3 +128,12 @@ MAX_MATRIX_CELLS = _positive_int("CAD_COSTING_MAX_MATRIX_CELLS", 24)
 """Cells (rate sets x quantities) one matrix costing preview will price. Every
 cell goes through the whole pricing path, which reads the CAD file again, so
 this bounds how long a request can run. A larger grid is refused, not trimmed."""
+
+
+MAX_WALL_RAYS = _positive_int("CAD_COSTING_MAX_WALL_RAYS", 20_000)
+"""Rays one wall-thickness measurement casts (faces x samples per face). Each ray
+is intersected with every face of its solid, so this bounds the work a request
+can do. Over it, every face is sampled more coarsely and the result says so; if
+even one ray per face is over it, walls are not measured. Either way only the
+wall analysis and the minimum-wall DFM rule degrade — never geometry, the
+preview or an estimate."""

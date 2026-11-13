@@ -316,3 +316,46 @@ PROCESS_FIXTURES = {
     "flat_sheet_blank": flat_sheet_blank,
     "thin_plate_with_pocket": thin_plate_with_pocket,
 }
+
+
+# --- shapes for wall-thickness measurement ----------------------------------
+# Kept out of ALL_FIXTURES: they exist for `features.wall_thickness`, whose
+# expected values are stated next to each builder. Every wall here lies between
+# two parallel planes or two coaxial cylinders, so a ray along the inward normal
+# measures it exactly (an analytic line/plane or line/cylinder intersection).
+
+
+# A 50 x 40 x 20 box with a 44 x 34 pocket sunk from the top, leaving a floor
+# 2.0 mm thick and side walls 3.0 mm thick all round. Expected minimum 2.0 (the
+# floor, against the bottom face); each pocket side face's own minimum 3.0.
+def box_with_pocket_walls() -> bytes:
+    return to_step(_cut(_box(50.0, 40.0, 20.0), _box(44.0, 34.0, 30.0, at=(3.0, 3.0, 2.0))))
+
+
+# A tube: outer radius 20, bore radius 17, 50 long. Expected minimum 3.0, the
+# radial wall between the two coaxial cylinders.
+def tube_3mm_wall() -> bytes:
+    return to_step(
+        _cut(_cylinder(20.0, 50.0, (0.0, 0.0, 0.0)), _cylinder(17.0, 70.0, (0.0, 0.0, -10.0)))
+    )
+
+
+# An 80 x 60 x 10 plate with a centred Ø20 through hole. The hole leaves 20 mm
+# or more to every edge, so expected minimum 10.0: the plate's own thickness.
+# No thin wall anywhere.
+def plate_with_centre_hole() -> bytes:
+    return to_step(_cut(_box(80.0, 60.0, 10.0), _cylinder(10.0, 30.0, (40.0, 30.0, -10.0))))
+
+
+# A 60 x 40 x 10 base with a 0.6 mm rib, 40 long and 20 tall, standing on it.
+# Expected minimum 0.6, across the rib, between its two side faces.
+def thin_rib_part() -> bytes:
+    return to_step(_fuse(_box(60.0, 40.0, 10.0), _box(0.6, 40.0, 20.0, at=(29.7, 0.0, 10.0))))
+
+
+WALL_FIXTURES = {
+    "box_with_pocket_walls": (box_with_pocket_walls, 2.0),
+    "tube_3mm_wall": (tube_3mm_wall, 3.0),
+    "plate_with_centre_hole": (plate_with_centre_hole, 10.0),
+    "thin_rib_part": (thin_rib_part, 0.6),
+}
