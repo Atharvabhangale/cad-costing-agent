@@ -1,5 +1,6 @@
 import json
 import math
+from collections.abc import Callable
 from dataclasses import dataclass
 import time
 import mimetypes
@@ -142,7 +143,7 @@ from cad_costing_agent.raw_stock import (
     propose_bar_stock,
     record_stock_decision,
 )
-from cad_costing_agent.operation_time import moulding_material_row
+from cad_costing_agent.operation_time import die_casting_alloy_row, moulding_material_row
 from cad_costing_agent.stage_costing import (
     MATERIAL_SUPPLYING_STAGES,
     TIMED_KEEPS_MATERIAL_AND_TOOL,
@@ -2646,10 +2647,11 @@ class ProcessRouteCatalog(BaseModel):
     timed_material_stages: list[str] = Field(
         default_factory=list,
         description=(
-            "Stage ids that keep a stage line when priced by time (injection moulding): the line "
-            "carries the material at the rate set's material price and the one-off tool charge, "
-            "and the time prices only the press. The page offers their mass, yield, tool life and "
-            "cavity inputs while they are timed."
+            "Stage ids that keep a stage line when priced by time (injection moulding, "
+            "high-pressure die casting): the line carries the material at the rate set's material "
+            "price and the one-off tool charge, and the time prices only the press or die-casting "
+            "machine. The page offers their mass, yield, tool life, cavity and core inputs while "
+            "they are timed."
         ),
     )
 
@@ -3176,8 +3178,67 @@ def _entered_amortisation_quantity(stage_id: str, entry) -> int | None:
     return int(value)
 
 
-def _entered_cavities(entry) -> int | None:
-    """The cavity count a person entered for the moulding stage, or None when absent."""
+@dataclass(frozen=True)
+class _ShotStage:
+    """A timed stage whose one operation is a shot shared by cavities: its words and its row.
+
+    `row` finds the profile's material row a line's time must have been made
+    with, and `row_fields` pairs each row attribute with the key the time
+    estimate recorded it under. Words only otherwise; nothing here is a figure.
+    """
+
+    process: str  # the operation type and hourly rate it is costed at
+    name: str  # "injection moulding": what cavities were entered for
+    stage_word: str  # "moulding": "the moulding stage", "price moulding by time"
+    line_word: str  # "moulding": "the moulding line"
+    tool: str  # "mould": "one shot of the mould"
+    data: str  # "thermal data": what the row holds
+    error_prefix: str
+    row: Callable
+    row_fields: tuple[tuple[str, str], ...]
+
+
+_SHOT_STAGES = {
+    "moulding": _ShotStage(
+        process="injection_moulding",
+        name="injection moulding",
+        stage_word="moulding",
+        line_word="moulding",
+        tool="mould",
+        data="thermal data",
+        error_prefix="moulding",
+        row=moulding_material_row,
+        row_fields=(
+            ("thermal_diffusivity_mm2_per_s", "moulding_thermal_diffusivity_mm2_per_s"),
+            ("melt_temperature_c", "moulding_melt_temperature_c"),
+            ("mould_temperature_c", "moulding_mould_temperature_c"),
+            ("eject_temperature_c", "moulding_eject_temperature_c"),
+        ),
+    ),
+    "die_casting": _ShotStage(
+        process="die_casting",
+        name="high-pressure die casting",
+        stage_word="die casting",
+        line_word="die-casting",
+        tool="die",
+        data="Chvorinov data",
+        error_prefix="die_casting",
+        row=die_casting_alloy_row,
+        row_fields=(
+            ("mould_constant", "die_casting_mould_constant"),
+            ("exponent", "die_casting_exponent"),
+        ),
+    ),
+}
+
+# Forming stages whose tool can carry cores or side actions. Only a shot stage
+# priced by time has anything a confirmed core count changes (its shot time);
+# on any other, a count is refused rather than ignored.
+_CORE_STAGES = ("casting", "moulding", "die_casting")
+
+
+def _entered_cavities(entry, stage_id: str = "moulding") -> int | None:
+    """The cavity count a person entered for a shot stage, or None when absent."""
     if not isinstance(entry, dict) or entry.get("cavities") is None:
         return None
     value = entry["cavities"]
@@ -3189,50 +3250,79 @@ def _entered_cavities(entry) -> int | None:
         or value < 1
     ):
         raise ValueError(
-            "'cavities' for stage 'moulding' must be a whole number, at least 1 — how many parts "
-            f"one shot of the mould makes; got {value!r}."
+            f"'cavities' for stage '{stage_id}' must be a whole number, at least 1 — how many parts "
+            f"one shot of the {_SHOT_STAGES[stage_id].tool} makes; got {value!r}."
         )
     return int(value)
 
 
-def _check_moulding_line(
+def _entered_cores(stage_id: str, entry) -> int | None:
+    """The core count a person confirmed for a forming stage, or None when not confirmed.
+
+    The pull-direction measurement only proposes a count; this is the one the
+    engineer entered. Absent is unconfirmed, and charges nothing.
+    """
+    if not isinstance(entry, dict) or entry.get("cores") is None:
+        return None
+    value = entry["cores"]
+    if (
+        isinstance(value, bool)
+        or not isinstance(value, (int, float))
+        or not math.isfinite(value)
+        or value != int(value)
+        or value < 0
+    ):
+        raise ValueError(
+            f"'cores' for stage '{stage_id}' must be a whole number, 0 or more — how many cores or "
+            f"side actions the engineer confirmed the tool has; got {value!r}."
+        )
+    return int(value)
+
+
+def _check_shot_line(
+    stage_id: str,
     plan: "ManufacturingPlan | None",
     classification,
     timed: dict[str, str],
     stage_input_values: dict,
     material: str,
     session: Session,
+    geometry: GeometryProperties | None = None,
 ) -> None:
-    """A moulding time must be for this mould and this material, or it is refused.
+    """A moulding or die-casting time must be for this tool and this material, or it is refused.
 
-    The cavity count is the engineer's and is entered on the moulding stage. It
-    only means something when moulding is priced by time — a stage rate is per
-    kg or per piece already — so it is refused on a stage-rate route rather
-    than ignored. A costed moulding line whose committed time is the system's
-    must have been timed for the cavities entered and for the part's material
-    (its recorded thermal figures must be the profile's row for it); a time the
-    engineer typed is their whole figure and is taken as entered.
+    The cavity count is the engineer's and is entered on the stage. It only
+    means something when the stage is priced by time — a stage rate is per kg
+    or per piece already — so it is refused on a stage-rate route rather than
+    ignored. A costed line whose committed time is the system's must have been
+    timed for the cavities entered, for the cores confirmed (none when none
+    were), and for the part's material (its recorded figures must be the
+    profile's row for it); a die-casting line also for this part's measured
+    volume and area. A time the engineer typed is their whole figure and is
+    taken as entered.
     """
+    shot = _SHOT_STAGES[stage_id]
     route = classification.route if classification is not None else None
     route_ids = [stage.stage for stage in route.stages] if route is not None else []
-    cavities = _entered_cavities(stage_input_values.get("moulding"))
-    if "moulding" not in route_ids:
+    cavities = _entered_cavities(stage_input_values.get(stage_id), stage_id)
+    cores = _entered_cores(stage_id, stage_input_values.get(stage_id))
+    if stage_id not in route_ids:
         return  # entered for a route being compared, not this one
-    if "moulding" not in timed:
+    if stage_id not in timed:
         if cavities is not None:
             raise ValueError(
-                f"{cavities} cavities were entered for injection moulding, but it is priced by "
+                f"{cavities} cavities were entered for {shot.name}, but it is priced by "
                 "its stage rate, which is per kg or per piece already, so a cavity count changes "
-                "nothing. Remove it, or price moulding by time."
+                f"nothing. Remove it, or price {shot.stage_word} by time."
             )
         return
     if plan is None:
-        return  # the timed-stage check has already refused a plan with no moulding line
+        return  # the timed-stage check has already refused a plan with no shot line
     lines = [
         operation
         for operation in plan.operations
         if plan.counts_toward_cost(operation)
-        and operation.operation_type == "injection_moulding"
+        and operation.operation_type == shot.process
         and operation.time_source is TimeSource.SYSTEM
     ]
     for line in lines:
@@ -3241,13 +3331,34 @@ def _check_moulding_line(
             raise HTTPException(
                 status_code=422,
                 detail={
-                    "error": "moulding_cavities_disagree",
+                    "error": f"{shot.error_prefix}_cavities_disagree",
                     "message": (
-                        f"No estimate was produced: the moulding line {line.operation_id} was "
+                        f"No estimate was produced: the {shot.line_word} line {line.operation_id} was "
                         f"timed for {int(timed_for) if timed_for else 'no'} cavities, and "
                         + (f"{cavities} were" if cavities is not None else "none were")
-                        + " entered on the moulding stage. Enter the cavity count on the stage "
-                        "and generate the moulding line again for it."
+                        + f" entered on the {shot.stage_word} stage. Enter the cavity count on the "
+                        f"stage and generate the {shot.line_word} line again for it."
+                    ),
+                    "operations": [line.operation_id],
+                },
+            )
+        cores_for = int(line.system_time_parameters.get("cores") or 0)
+        if cores_for != (cores or 0):
+            raise HTTPException(
+                status_code=422,
+                detail={
+                    "error": f"{shot.error_prefix}_cores_disagree",
+                    "message": (
+                        f"No estimate was produced: the {shot.line_word} line {line.operation_id} was "
+                        f"timed for {cores_for or 'no'} core(s), and "
+                        + (
+                            f"{cores} were confirmed"
+                            if cores is not None
+                            else "no core count was confirmed"
+                        )
+                        + f" on the {shot.stage_word} stage. A core is charged only once the "
+                        f"engineer confirms the count: confirm it on the stage and generate the "
+                        f"{shot.line_word} line again for it."
                     ),
                     "operations": [line.operation_id],
                 },
@@ -3258,31 +3369,71 @@ def _check_moulding_line(
             )
         except (ValueError, TypeError):
             profile = None
-        row = moulding_material_row(profile.assumptions, material) if profile else None
+        row = shot.row(profile.assumptions, material) if profile else None
         recorded = line.system_time_parameters
-        if row is None or (
-            row.thermal_diffusivity_mm2_per_s,
-            row.melt_temperature_c,
-            row.mould_temperature_c,
-            row.eject_temperature_c,
-        ) != (
-            recorded.get("moulding_thermal_diffusivity_mm2_per_s"),
-            recorded.get("moulding_melt_temperature_c"),
-            recorded.get("moulding_mould_temperature_c"),
-            recorded.get("moulding_eject_temperature_c"),
+        if row is None or tuple(getattr(row, field) for field, _ in shot.row_fields) != tuple(
+            recorded.get(key) for _, key in shot.row_fields
         ):
             raise HTTPException(
                 status_code=422,
                 detail={
-                    "error": "moulding_time_for_another_material",
+                    "error": f"{shot.error_prefix}_time_for_another_material",
                     "message": (
-                        f"No estimate was produced: the moulding line {line.operation_id} was "
-                        f"timed with thermal data that is not the time profile's row for "
-                        f"'{material}', the material being costed. Generate the moulding line "
-                        "again for this material."
+                        f"No estimate was produced: the {shot.line_word} line {line.operation_id} was "
+                        f"timed with {shot.data} that is not the time profile's row for "
+                        f"'{material}', the material being costed. Generate the {shot.line_word} "
+                        "line again for this material."
                     ),
                     "operations": [line.operation_id],
                 },
+            )
+        if stage_id == "die_casting" and geometry is not None and not (
+            math.isclose(recorded.get("casting_volume_mm3") or 0.0, geometry.volume, rel_tol=1e-9)
+            and math.isclose(
+                recorded.get("casting_surface_area_mm2") or 0.0, geometry.surface_area, rel_tol=1e-9
+            )
+        ):
+            raise HTTPException(
+                status_code=422,
+                detail={
+                    "error": "die_casting_time_for_another_part",
+                    "message": (
+                        f"No estimate was produced: the die-casting line {line.operation_id} was "
+                        "timed for a volume and surface area that are not this file's measured "
+                        "ones. Generate the die-casting line again from this file."
+                    ),
+                    "operations": [line.operation_id],
+                },
+            )
+
+
+def _refuse_cores_that_change_nothing(
+    classification, timed: dict[str, str], stage_input_values: dict
+) -> None:
+    """A confirmed core count on a stage it cannot change is refused, never ignored.
+
+    Cores are charged only through a shot stage's time (a confirmed count adds
+    the profile's seconds per core to every shot). A stage priced by its stage
+    rate — a sand casting, or moulding or die casting not timed — has no such
+    figure, and a stage that is no forming stage has no cores at all.
+    """
+    route = classification.route if classification is not None else None
+    route_ids = [stage.stage for stage in route.stages] if route is not None else []
+    for stage_id, entry in stage_input_values.items():
+        if stage_id not in route_ids or not isinstance(entry, dict) or entry.get("cores") is None:
+            continue  # entered for a route being compared, not this one
+        if stage_id not in _CORE_STAGES:
+            raise ValueError(
+                f"'cores' was entered for stage '{stage_id}', which has no mould or die to carry "
+                "one. Remove it."
+            )
+        cores = _entered_cores(stage_id, entry)
+        if stage_id not in timed and cores:
+            raise ValueError(
+                f"{cores} core(s) were confirmed for {STAGES[stage_id][0]}, but it is priced by "
+                "its stage rate, which has no per-core charge, so the count changes nothing. "
+                "Remove it, or price the stage by time where it has a time model (moulding, die "
+                "casting), whose shot then carries each core's time."
             )
 
 
@@ -3481,15 +3632,21 @@ def price_cad_part(
                     "message": (
                         f"No estimate was produced: {labels} is priced by time, and the plan has "
                         "no operation of it with a committed time. Add its operations — the "
-                        "welds, the cut and bend lines from the measured flat pattern, or the "
-                        "moulding line from the measured wall — and accept or enter their times, "
-                        "or price it from its stage rate."
+                        "welds, the cut and bend lines from the measured flat pattern, the "
+                        "moulding line from the measured wall, or the die-casting line from the "
+                        "measured casting — and accept or enter their times, or price it from its "
+                        "stage rate."
                     ),
                     "stages": untimed,
                 },
             )
         _refuse_weld_component_charged_twice(plan, classification, timed)
-        _check_moulding_line(plan, classification, timed, stage_input_values, material, session)
+        for shot_stage in _SHOT_STAGES:
+            _check_shot_line(
+                shot_stage, plan, classification, timed, stage_input_values, material, session,
+                geometry,
+            )
+        _refuse_cores_that_change_nothing(classification, timed, stage_input_values)
 
         # A bar counts only once a person confirmed it; an unconfirmed proposal
         # is recorded but material is costed from the finished part as before.
@@ -3535,8 +3692,9 @@ def price_cad_part(
         # the mass a per-kg rate is charged on, and this stage has no such charge.
         for stage_id in timed:
             if stage_id in TIMED_KEEPS_MATERIAL_AND_TOOL:
-                # Its line stays, carrying the material and the mould, so a
-                # yield (runner and sprue) and a tool life still apply to it.
+                # Its line stays, carrying the material and the mould or die,
+                # so a yield (runner and sprue, or biscuit and overflows) and
+                # a tool life still apply to it.
                 continue
             if stage_yields.get(stage_id) is not None:
                 raise ValueError(
@@ -4647,7 +4805,7 @@ async def cad_dfm(
     forming_process: str | None = Form(
         None,
         description=(
-            "'casting', 'forging' or 'moulding' when the part is formed by one. The draft and "
+            "'casting', 'forging', 'moulding' or 'die_casting' when the part is formed by one. The draft and "
             "undercut rules are evaluated only when a forming process is stated here or by a "
             "decided route in `process_classification`; it is never guessed from the geometry."
         ),
@@ -4858,11 +5016,14 @@ async def cad_wall_thickness(file: UploadFile = File(...)) -> wall_thickness.Wal
 # only when the request states a forming process — explicitly, or as a decided
 # route that starts by casting, forging or moulding — because a machined part
 # fails draft on every wall; the process is never guessed from the geometry.
+# `/cad/cores/propose` groups the undercut faces into proposed cores: shown to
+# the engineer, and reaching a time only as a count the engineer confirms on the
+# forming stage.
 
 from cad_costing_agent.dfm import FORMING_RULES, NO_FORMING_PROCESS, DrawEvidence  # noqa: E402
 from cad_costing_agent.features import draw_direction  # noqa: E402
 
-FORMING_PROCESSES = ("casting", "forging", "moulding")
+FORMING_PROCESSES = ("casting", "forging", "moulding", "die_casting")
 
 
 def _pull_axis_from_form(pull_axis: str | None) -> tuple[float, float, float] | None:
@@ -5057,6 +5218,59 @@ async def cad_draw_direction(
             detail=(
                 f"Pull-direction measurement failed unexpectedly on this model "
                 f"({type(exc).__name__}). Geometry, the 3D preview and costing are unaffected."
+            ),
+        ) from exc
+
+
+@app.post("/cad/cores/propose", response_model=draw_direction.CoreProposal)
+async def cad_cores_propose(
+    file: UploadFile = File(...),
+    pull_axis: str | None = Form(
+        None,
+        description=(
+            "The engineer's pull axis as [x, y, z]. Omitted, the pull-direction measurement's "
+            "recommended axis is used, and the response says so."
+        ),
+    ),
+) -> draw_direction.CoreProposal:
+    """The undercut faces against the pull axis, grouped into connected regions: one proposed
+    core or side action per region, with the method and what it can miss.
+
+    A proposal, never applied: nothing is charged for a core until the engineer
+    enters a confirmed count on the forming stage. Read-only; persists nothing.
+    Refused (400) for geometry the pull direction cannot be measured on — a
+    faceted export, an STL, an IGES surface model — with the reason.
+    """
+    data = await _read_capped(file)  # defined in the die-casting section
+    filename = file.filename or ""
+    axis = _pull_axis_from_form(pull_axis)
+    _import(data, filename, CAPABILITY_FEATURES, with_geometry=False)
+    try:
+        recognized = recognize_features_with_shape(data, filename)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:  # noqa: BLE001 - a bad model must not take the app down
+        raise HTTPException(
+            status_code=500,
+            detail=(
+                f"This model could not be read for analysis ({type(exc).__name__}). "
+                "Geometry, the 3D preview and costing are unaffected."
+            ),
+        ) from exc
+    reason = draw_direction.refusal_reason(
+        recognized.recognition.representation, recognized.shape is not None
+    )
+    if reason is not None:
+        raise HTTPException(status_code=400, detail=reason)
+    try:
+        result = _measure_draw(recognized, filename, axis)
+        return draw_direction.propose_cores(recognized.shape, result)
+    except Exception as exc:  # noqa: BLE001 - a bad model must not take the app down
+        raise HTTPException(
+            status_code=500,
+            detail=(
+                f"Core proposal failed unexpectedly on this model ({type(exc).__name__}). "
+                "Geometry, the 3D preview and costing are unaffected."
             ),
         ) from exc
 
@@ -5509,6 +5723,14 @@ class MouldingLineRequest(BaseModel):
         ge=1,
         description="Parts per shot — the engineer's. Omitted, the line's time needs input.",
     )
+    cores: int | None = Field(
+        default=None,
+        ge=0,
+        description=(
+            "Cores or side actions the engineer confirmed (a /cad/cores/propose count is only a "
+            "proposal). Omitted, the shot has none and nothing is charged for one."
+        ),
+    )
 
 
 @app.post("/operations/moulding-line", response_model=MouldingPlanLines)
@@ -5546,7 +5768,11 @@ def operations_moulding_line(
             raise HTTPException(status_code=404, detail=str(exc)) from exc
     try:
         return moulding_plan_lines(
-            wall.thickness_mm, material=request.material, cavities=request.cavities, profile=profile
+            wall.thickness_mm,
+            material=request.material,
+            cavities=request.cavities,
+            profile=profile,
+            cores=request.cores,
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -5918,3 +6144,168 @@ def estimate_co2e(
         region=region,
         region_source=region_source,
     )
+
+
+# ------------------------------------------------------ high-pressure die casting
+#
+# The casting modulus of an exact B-Rep part (its volume over its surface area,
+# both from the one geometry path every estimate is costed from), the one
+# die-casting line a part priced by time adds to its plan, and the cores the
+# pull-direction measurement proposes. Nothing here is stored or priced: the
+# line's time is a proposal, unaccepted, and reaches a cost only through the
+# plan, on a route whose die-casting stage is priced by time. A proposed core
+# count is shown to the engineer and nothing more: only a count the engineer
+# confirms on the forming stage times a core, and `_check_shot_line` refuses a
+# line timed for any other count.
+
+from cad_costing_agent.moulding_operations import die_casting_plan_lines  # noqa: E402
+
+CASTING_MODULUS_METHOD = "exact_brep_volume_over_surface_area"
+CASTING_MODULUS_DESCRIPTION = (
+    "The casting modulus is the part's volume divided by its surface area, both integrated over "
+    "the exact B-Rep faces by the same geometry measurement every estimate is costed from. It is "
+    "the V/A of Chvorinov's rule, t = B·(V/A)^n."
+)
+CASTING_MODULUS_LIMITATIONS = (
+    "The whole surface is taken as in contact with the die. A face the die does not touch (a "
+    "gate, an insert) would make the true modulus larger.",
+    "It is one figure for the whole part. A thick section inside a thin part solidifies later "
+    "than the part's modulus says; Chvorinov's rule applies section by section.",
+    "The biscuit, runners and overflows are not part of the CAD model and are not measured.",
+)
+
+
+class CastingModulus(BaseModel):
+    """V/A of an exact B-Rep part, with how it was measured and what it misses."""
+
+    filename: str = ""
+    measured: bool
+    not_measured_reason: str | None = None
+    volume_mm3: float | None = Field(default=None, description="Exact, from the B-Rep.")
+    surface_area_mm2: float | None = Field(default=None, description="Exact, from the B-Rep.")
+    modulus_mm: float | None = Field(default=None, description="volume_mm3 / surface_area_mm2.")
+    geometry_source: str | None = None
+    method: str = CASTING_MODULUS_METHOD
+    method_description: str = CASTING_MODULUS_DESCRIPTION
+    limitations: list[str] = Field(default_factory=lambda: list(CASTING_MODULUS_LIMITATIONS))
+
+
+async def _read_capped(file: UploadFile) -> bytes:
+    data = await file.read()
+    if len(data) > MAX_UPLOAD_BYTES:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"CAD file is {len(data) / 1024 / 1024:.1f} MB, above the "
+                f"{MAX_UPLOAD_BYTES // 1024 // 1024} MB limit for this POC."
+            ),
+        )
+    return data
+
+
+@app.post("/cad/casting-modulus", response_model=CastingModulus)
+async def cad_casting_modulus(file: UploadFile = File(...)) -> CastingModulus:
+    """The casting modulus (volume / surface area) of an uploaded exact B-Rep part.
+
+    Read-only analysis; changes nothing and persists nothing. Refused (400) for
+    geometry that is not exact — an STL or faceted export, whose area is the
+    facets' — or that does not enclose a solid, with the reason.
+    """
+    data = await _read_capped(file)
+    filename = file.filename or ""
+    geometry = _geometry_of(_import(data, filename, CAPABILITY_GEOMETRY))
+    if geometry.geometry_source != "brep":
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "The casting modulus is measured on exact B-Rep geometry only. This file is a "
+                "polygon mesh, whose surface area is the facets' and not the part's, so V/A read "
+                "from it would carry the tessellation's error into a solidification time that "
+                "goes with its square. Export the part as solid/B-Rep STEP."
+            ),
+        )
+    if geometry.geometry_status != COMPLETE or geometry.volume <= 0 or geometry.surface_area <= 0:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "The casting modulus needs a closed solid: this file's surfaces do not enclose "
+                "one, so it has no volume to divide. Export the part as a solid."
+            ),
+        )
+    return CastingModulus(
+        filename=filename,
+        measured=True,
+        volume_mm3=geometry.volume,
+        surface_area_mm2=geometry.surface_area,
+        modulus_mm=geometry.volume / geometry.surface_area,
+        geometry_source=geometry.geometry_source,
+    )
+
+
+class DieCastingLineRequest(BaseModel):
+    casting_modulus: CastingModulus = Field(
+        description="The /cad/casting-modulus measurement the line is proposed from, as returned."
+    )
+    material: str = Field(
+        min_length=1, description="The part's alloy, which picks the profile's Chvorinov row."
+    )
+    cavities: int | None = Field(
+        default=None,
+        ge=1,
+        description="Parts per shot — the engineer's. Omitted, the line's time needs input.",
+    )
+    cores: int | None = Field(
+        default=None,
+        ge=0,
+        description=(
+            "Cores or slides the engineer confirmed (a /cad/cores/propose count is only a "
+            "proposal). Omitted, the shot has none and nothing is charged for one."
+        ),
+    )
+
+
+@app.post("/operations/die-casting-line", response_model=MouldingPlanLines)
+def operations_die_casting_line(
+    request: DieCastingLineRequest,
+    time_profile_id: str | None = Query(
+        None, description="Published profile to estimate under. Omit for the built-in baseline."
+    ),
+    time_profile_version: str | None = Query(
+        None, description="Exact profile version to pin. Omit to use the latest."
+    ),
+    session: Session = Depends(get_session),
+) -> MouldingPlanLines:
+    """The die-casting operation a measured part adds to its plan, with its estimated time.
+
+    Takes the measurement rather than the file. The line is a system proposal:
+    its time is estimated under the selected profile and **not accepted**. It
+    reaches a cost only once someone accepts it or enters a time, on a route
+    whose die-casting stage is priced by time. Nothing is stored and nothing priced.
+    """
+    measured = request.casting_modulus
+    if not measured.measured or not measured.volume_mm3 or not measured.surface_area_mm2:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "No casting modulus was measured, so no solidification time can be estimated: "
+                + (measured.not_measured_reason or "the measurement found no solid.")
+            ),
+        )
+    profile = None
+    if time_profile_id:
+        try:
+            profile = TimeProfileRepository(session).get(time_profile_id, time_profile_version)
+        except ValueError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+    try:
+        return die_casting_plan_lines(
+            measured.volume_mm3,
+            measured.surface_area_mm2,
+            material=request.material,
+            cavities=request.cavities,
+            cores=request.cores,
+            profile=profile,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+

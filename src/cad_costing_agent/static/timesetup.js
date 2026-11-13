@@ -196,6 +196,25 @@ function writeTimeDraftToForm() {
         )
         .join("\n")
     : "";
+  // The die-casting Chvorinov table, one "alloy, B, n" row per line.
+  const alloys = timeDraft.assumptions.die_casting_alloys;
+  $("t-diecast-table").value = Array.isArray(alloys)
+    ? alloys.map((row) => [row.material, row.mould_constant, row.exponent].join(", ")).join("\n")
+    : "";
+}
+
+// The die-casting table as the server's rows, split as typed; the server validates
+// (each alloy once, B and n in range) and says what is wrong. A row's source note
+// is not editable here and is kept from the copied version.
+function readDieCastingAlloys() {
+  const lines = $("t-diecast-table").value.split("\n").map((line) => line.trim()).filter(Boolean);
+  if (!lines.length) return null;
+  const previous = (timeDraft.assumptions && timeDraft.assumptions.die_casting_alloys) || [];
+  return lines.map((line) => {
+    const [material, constant, exponent] = line.split(/\s*[,;]\s*/);
+    const kept = previous.find((row) => row.material === material);
+    return { material, mould_constant: Number(constant), exponent: Number(exponent), note: kept ? kept.note : "" };
+  });
 }
 
 // The moulding table as the server's rows, split as typed; the server validates
@@ -249,6 +268,8 @@ function readTimeFormIntoDraft() {
   if (table) assumptions.sheet_cutting_table = table;
   const materials = readMouldingMaterials();
   if (materials) assumptions.moulding_materials = materials;
+  const alloys = readDieCastingAlloys();
+  if (alloys) assumptions.die_casting_alloys = alloys;
   timeDraft.assumptions = assumptions;
 }
 

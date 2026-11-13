@@ -100,6 +100,7 @@ class ManufacturingFamily(str, Enum):
     FABRICATION_WELDING = "fabrication_welding"
     ADDITIVE = "additive"
     MOULDING = "moulding"
+    DIE_CASTING = "die_casting"
     PURCHASED = "purchased"
     UNKNOWN = "unknown"
 
@@ -112,6 +113,7 @@ FAMILY_LABELS = {
     ManufacturingFamily.FABRICATION_WELDING: "Fabrication / welding",
     ManufacturingFamily.ADDITIVE: "Additive manufacturing",
     ManufacturingFamily.MOULDING: "Moulding",
+    ManufacturingFamily.DIE_CASTING: "High-pressure die casting",
     ManufacturingFamily.PURCHASED: "Purchased / off-the-shelf",
     ManufacturingFamily.UNKNOWN: "Unknown — insufficient evidence",
 }
@@ -133,6 +135,7 @@ STAGES: dict[str, tuple[str, str | None]] = {
     "additive_build": ("Additive build", None),
     "finishing": ("Post-processing and finishing", None),
     "moulding": ("Injection moulding", None),
+    "die_casting": ("High-pressure die casting", None),
     "purchase": ("Purchased complete", None),
     # Route steps: what a shop does after the forming stage on that route, each
     # quoted separately. None is detected from geometry — they come with the
@@ -211,6 +214,21 @@ _ROUTE_DEFINITIONS: tuple[tuple[str, str, ManufacturingFamily, tuple[str, ...]],
         ("additive_build", "support_removal", "finishing"),
     ),
     ("injection_moulding", "Injection moulding", ManufacturingFamily.MOULDING, ("moulding", "degating")),
+    # A family of its own, so a part whose evidence lists casting as a candidate
+    # (a sand or investment blank, then machined) is not also compared against
+    # a die-cast route nobody asked about. Never recommended: see NOT_ASSESSED.
+    (
+        "die_casting",
+        "High-pressure die casting (as cast)",
+        ManufacturingFamily.DIE_CASTING,
+        ("die_casting", "degating"),
+    ),
+    (
+        "die_casting_machining",
+        "High-pressure die casting followed by CNC machining",
+        ManufacturingFamily.DIE_CASTING,
+        ("die_casting", "degating", "milling", "drilling"),
+    ),
     ("purchased", "Purchased / off-the-shelf", ManufacturingFamily.PURCHASED, ("purchase",)),
     (
         "unknown",
@@ -226,7 +244,7 @@ UNKNOWN_ROUTE_ID = "unknown"
 # on every classification so their absence is explained, never implied.
 # Stages that make a near-net-shape blank, and how the plan names what such a
 # blank leaves unmachined.
-NEAR_NET_SHAPE_STAGES = {"casting": "As cast", "forging": "As forged"}
+NEAR_NET_SHAPE_STAGES = {"casting": "As cast", "forging": "As forged", "die_casting": "As cast"}
 
 # What a cast or forged blank leaves as formed by default: blends, which the
 # mould or die produces. Everything else stays machined until the engineer says
@@ -235,7 +253,7 @@ NEAR_NET_SHAPE_STAGES = {"casting": "As cast", "forging": "As forged"}
 AS_FORMED_FEATURE_TYPES = ("fillet", "chamfer")
 
 NOT_ASSESSED = (
-    "Casting, forging and moulding are not assessed: draft and undercuts can be measured "
+    "Casting (sand or die), forging and moulding are not assessed: draft and undercuts can be measured "
     "(pull direction), but a drafted wall is not evidence that a part is cast, moulded or forged, "
     "and nothing here detects parting lines or near-net-shape surfaces, so geometry never "
     "proposes them. Choose one if it applies.",

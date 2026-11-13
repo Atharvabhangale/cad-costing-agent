@@ -331,6 +331,28 @@
               <ul id="draw-limits"></ul>
             </details>
           </div>
+          <!-- Proposed cores (cores.js): the undercut regions against the same axis.
+               A proposal; a count is confirmed on the forming stage, never here. -->
+          <div id="cores-panel" class="cores-panel">
+            <div class="panel-head">
+              <h3>Proposed cores and side actions</h3>
+              <button type="button" id="cores-run" class="secondary tiny" disabled>Propose cores</button>
+            </div>
+            <p id="cores-status" class="hint"></p>
+            <div id="cores-body" class="hidden">
+              <p id="cores-count"></p>
+              <ul id="cores-regions"></ul>
+              <div class="dfm-marking-controls">
+                <button type="button" id="cores-use" class="secondary tiny" disabled>Use this count on the forming stage</button>
+              </div>
+              <p id="cores-confirm" class="hint" role="status" aria-live="polite"></p>
+              <details class="detail-toggle">
+                <summary>How the regions are found, and what it can miss</summary>
+                <p id="cores-method"></p>
+                <ul id="cores-limits"></ul>
+              </details>
+            </div>
+          </div>
         </div>
 
       </div>
@@ -1133,6 +1155,27 @@
           <label>Pack and hold (s) <input id="t-mould-pack" data-param="moulding_pack_seconds" type="number" step="any"></label>
           <label>Open, eject, close (s) <input id="t-mould-open" data-param="moulding_open_eject_seconds" type="number" step="any"></label>
           <label>Moulding setup (min) <input id="t-mould-setup" data-param="moulding_setup_minutes" type="number" step="any"></label>
+          <label>Per confirmed core, each shot (s) <input id="t-mould-core" data-param="moulding_core_seconds_per_core" type="number" step="any"></label>
+        </div>
+      </div>
+      <div class="card">
+        <h3>High-pressure die casting</h3>
+        <p class="hint">Blank by default: no die-casting figure is assumed. The solidification
+          time is Chvorinov's rule, t = B·(V/A)^n, on the part's measured volume and surface
+          area, with the alloy's row below; the cavity and core counts are entered on the
+          die-casting stage.</p>
+        <label>Alloy Chvorinov data — one row per alloy:
+          <span class="mono">alloy, B (s/mm^n), n</span>
+          <textarea id="t-diecast-table" data-param="die_casting_alloys" rows="3"
+            placeholder="aluminium, 0.5, 2"></textarea></label>
+        <p class="hint">An alloy not listed gets no die-casting time; nothing is borrowed from
+          another alloy.</p>
+        <div class="grid3">
+          <label>Fill (s) <input id="t-diecast-fill" data-param="die_casting_fill_seconds" type="number" step="any"></label>
+          <label>Open, extract, close (s) <input id="t-diecast-open" data-param="die_casting_open_eject_seconds" type="number" step="any"></label>
+          <label>Die spray (s) <input id="t-diecast-spray" data-param="die_casting_spray_seconds" type="number" step="any"></label>
+          <label>Die-casting setup (min) <input id="t-diecast-setup" data-param="die_casting_setup_minutes" type="number" step="any"></label>
+          <label>Per confirmed core, each shot (s) <input id="t-diecast-core" data-param="die_casting_core_seconds_per_core" type="number" step="any"></label>
         </div>
       </div>
       <div class="card">
@@ -1296,6 +1339,7 @@
 <script src="bulk.js"></script>
 <script src="dfm.js"></script>
 <script src="draw.js"></script>
+<script src="cores.js"></script>
 <script src="drivers.js"></script>
 <script src="co2e.js"></script>
 <script src="estimateflow.js"></script>

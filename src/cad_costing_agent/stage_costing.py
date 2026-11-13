@@ -90,6 +90,14 @@ charging it again (`material_supplied_by`):
 
 The stage rate's own per-kg or per-piece rate is never charged on this path.
 
+High-pressure die casting priced by time is the same arrangement: the
+die-casting machine is charged by the die-casting operation's shot time at the
+rate set's hourly `die_casting` rate, and the stage line carries the alloy at
+the rate set's material price (divided by the engineer's yield — the biscuit,
+runners and overflows) and the die's one-off charge, amortisable. Both stages
+are listed in `TIMED_KEEPS_MATERIAL_AND_TOOL`, and `_SHOT_WORDS` holds the only
+words that differ between them.
+
 Formulas, per stage
 -------------------
 
@@ -118,7 +126,7 @@ from cad_costing_agent.rate_sets import PER_KG, RateSet, StageRate
 # Stages whose rate includes the part's material. When a route starts with one,
 # the material line is not charged on top of it.
 MATERIAL_SUPPLYING_STAGES = frozenset(
-    {"casting", "forging", "moulding", "additive_build", "purchase"}
+    {"casting", "forging", "moulding", "die_casting", "additive_build", "purchase"}
 )
 
 # Stages an engineer may choose to price by time instead of by stage rate, and
@@ -141,11 +149,31 @@ TIMEABLE_STAGES = {
     "sheet_cutting": "sheet_cutting",
     "bending": "bending",
     "moulding": "injection_moulding",
+    "die_casting": "die_casting",
 }
 # Timeable stages whose stage line stays when they are timed, carrying the
 # material (at the rate set's material price) and the one-off tool charge: the
-# time prices only the press. See "Moulding priced by time" above.
-TIMED_KEEPS_MATERIAL_AND_TOOL = frozenset({"moulding"})
+# time prices only the press (or the die-casting machine). See "Moulding priced
+# by time" above.
+TIMED_KEEPS_MATERIAL_AND_TOOL = frozenset({"moulding", "die_casting"})
+
+# The words a timed material-and-tool line uses, per stage: the machine its
+# operation's time charges, that operation, the tool its one-off charge buys,
+# and what the rest of a shot is. Display words only; no figure comes from here.
+_SHOT_WORDS = {
+    "moulding": {
+        "machine": "press",
+        "operation": "moulding operation",
+        "tool": "mould",
+        "rest": "runner and sprue",
+    },
+    "die_casting": {
+        "machine": "die-casting machine",
+        "operation": "die-casting operation",
+        "tool": "die",
+        "rest": "biscuit, runners and overflows",
+    },
+}
 TIMED_ONLY_WITH = {"fit_up": "welding", "weld_finishing": "welding"}
 STAGE_RATE_PRICING = "stage_rate"
 TIMED_PRICING = "timed"
@@ -170,9 +198,9 @@ def timed_stages(stage_input_values: dict, route_stage_ids: list[str]) -> dict[s
         if stage_id not in TIMEABLE_STAGES:
             raise ValueError(
                 f"Stage '{stage_id}' cannot be priced by time: only welding, sheet cutting, "
-                "bending and injection moulding have a time model (fit-up and weld finishing may "
-                "be timed with welding, from each weld's tack and finishing time). It is priced "
-                "from its stage rate."
+                "bending, injection moulding and high-pressure die casting have a time model "
+                "(fit-up and weld finishing may be timed with welding, from each weld's tack and "
+                "finishing time). It is priced from its stage rate."
             )
         if stage_id in route_stage_ids:
             timed[stage_id] = TIMEABLE_STAGES[stage_id]
@@ -372,23 +400,25 @@ def _timed_material_and_tool_rate(stage: StageInput, rate_set: RateSet):
         )
     tool = rate_set.stage_rates.get(stage.stage)
     currency = rate_set.currency
+    words = _SHOT_WORDS[stage.stage]
+    tool_word = words["tool"]
     mould = (
-        f"the mould is the {stage.label.lower()} stage rate's one-off charge, "
+        f"the {tool_word} is the {stage.label.lower()} stage rate's one-off charge, "
         f"{currency} {round_money(tool.batch_charge):,.2f}"
         if tool is not None and tool.batch_charge
-        else f"no mould is charged: rate set '{rate_set.rate_set_id}' v{rate_set.version} has no "
-        f"one-off charge for {stage.label.lower()} — publish one, or this estimate leaves the mould "
-        "to be paid for separately"
+        else f"no {tool_word} is charged: rate set '{rate_set.rate_set_id}' v{rate_set.version} has "
+        f"no one-off charge for {stage.label.lower()} — publish one, or this estimate leaves the "
+        f"{tool_word} to be paid for separately"
     )
     return StageRate(
         unit_basis=PER_KG,
         unit_rate=material.cost_per_kg,
         batch_charge=tool.batch_charge if tool is not None else 0.0,
         note=(
-            f"{stage.label} is priced by time: the press is charged by its moulding operation at "
-            f"the hourly 'injection_moulding' rate. This line carries the material — "
-            f"{material.name} at {currency} {material.cost_per_kg:g}/kg, the rate set's material "
-            f"price — and {mould}. The stage's own rate is not charged."
+            f"{stage.label} is priced by time: the {words['machine']} is charged by its "
+            f"{words['operation']} at the hourly '{TIMEABLE_STAGES[stage.stage]}' rate. This line "
+            f"carries the material — {material.name} at {currency} {material.cost_per_kg:g}/kg, "
+            f"the rate set's material price — and {mould}. The stage's own rate is not charged."
         ),
     )
 
@@ -584,7 +614,8 @@ def price_stages(
                         f" Charged on {mass_kg:.4g} kg per part: that {base_mass_kg:.4g} kg "
                         f"divided by a yield of {yield_percent:g}%, entered by the engineer — the "
                         + (
-                            "share of each shot that is parts, the rest being runner and sprue. "
+                            "share of each shot that is parts, the rest being "
+                            f"{_SHOT_WORDS[stage.stage]['rest']}. "
                             if stage.timed
                             else "share of the metal poured or billet bought that ends up in it. "
                         )

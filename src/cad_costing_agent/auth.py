@@ -101,6 +101,9 @@ ROUTE_ROLES: dict[tuple[str, str], str] = {
     ("POST", "/time-profiles"): ADMIN,
     ("POST", "/time-profiles/{time_profile_id}/versions"): ADMIN,
     ("POST", "/dfm-profiles/{dfm_profile_id}/versions"): ADMIN,
+    ("POST", "/cad/casting-modulus"): ESTIMATOR,
+    ("POST", "/operations/die-casting-line"): ESTIMATOR,
+    ("POST", "/cad/cores/propose"): ESTIMATOR,
     ("POST", "/emission-factors/{emission_catalog_id}/versions"): ADMIN,
     # --- users and the audit log (admin) ---
     ("GET", "/auth/users"): ADMIN,

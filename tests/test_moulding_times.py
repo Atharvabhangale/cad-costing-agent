@@ -604,10 +604,11 @@ def test_only_main_reads_the_moulding_line_builder():
 
 
 def test_only_moulding_keeps_a_stage_line_when_timed_and_the_catalog_says_so():
-    assert TIMED_KEEPS_MATERIAL_AND_TOOL == {"moulding"}
+    # Die casting keeps its line the same way (tests/test_die_casting.py).
+    assert TIMED_KEEPS_MATERIAL_AND_TOOL == {"moulding", "die_casting"}
     assert TIMEABLE_STAGES["moulding"] == "injection_moulding"
     catalog = client.get("/process-routes").json()
-    assert catalog["timed_material_stages"] == ["moulding"]
+    assert catalog["timed_material_stages"] == ["die_casting", "moulding"]
 
 
 def _js_code(name: str) -> str:
