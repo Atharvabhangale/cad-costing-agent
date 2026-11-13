@@ -18,7 +18,7 @@ uvicorn cad_costing_agent.main:app --reload
 # whatever it is pointed at.
 CAD_COSTING_DATABASE_URL=sqlite:///./scratch.db uvicorn cad_costing_agent.main:app --port 8710
 
-# Tests (2633 collected; measured without cadmodels/: 2625 pass, 8 skip; full run about 3-12 min)
+# Tests (2747 collected; measured without cadmodels/: 2739 pass, 8 skip; full run about 3.5-12 min)
 # cadquery-ocp must stay below 8 (pinned): 8.x drops names this code imports.
 # A git worktree has no cadmodels/ (git-ignored), so tests needing real models
 # skip there (8 skips instead of 1). Judge a branch by a run in the main tree.
@@ -550,6 +550,42 @@ the reason. Each reads the shape through the single STEP/IGES readers.
   nothing from the package; `SheetStock` reuses the bar's fields (`material_stock_volume_mm3`,
   `stock_mass`, `material_basis`, `stock_description`). One part has one confirmed stock.
 
+### Iteration 9: die casting and cores, factories and CO2e, access control
+
+- **Die casting is timed like moulding, by Chvorinov's rule.** V and A come from the costing
+  geometry, never measured a second way; B and n are a profile row per alloy, never defaulted
+  or borrowed. `_SHOT_STAGES` (`main.py`) and `_SHOT_WORDS` (`stage_costing.py`) are the single
+  tables for the shot stages; `plan.js`'s `SHOT_WORDS` mirrors the latter (a test holds it).
+  Die casting is its own family so it never enters a machined part's casting comparisons;
+  never add a rule that recommends it.
+- **A proposed core is never a cost.** `propose_cores` only groups undercut faces. A count
+  reaches a time only as `stage_inputs[stage].cores`, entered by the engineer; a line timed for
+  any other count is `*_cores_disagree`. `/cad/cores/propose` must stay inside the
+  pull-direction section of `main.py` (a test allows the measurement only there and in
+  `/cad/dfm`).
+- **A rate set's `factory` is a label.** `region` is an ISO 3166 code by shape only, never
+  converted or read for arithmetic (the CO2e region falls back to it, labelled
+  `region_source: "rate_set_factory"`). Per-machine overhead is per *run* hour, never on setup;
+  absent means absent keys, never 0; any setup/run split counts it as run.
+- **CO2e is not money.** `co2e.py` imports only `emission_factors`, only `main.py` imports it,
+  the unit is `KgCO2e`, and it is added to no total. A missing factor or basis is
+  `not_estimated` with its reason, never zero. A published factor needs a title, URL and
+  quote, or says `no_published_source_found_illustrative`; catalog versions are immutable.
+- **Access control is opt-in and decided in one place.** `auth.AccessMiddleware` authorizes
+  and audits. **Every non-GET route must be in `auth.ROUTE_ROLES`** (a test enumerates
+  `app.routes`) — add the entry when adding an endpoint. Never authorize inside an endpoint.
+  Auth off must stay byte-identical: no header, schema parameter or response field may depend
+  on the middleware.
+- **Approval state is never stored**; it is replayed from `approval_events`. No update or
+  delete on that table, `audit_events` or `users` (users are deactivated). The audit never sees
+  a body, query string or header. Who created an estimate is `estimate_attributions`, not a
+  column on `estimates` (a new `EstimateRow` column breaks tests that write through the ORM
+  into older schemas). With auth on, the quotation gate needs an approval by an identified
+  reviewer; `quotation.py` knows nothing of approval.
+- **Migrations: the chain is 0008 -> 0010 -> 0011; there is no 0009.** A new revision that adds
+  a table must also be dropped in `test_money._pre_currency_engine`, and the head revision is
+  pinned in `test_migrations.py`, `test_dfm.py` and `test_cost_actuals.py`.
+
 ### A cost-driver table reads one estimate; it never ranks
 
 - `cost_drivers.py` imports `money` only, and only `main.py` imports it; it is handed the
@@ -869,7 +905,11 @@ actuals.js    actual costs and their variance, in the History detail
 routecompare.js  route comparison table in the route card; "Use this route"
               goes through /cad/process/decide
 drivers.js    the cost-driver table (Cost section, History detail, roll-up card)
+auth.js       sign-in bar and the fetch wrapper that adds the token; loaded before app.js
+approval.js   approval panel (History detail) and the Audit tab
+co2e.js       the CO2e card (Cost section, History detail)
 draw.js       the pull-direction card (CAD): axis, draft, undercut markers
+cores.js      proposed cores inside the pull-direction card
 sheet.js      the sheet-metal card (Manufacturing): K, bends, flat pattern, cut/bend lines
 matrix.js     the Matrix preview disclosure in the Cost section; shows the server's grid
 bulk.js       the Bulk preview tab; shows the server's rows and CSV

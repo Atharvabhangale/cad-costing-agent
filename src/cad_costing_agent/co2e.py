@@ -310,7 +310,11 @@ def estimate_co2e(
         region=region,
         region_source=region_source,
     )
+    # `/cost/cad-part` nests the part cost under `part_cost`; a hand-entered
+    # `/cost/part` estimate stores the same breakdown flat.
     part_cost = result.get("part_cost")
+    if not isinstance(part_cost, dict) and isinstance(result.get("material"), dict):
+        part_cost = result
     if not isinstance(part_cost, dict):
         return Co2eEstimate(
             **base,

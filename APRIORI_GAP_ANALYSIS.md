@@ -27,13 +27,13 @@ sheet unfolding.
 | Scenario comparison and what-if | `estimates.compare_estimates` with variance decomposition | A side-by-side view of two stored estimates or previews | S |
 | Cost-driver breakdown (material, factory, admin) | A cost split in the stored result | **Done (Iteration 6):** `GET /estimates/{id}/cost-drivers`, partitioning the stored total | — |
 | Supplier quote against should-cost | `cost_actuals`: immutable, per unit, variance shown | **Done (Iteration 5):** `figure_kind: supplier_quote`, per-category gap, quotes side by side unranked | — |
-| Digital factories: per-region labour, per-machine overhead (direct and indirect), material catalogue | Versioned, immutable rate sets, INR by default | Region and factory metadata on rate sets, a per-machine overhead split, and a picker. Currencies stay unconverted | M |
+| Digital factories: per-region labour, per-machine overhead (direct and indirect), material catalogue | **Done (Iteration 9)** as a label and overhead: region/factory on a rate-set version, per-machine direct/indirect overhead per run hour, picker by region | A regional data library (real rates per region); currencies stay unconverted | M |
 | Annual volume and tooling amortisation | A one-off batch charge on a stage | **Done (Iteration 6)** for a stage's pattern/die charge: `amortisation_quantity`, engineer-entered. The rate set's top-level tooling charge is not amortised | — |
 | DFM issues highlighted on the 3D model | DFM flags with cited thresholds, and feature selection in the viewer | **Partly done (Iteration 5):** a flag marks its features with a pointer; face-level highlighting still needs per-face ids | L for faces |
 | Cost hotspots on the 3D model | None. There is no per-operation cost by design | Per-operation cost, which conflicts with the plan-level cost preview | L |
 | Bulk costing, BOM and reports | CSV bulk preview (never stored) and assembly roll-up | Persisted bulk runs behind a review gate, plus export | M |
-| CO2e (aPriori uses IPCC GWP100 and ecoinvent) | None | A versioned emission-factor table (material kg CO2e/kg, process kWh × grid factor), labelled illustrative | M |
-| Roles, approvals and audit | None | Auth, roles, an approval state on estimates, and an audit log | L |
+| CO2e (aPriori uses IPCC GWP100 and ecoinvent) | **Done (Iteration 9), illustrative:** versioned emission-factor catalog with cited or admittedly uncited factors; material + machine electricity per stored estimate | Factors for most processes and stages; assemblies | M |
+| Roles, approvals and audit | **Done (Iteration 9), opt-in and not production-grade:** token users, three roles, approval events with separation of duties, audit log | SSO/OIDC, token expiry and rotation, user-management UI | M |
 | Comments and @mentions | None | Comment threads on estimates | M |
 | PLM and CAD plug-ins, public API | REST API | A documented API, a batch trigger for PLM, and CAD plug-ins | L |
 
@@ -77,7 +77,7 @@ sheet unfolding.
 | Melt, pour and cool steps priced by mass, energy and time | One per-kg rate | Per-step rates. Cooling time needs wall thickness | M |
 | Forging: flash, press force, tooling per die station, billet | A per-kg stage plus a batch charge | Projected area along a parting direction and a flash allowance | M |
 | Cooling time from maximum wall thickness | **Done (Iteration 8)** for injection moulding: cooling from the governing wall² with profile thermal rows | Die casting (latent heat) | M |
-| Core making for features hidden from the draw direction | Undercut faces are found (Iteration 8); no core-making time or cost | A core time/cost model | M |
+| Core making for features hidden from the draw direction | **Partly done (Iteration 9):** cores proposed from undercut regions; a confirmed count adds cycle time on die casting and timed moulding | A per-core tooling charge; sand-casting core cost | M |
 | Draft, undercut and minimum-wall DFM | **Done (Iteration 8):** pull axis, draft per face, undercut faces; DFM rules gated on a stated forming process | Parting line | — |
 | Machining after casting or forging | Done: as-formed defaults with an engineer override | — | — |
 
@@ -97,8 +97,10 @@ decision, not a gap to close by default:
 All four items below were built in Iteration 5, and tooling amortisation, the cost-driver table
 and weld prep/finishing in Iteration 6 (see `PROJECT_STATUS.md`). Iteration 7 added wall thickness, setups from
 tool access and sheet unfolding. Iteration 8 added pull direction with draft and
-undercuts, injection-moulding cycle time and sheet nesting. What remains: die casting and core
-cost models, parting lines, true-shape nesting, per-region factory data, CO2e, and roles/approvals.
+undercuts, injection-moulding cycle time and sheet nesting. Iteration 9 added die casting, proposed cores,
+factory labels with per-machine overhead, an illustrative CO2e estimate and opt-in roles and approvals.
+What remains is depth rather than new rows: real regional data, more emission factors, SSO, per-core
+tooling, parting lines and true-shape nesting.
 
 1. **Casting/forging yield on per-kg stages (S).** One editable, labelled field. It closes a real
    under-costing gap: casting is charged on finished mass with no gating or loss. Planning for this is

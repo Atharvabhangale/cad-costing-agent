@@ -1,11 +1,17 @@
 # Project Status
 
-Last updated: 2026-11-13 (Iteration 8 — pull direction and draft, moulding cycle time, sheet nesting)
+Last updated: 2026-11-13 (Iteration 9 — die casting and cores, regional factories and CO2e, opt-in roles/approvals/audit)
 
 `CHECKPOINT.md` is a point-in-time handoff written at the Step 30 pause and is not
 updated in place; this file is the step-by-step record.
 
 ## Current stage
+
+**Iteration 9: the last rows of `APRIORI_GAP_ANALYSIS.md` that this proof of concept can
+honestly address** — high-pressure die casting timed by Chvorinov's rule with proposed cores,
+a factory label and per-machine overhead on rate sets with an illustrative CO2e estimate, and
+opt-in users, roles, estimate approval and an audit log (off by default). Built by three agents,
+reviewed and merged. Details in *Iteration 9* below. None of it is production-grade.
 
 **Iteration 8: three more large gaps from `APRIORI_GAP_ANALYSIS.md`** — pull direction with
 draft and undercut DFM for formed parts, injection-moulding cycle time from the measured wall
@@ -878,6 +884,85 @@ all. One test added. Suite: **1,760 passing**, 1 skipped.
   assertions that pinned the old numbering. Suite: 1,716 to **1,721 passing**
   (1,722 collected, 1 skipped). One file added, `static/estimateflow.js`. **No
   Python file changed, no endpoint, no schema, no migration.**
+
+### Iteration 9 — die casting and cores, regional factories and CO2e, opt-in roles and approvals
+
+Three agents, each in its own worktree from the pushed branch (all stopped once on a usage limit
+mid-work and were resumed from their saved changes), reviewed and merged into `timed-welding`.
+Merging needed three things done by hand: the two new migrations were chained (`0010` revises
+`0008`; `0011` was re-pointed from `0008` to `0010`, before anything was pushed); the sections
+each agent appended to the ends of `main.py`, `repository.py` and `db_models.py` were kept in
+sequence; and the four new mutating endpoints from the other two agents were added to the access
+role table, which a structural test requires. Full suite on the merged code: **2739 passed, 8
+skipped** in about 3.5 min (Linux, Python 3.13, no `cadmodels/`). Each feature's live numbers
+below were observed by its agent against a running server on a scratch database before the
+merge; **the three were not exercised together live after the merge**, and no real model was
+measured.
+
+**High-pressure die casting, and proposed cores.** Die casting is its own family that nothing
+detects — a person chooses it, as cast or cast then machined, with degating after. Its shot is
+timed by Chvorinov's rule, t = B x (V/A)^n, with V and A the exact B-Rep volume and area from the
+one geometry path (`POST /cad/casting-modulus`); fill, open/eject, die spray and setup are profile
+figures; B and n are a time-profile row per alloy, never defaulted or borrowed; cavities are the
+engineer's. Everything is None in the seeded profile. The rule and n = 2 are cited to the
+Wikipedia article on Chvorinov's rule (quoting Askeland); **no published value of B was found**,
+so every B and shot time in `illustrative-die-casting-2026` is an estimate with no source. Stated
+limits: the whole surface is treated as touching the die, one modulus stands for the whole part,
+and biscuit, runners and overflows are not modelled. Priced by time exactly like moulding: one
+fixed-id line at the hourly `die_casting` rate, while the stage line keeps the alloy (rate-set
+material price divided by the engineer's yield) and the die's one-off charge (amortisable). A
+line timed for other cavities, cores, another alloy's row or another file's V/A is refused.
+`POST /cad/cores/propose` groups undercut faces that share edges into proposed cores; only a
+count the engineer confirms (`stage_inputs[stage].cores`) adds time, at the profile's seconds per
+core, for die casting and timed moulding. Live: a 40 mm aluminium cube, 2 cavities x 1000, 80%
+yield, tool life 100,000: modulus 6.6667 mm, solidification 44.44 s, shot 59.54 s, total
+79,967.00 (alloy 54,000 + die 4,000 + degating 1,000 + machine 20,967), equal to the hand
+calculation; one confirmed core added exactly 2 s per shot. Not done: a per-core tooling charge
+(the die charge does not grow with cores, and sand-casting cores are proposed but not costed).
+
+**Regional factory label, per-machine overhead, and a CO2e estimate.** A rate-set version may
+state its factory (`region` as an ISO 3166 code checked by shape only, name, notes) and, per
+process, a direct and an indirect overhead per **run** hour (not on setup, which is how labour is
+already charged). Both live in the existing rates JSON, so there is no schema change and
+**revision 0009 does not exist**; absent, nothing appears in any dump and existing estimates are
+byte-identical. The overhead reaches cost through `calculate_operation_cost`, is attributed by
+the comparison as `machine_overhead_rate` with nothing unexplained, and shows in cost drivers and
+the quotation only as stored figures. The picker groups and filters by region and matrix-preview
+rows name their factory; no seeded rate set has a factory. A versioned, immutable emission-factor
+catalog (migration `0010`, one seeded `illustrative-co2e` 1.0.0) backs
+`GET /estimates/{id}/co2e`, computed by `co2e.py` from the stored snapshot only: stored material
+mass x a material factor, plus committed run hours per process x kWh per hour x a grid factor for
+the region. CO2e has its own unit type, is added to no money total, and a line with no factor or
+no basis is `not_estimated` with its reason — never zero — and the total then says partial.
+Sources quoted in the catalog: worldsteel (steel 1.91 t CO2/t — CO2, not CO2e, crude steel), the
+International Aluminium Institute (primary aluminium 14.8 t CO2e/t; re-fetched and confirmed
+during review), UK DESNZ 2024 (grid 0.20705 kg/kWh), and for India 0.727 t CO2/MWh from a trade
+report of the CEA baseline because the CEA's own files could not be fetched. Per-process
+electricity (milling 7.5, turning 6.0, drilling 4.0, welding 5.0 kWh per run hour) has no
+published source and is labelled so; every other process, every per-piece stage and every
+assembly roll-up is `not_estimated`. Live: a factory rate set with 120 + 60 per hour overhead
+raised a 7-operation estimate from 2,184.79 to 2,394.79, exactly 7 x 30.00; CO2e for 5 steel
+parts in IN came to 9.414 kg (3.476 material + 0.485 drilling + 5.452 milling), matching hand
+calculation; a database created by the previous code upgraded to `0010` with its estimate intact.
+
+**Opt-in users, roles, estimate approval and an audit log.** `CAD_COSTING_AUTH_ENABLED` is off
+by default, and with it off every response is byte-identical to before (a test compares 14
+responses with and without the access middleware); actions are attributed to `local` and still
+audited. With it on, requests carry a per-user API token (`Authorization: Bearer`), stored only
+as a salted PBKDF2 hash, created by `scripts/create_admin.py` or an admin — no default password
+or token. One route-to-role table (`estimator` / `reviewer` / `admin`) covers every mutating
+route; a structural test enumerates the app's routes against it, and an unmapped mutating route
+is refused. Approval state is replayed from append-only events (`submitted`, `approved`,
+`rejected`, `withdrawn`), never stored; with auth on a reviewer cannot approve an estimate they
+created or submitted, and a quotation is issued only for an estimate approved by an identified
+reviewer (409 otherwise). Approval changes no figure. One middleware writes an audit row per
+mutating request — actor, route, target, status — and never a body, query string or header.
+Migration `0011` adds four tables and alters none. Live with auth on: un-approved issue refused
+409, self-approval refused 403, a second reviewer approved, the quotation issued at 968.0; a
+database from the previous code upgraded with its estimate served byte-identically. **This is
+not SSO or OIDC and not production-grade**: no token expiry or rotation, no rate limiting, a
+best-effort (non-transactional) audit write, no user-management UI (API only), and no
+simultaneous-request test of the approval sequence.
 
 ### Iteration 8 — pull direction and draft, moulding cycle time, sheet nesting
 
@@ -2590,7 +2675,7 @@ a fault of the comparison. It is the kind of gap this feature exists to expose.
 - Production-grade persistence: schema changes are now migrated with Alembic, but there is still no backup/retention policy, no auth, and no concurrency handling beyond SQLite's own
 - Data migrations (Alembic handles schema; nothing back-fills or transforms existing rows)
 - Frontend/UI
-- Authentication, CI/CD, deployment
+- CI/CD, deployment. Authentication exists only as the opt-in, non-production token scheme of Iteration 9 (no SSO, no expiry or rotation)
 - Higher-quality display decimation (quadric edge collapse). Vertex clustering preserves silhouettes and proportions but can pull corners inward by up to half a grid cell and loses detail below the cell size — acceptable for a preview, and never used for a measurement, but it is visibly coarser than the CAD data
 
 ## Next step

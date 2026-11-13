@@ -431,3 +431,33 @@ def test_the_card_renders_the_servers_figures_and_works_nothing_out():
     for token in ("sort(", "Math.", "reduce(", "toFixed", "parseFloat", " * ", " / ", " - ",
                   "+=", "-=", "money("):
         assert token not in code, token
+
+
+def test_a_hand_entered_estimate_gets_a_co2e_estimate_too():
+    """`/cost/part` stores its part cost flat, not under `part_cost`. It was
+    reported as an assembly roll-up with nothing to estimate."""
+    from fastapi.testclient import TestClient
+
+    from cad_costing_agent.main import app
+
+    client = TestClient(app)
+    created = client.post(
+        "/cost/part",
+        json={
+            "part": {
+                "part_id": "P100",
+                "part_name": "Flange",
+                "material": "Steel",
+                "mass_kg": 2.5,
+                "quantity": 4,
+            }
+        },
+    )
+    assert created.status_code == 200, created.text
+    body = client.get(f"/estimates/{created.json()['estimate_id']}/co2e?region=IN").json()
+
+    assert body["status"] != "not_estimated"
+    material = [line for line in body["lines"] if line.get("kg_co2e") is not None]
+    assert material, body
+    # 2.5 kg x 4 parts x 1.91 kg CO2 per kg of steel.
+    assert material[0]["kg_co2e"] == pytest.approx(2.5 * 4 * 1.91, abs=1e-3)
