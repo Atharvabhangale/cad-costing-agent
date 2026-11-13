@@ -18,7 +18,8 @@ uvicorn cad_costing_agent.main:app --reload
 # whatever it is pointed at.
 CAD_COSTING_DATABASE_URL=sqlite:///./scratch.db uvicorn cad_costing_agent.main:app --port 8710
 
-# Tests (2095 collected: 2094 pass, 1 skip; full run about 4-12 min)
+# Tests (2244 collected; measured without cadmodels/: 2236 pass, 8 skip; full run about 2-12 min)
+# cadquery-ocp must stay below 8 (pinned): 8.x drops names this code imports.
 # A git worktree has no cadmodels/ (git-ignored), so tests needing real models
 # skip there (8 skips instead of 1). Judge a branch by a run in the main tree.
 pytest
@@ -316,6 +317,22 @@ optional one-off batch charge (pattern, die).
   default to **None** — the seeded profile times no weld; `illustrative-welding-2026` is
   published by `scripts/publish_illustrative_welding_time_profile.py`. `plan.js`'s
   `TIMED_STAGE_PROCESSES` and `estimatedFor` mirror the backend; a test holds each.
+- **Per-weld handling is cycle time, and optional on its own.**
+  `welding_reposition_minutes_per_weld` / `welding_tack_minutes_per_weld` are added to a weld's
+  cycle when a profile states them and are *not* in `_WELDING_PARAMETERS`: a profile without
+  them times welds exactly as before. Never move them to the setup. The illustrative profile
+  grows by versions in the publish script's `VERSIONS` table; never edit a listed one.
+  (`test_no_machine_learning_is_involved` greps `operation_time.py` for `torch` — do not write
+  that word in a welding description.)
+- **A yield is the engineer's, and only the material-supplying per-kg stage takes one.**
+  `stage_inputs[stage].yield_percent` divides the base mass (entered blank, else CAD finished
+  mass); the line's `mass_kg` is the mass *charged*, `base_mass_kg` / `base_mass_source` what
+  it came from, `mass_source: "yield_applied"`. Never default one. An entered mass is the
+  *blank*, so mass plus yield is not a contradiction; a later per-kg step takes the blank's
+  mass, never the poured mass. Absent yield means absent keys (a test pins the key set). A
+  yield on a per-piece, batch-only, non-supplying or timed stage is a 400; one for a stage
+  the route lacks is ignored, because `stage_inputs` is shared across a comparison's routes.
+  The page offers the input from `/process-routes`'s `yield_stages` and never divides.
 - The comparison (`estimates.decompose`) reads a material not charged at a zero rate and
   attributes stage changes as `route_stage`; the quotation adds a `route_stages` line only
   when there are stages.
@@ -408,6 +425,12 @@ path — a preview must give the figure the estimate would.
   order. A route that cannot be priced is listed with the pricing path's reason and null
   figures. The engineer chooses through `/cad/process/decide`. Response figures are `Money`
   (exact in memory, rounded on output) or they will not equal the estimate's.
+- **Matrix preview** (`matrix_preview.py`, imports `money` only; `POST /cost/matrix-preview`)
+  prices one part across rate-set versions x quantities, one `price_cad_part` call per cell
+  with the plan as sent. It **accepts no time** — that is bulk preview's labelled special
+  case, and a test forbids `system_time_accepted`, `model_copy` and `build_plan` in its
+  section. Caller's order; nothing sorted, marked or converted; a refused cell has null
+  figures and the pricing path's reason. Capped by `CAD_COSTING_MAX_MATRIX_CELLS`.
 - **Bulk preview** (`bulk_preview.py`, imports nothing from the package; `POST
   /cad/bulk/preview`) prices a CSV of parts with the system's estimated times accepted on an
   **in-memory plan copy only** — `system_time_accepted` is set in exactly one place in that
@@ -432,6 +455,11 @@ reach a plan, a time or a cost.
   a vendor rule of thumb as a standard.
 - **No severity, no confidence.** A flag states the rule, the measured value, the threshold,
   the profile version and the source; faceted evidence is labelled weaker.
+- **A flag is marked on the model from the DFM response alone.** `flagged_features` are
+  recognition's own objects handed back unchanged; `dfm.js` never looks one up in
+  `state.features` and never picks a feature by a threshold. One flag colour, a different
+  shape, and the row and `#dfm-marked` say it in words — no severity scale. It is a pointer
+  drawn without depth testing, not a face highlight; never describe it as one.
 - Adding a seeded catalog changes `init_db`'s return count and the head revision: update
   `test_persistence`, `test_migrations`, `test_cost_actuals` and `test_money`'s helper.
 
@@ -450,6 +478,14 @@ reach a plan, a time or a cost.
 - **An assembly row stores `0.0` where the roll-up had no total.** Read
   `is_complete` / `is_aggregatable` / `production_total_cost` from the snapshot
   (`figures_from_estimate` does), and compare an assembly on its total only.
+- **The kind is never guessed, and a quote and an actual never share a field.**
+  `figure_kind` (`actual` / `supplier_quote`) has no default in the model or the schema and is
+  never read out of the free-text `source`. A quote fills `quote_per_unit` / `gap` /
+  `gap_percent`; an actual `actual_per_unit` / `variance` / `variance_percent`. Anything that
+  ever aggregates actuals must filter on it. A gap is not a verdict: no judgement, no sort, no
+  "best" — `compare_supplier_quotes` lists current quotes in the order entered.
+- A new migration means updating the head revision in `test_migrations.py`, `test_dfm.py` and
+  `test_cost_actuals.py`.
 - **Immutable.** No update or delete in `CostActualRepository`; a correction names
   `supersedes_actual_id`, which is unique so the chain stays one line.
 
@@ -704,7 +740,7 @@ features — the status that path has always returned).
 
 ### Resource budgets
 
-`limits.py` holds eight separately configurable budgets (`CAD_COSTING_MAX_*`) because they answer
+`limits.py` holds nine separately configurable budgets (the ninth is the matrix preview's cell cap) (`CAD_COSTING_MAX_*`) because they answer
 different questions, plus one threshold that is not a budget at all —
 `CAD_COSTING_MIN_FEEDBACK_SAMPLE`, the observation count below which the analytics prints a sentence
 instead of a number. The module docstring lists seven of the nine; if you add one, list it there. The ordering that matters: **a model too complex to draw or
@@ -733,6 +769,7 @@ feedback.js   the feedback and correction analytics panel
 actuals.js    actual costs and their variance, in the History detail
 routecompare.js  route comparison table in the route card; "Use this route"
               goes through /cad/process/decide
+matrix.js     the Matrix preview disclosure in the Cost section; shows the server's grid
 bulk.js       the Bulk preview tab; shows the server's rows and CSV
 dfm.js        the advisory DFM panel in the CAD section
 assembly.js   the component tree, the bill of materials, the classification

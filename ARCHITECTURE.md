@@ -1260,7 +1260,9 @@ result — and raises the endpoint's own `HTTPException`s. The endpoint stores w
 returns. **Route comparison** (`POST /cost/route-comparison`) calls it once per route —
 the recommended route and the candidate families' catalog routes, each decided for the
 preview — and lists priced and refused routes in a fixed order, never by cost, with
-nothing chosen or stored. **Bulk preview** (`POST /cad/bulk/preview`) calls it once per CSV
+nothing chosen or stored. **Matrix preview** (`POST /cost/matrix-preview`,
+`matrix_preview.py`, imports `money` only) calls it once per rate-set version x quantity
+with the plan as sent — no time accepted, caller's order, nothing stored. **Bulk preview** (`POST /cad/bulk/preview`) calls it once per CSV
 row with the system's estimated times accepted on an in-memory plan copy, labels every
 figure an unreviewed system estimate, and stores nothing. Because both go through the
 same function, neither can price a part differently from the estimate the same inputs

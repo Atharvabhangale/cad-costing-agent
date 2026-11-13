@@ -1,11 +1,17 @@
 # Project Status
 
-Last updated: 2026-10-27 (Iteration 3 — non-machining route stages priced from stage rates)
+Last updated: 2026-11-13 (Iteration 5 — five aPriori gaps closed in parallel)
 
 `CHECKPOINT.md` is a point-in-time handoff written at the Step 30 pause and is not
 updated in place; this file is the step-by-step record.
 
 ## Current stage
+
+**Iteration 5: five small gaps from `APRIORI_GAP_ANALYSIS.md`, built in parallel by separate
+agents, reviewed and merged** — a yield on the casting/forging stage, a matrix costing preview
+(rate sets x quantities), supplier quotes compared with the should-cost, per-weld handling
+time, and DFM flags pointed at on the 3D model. None adds a second pricing path, a default
+figure, a ranking or a severity. On branch `timed-welding`. Details in *Iteration 5* below.
 
 **Iteration 4: three features built in parallel by separate agents and merged** — route
 comparison, advisory DFM flags, and a bulk costing preview. Route comparison and bulk
@@ -855,6 +861,85 @@ all. One test added. Suite: **1,760 passing**, 1 skipped.
   assertions that pinned the old numbering. Suite: 1,716 to **1,721 passing**
   (1,722 collected, 1 skipped). One file added, `static/estimateflow.js`. **No
   Python file changed, no endpoint, no schema, no migration.**
+
+### Iteration 5 — five aPriori gaps closed (built in parallel)
+
+Five agents each built one feature in its own worktree; each was reviewed, re-tested and merged
+into `timed-welding`. Full suite on the merged code: **2236 passed, 8 skipped** in about 2 min
+(Linux container, Python 3.13, no `cadmodels/`, hence 8 skips rather than 1). The merged app
+was started against a scratch database: migration head `0008`, the new endpoints present,
+`/ui/matrix.js` served `no-cache`. Each feature's live numbers below were observed by its
+agent against a running server on a scratch database, before the merge.
+
+**Yield on the material-supplying per-kg stage.** `stage_inputs[stage].yield_percent` (above 0,
+at most 100; the engineer's number — no default, no hidden allowance) says what share of the
+metal poured or billet bought ends up in the blank. The stage is charged on base mass /
+(yield/100), the base being the entered blank mass or else the finished CAD mass. The line
+states `base_mass_kg`, `base_mass_source`, `yield_percent`, the charged `mass_kg`,
+`mass_source: "yield_applied"` and a note; with no yield a line has exactly its previous keys.
+A later per-kg step (fettling) still works on the blank. A yield on a per-piece, batch-only,
+non-supplying or timed stage is a 400. `/process-routes` lists `yield_stages` so the page
+keeps no list. Live (`block_with_counterbore`, quantity 5, casting 120/kg + 15,000 per batch):
+casting line 15,218.42 with no yield and 15,273.02 at 80% (0.364 kg -> 0.455 kg); a 3.0 kg
+blank at 75% is charged on 4.0 kg, 17,400.00, and the comparison attributes the 600.00 change
+as `route_stage` "yield none -> 75%" with nothing unexplained. Not checked in a browser: the
+yield input's layout on the route card. Not done: the quotation does not print the yield; bulk
+preview sends no stage inputs.
+
+**Matrix costing preview.** `POST /cost/matrix-preview` prices one CAD part under each listed
+rate-set version at each listed quantity, one `price_cad_part` call per cell with the plan
+exactly as sent (no time is accepted). `kind: preview`, `stored: false`, `chosen: null`; rows
+and cells in the caller's order, never sorted or marked; a cell that cannot be priced carries
+the pricing path's reason and null figures; currencies are never converted. Capped by
+`CAD_COSTING_MAX_MATRIX_CELLS` (default 24; a larger grid is a 400). `matrix_preview.py`
+imports `money` only. UI: a *Matrix preview* disclosure in the Cost section (`matrix.js`).
+Live: `block_with_counterbore` under `poc-machine-shop` 1.0.0 at quantity 10 gave 5,275.02
+total / 527.50 per unit in both the matrix cell and `/cost/cad-part`; `stepped_shaft` under
+`poc-machine-shop` was refused in every cell for want of a turning rate; the estimate count
+was unchanged by previews. Not done: CSV export, an assembly matrix, geometry caching (each
+cell re-reads the file).
+
+**Supplier quote vs should-cost.** A recorded cost now states what kind of figure it is:
+`figure_kind` is `actual` or `supplier_quote`, **required with no default** (as `cost_basis`
+is), plus optional `supplier_name` and `quote_reference` for a quote only. **This is a
+breaking change to `POST /estimates/{id}/actuals`: a payload without `figure_kind` is a 422.**
+Migration `0008` adds the columns and marks every existing row `actual` — what each was
+entered and shown as — leaving no default in the schema. An actual is still a variance
+(estimate - actual); a quote is reported in separate fields as a gap (quote - should-cost,
+percent of the should-cost) with a sentence giving direction and size and no verdict.
+`GET /estimates/{id}/actuals` also returns the current quotes side by side in the order
+entered — not sorted, none preferred. Live: a 242.00/unit should-cost against quotes of 100,
+400 and 850 gave gaps -142.00 (-58.68%), +158.00 (+65.29%) and +608.00 (+251.24%), in entry
+order. Not done: supplier master data, any ranking, a per-category comparison for assemblies.
+A legacy row that was really a quotation must be corrected by hand (a correction may change
+the kind).
+
+**Per-weld handling time.** A time profile may state `welding_reposition_minutes_per_weld`
+and `welding_tack_minutes_per_weld`, both None by default. Where stated, each is added to
+that weld's cycle time (per weld, per part; never the setup) and named in the estimate's
+parameters and explanation; without them the estimate is exactly the earlier one. Passes were
+already `ceil(size / welding_mm_per_pass)`. The publish script now also publishes
+`illustrative-welding-2026` 1.1.0 (reposition 0.5 min, clamp-and-tack 1.0 min — both
+estimates with no published source) and is idempotent. Live: a 600 mm, 8 mm-leg MIG fillet is
+8.89 min under 1.0.0 and 10.39 under 1.1.0 (4.00 / 0.45 + 0.5 + 1.0). **Known overlap:** the
+arc-on factor's remainder is already described as "handling and cleaning", and 1.1.0 keeps
+0.45 while adding fixed handling, so the two may double count; whoever publishes real figures
+must decide the split. Not done: robotic programming time, weld prep/grind from length.
+
+**DFM flags pointed at on the 3D model.** `/cad/dfm` now returns `flagged_features` beside
+`flags` — the recognized features the flags name, unchanged — so a flag row marks its
+feature(s) in the viewer whether or not the features panel has been analysed. *Show all
+flagged features* and *Clear markers* do what they say. A flag marker is a magenta diamond
+with an axis line, drawn over the part (a through hole's location is on the far face), one
+colour because a flag has no severity. It is a pointer at the recognized location, **not a
+face highlight**. Live: a block with a deep hole (5.0 x diameter against 4), a deep slot
+(6.0 x width against 4) and 7 hole diameters (against 6) gave 3 flags, 8 features, 8 markers.
+Not seen: flags on an assembly (the fixture raises none) or a faceted file.
+
+**Two environment fixes.** `cadquery-ocp` is pinned below 8: the 8.x bindings drop
+`TopTools_Indexed*` and `TDF_LabelSequence`, so a fresh install failed feature recognition
+with an ImportError. And one exploded-view test compared nested tuples with `pytest.approx`,
+which current pytest refuses; it now compares flat.
 
 ### Welding priced by time (Iteration B)
 

@@ -1129,12 +1129,13 @@ Retrieves a persisted estimate by the `estimate_id` returned from `/cost/part` o
 }
 ```
 
-### `POST /estimates/{estimate_id}/actuals` — record a client's actual cost
+### `POST /estimates/{estimate_id}/actuals` — record a client's actual cost or a supplier's quote
 
-Records a cost stated outside this application (an ERP actual, a past quotation) against an existing estimate, and returns it with its per-unit variance. Nothing in the estimate changes, and no costing reads an actual. In the UI this is in the **History** detail, under *Actual cost (client data)*.
+Records a cost stated outside this application (an ERP actual, or a supplier's quotation — `figure_kind` says which) against an existing estimate, and returns it with its per-unit variance. Nothing in the estimate changes, and no costing reads an actual. In the UI this is in the **History** detail, under *Actual cost (client data)*.
 
 ```json
 {
+  "figure_kind": "actual",
   "source": "Client ERP actual FY2025",
   "cost_basis": "per_batch",
   "batch_quantity": 10,
@@ -1148,7 +1149,8 @@ Records a cost stated outside this application (an ERP actual, a past quotation)
 }
 ```
 
-- `source`, `cost_basis`, `currency` and `total_cost` are required. `cost_basis` has no default.
+- `figure_kind`, `source`, `cost_basis`, `currency` and `total_cost` are required. Neither `figure_kind` (`actual` or `supplier_quote`) nor `cost_basis` has a default; a payload without `figure_kind` — the shape accepted before Iteration 5 — is refused (422).
+- `supplier_name` and `quote_reference` are optional free text for a `supplier_quote` and refused on an `actual`. They are stored as entered and matched to nothing.
 - `batch_quantity` is required for `per_batch`. A per-batch cost without it is refused (422), never treated as one unit.
 - `material_cost`, `machining_cost` and `additional_cost` are optional. One left out comes back `not_supplied`, never zero. A breakdown that adds up to more than `total_cost` is refused.
 - A currency different from the estimate's is refused (422). Nothing is converted.
@@ -1166,18 +1168,21 @@ unattributed actual: 30.00 per unit
 
 An assembly estimate is compared on its total only, because its material/operation/additional figures cover manufactured components alone. An incomplete or mixed-currency assembly has no total to compare, and its variance is `unavailable` with the reason. A batch size different from the estimate's, or one not stated, is reported as a warning and not adjusted for.
 
+A `supplier_quote` is reported in separate fields, never as a variance: `quote_per_unit`, `gap` (`quote - should-cost`) and `gap_percent` (relative to the should-cost), with a sentence giving direction and size and no verdict. Measured against a ₹242.00 per-unit should-cost: quotes of 100, 400 and 850 per unit gave gaps of −142.00 (−58.68%), +158.00 (+65.29%) and +608.00 (+251.24%).
+
 ### Previews and advice (nothing here is stored)
 
 | Endpoint | What it does |
 |---|---|
 | `POST /cost/route-comparison` | The recommended route and the candidate families' routes, each priced as if decided, through the same path as `/cost/cad-part`. Unpriceable routes are listed with their reason. Never ranked or chosen; "Use this route" in the route card records the engineer's decision. |
+| `POST /cost/matrix-preview` | `/cost/cad-part`'s inputs with `rate_sets` (JSON list of `{rate_set_id, version}`) and `quantities` (JSON list) in place of one of each. One part priced per rate-set version x quantity through the same path, plan as sent. Caller's order, never ranked; an unpriceable cell carries the reason and no figure; nothing stored; at most `CAD_COSTING_MAX_MATRIX_CELLS` (24) cells. In the UI: **Matrix preview** in the Cost section. |
 | `POST /cad/bulk/preview` | A CSV (`file, part_id, part_name, material, quantity`, optional `rate_set_id, rate_set_version, route_id, source_unit`) plus the CAD files. Each part priced with the system's estimated times, every figure labelled **"Unreviewed system estimates — not an estimate, not quotable"**. `?format=csv` returns the export. Up to 100 rows / 50 files / 300 MB. In the UI: the **Bulk preview** tab. |
-| `POST /cad/dfm` | Advisory design-for-manufacturing flags from the recognized features (deep holes, deep narrow pockets or slots, small internal fillet radii, many distinct hole sizes), each with the measured value, the threshold, the profile version and its source. Never changes a cost. In the UI: the DFM panel in the CAD section. |
+| `POST /cad/dfm` | Advisory design-for-manufacturing flags from the recognized features (deep holes, deep narrow pockets or slots, small internal fillet radii, many distinct hole sizes), each with the measured value, the threshold, the profile version and its source. Also returns `flagged_features`, the recognized features the flags name, so a flag row can mark them on the 3D model (a pointer at the recognized location, not a face highlight). Never changes a cost. In the UI: the DFM panel in the CAD section. |
 | `GET /dfm-profiles`, `GET /dfm-profiles/{id}`, `POST /dfm-profiles/{id}/versions` | The DFM threshold profiles: versioned and immutable like time profiles. The seeded `dfm-general-guidelines` 1.0.0 is illustrative and cites a vendor CNC design guide; one threshold has no published source and says so. |
 
 ### `GET /estimates/{estimate_id}/actuals`
 
-Every actual recorded against the estimate, oldest first, each with `is_current`, `superseded_by` and its variance.
+Every figure recorded against the estimate, oldest first, each with its `figure_kind`, `is_current`, `superseded_by` and its variance or gap. `supplier_quotes` lists the current quotes side by side in the order entered — `ranked: false`, `preferred: null`; nothing is sorted by price.
 
 ## API
 
