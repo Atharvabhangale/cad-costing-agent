@@ -45,6 +45,9 @@ function resetPlan() {
   // from a previous file.
   state.planComponentId = null;
   manualCounter = 0;
+  // A proposal was for the plan that is gone.
+  state.approachProposal = null;
+  state.approachApplied = null;
   renderPlan();
 }
 
@@ -113,6 +116,8 @@ async function buildPlanFromSuggestions(result) {
 
   // One setup holding everything: the same conservative default the backend
   // applies, and the opposite of the per-operation setup that made costs wrong.
+  state.approachProposal = null;
+  state.approachApplied = null;
   state.plan = {
     setups: [{
       setup_id: "SETUP-001",
@@ -618,6 +623,7 @@ function renderPlan() {
     $("plan-impact").classList.add("hidden");
     $("use-all-estimates").classList.add("hidden");
     renderSequence([]);
+    renderApproachProposal();
     return;
   }
 
@@ -706,6 +712,7 @@ function renderPlan() {
 
   refreshUncostedNote();
   refreshPlanImpact();
+  renderApproachProposal();
 
   // An edit here changes the component's own plan, so its summary has to be
   // re-read. Guarded forward, the way app.js guards its calls into impact.js:
@@ -862,11 +869,14 @@ function setupHeaderRow(setup) {
   const source = setupTimeSource(setup);
   const committed = setupTime(setup);
 
+  // A setup created by applying the approach proposal says so, because its
+  // evidence is the geometry rather than the one-setup assumption.
   const grouping =
     setup.origin === "user"
       ? `<span class="pill pill-ok">User grouping</span>`
       : `<span class="pill pill-off" title="${escapeHtml(setup.system_grouping_reason || "")}">
-           System grouping · ${escapeHtml(setup.system_grouping_confidence || "low")} confidence</span>`;
+           ${setup.system_grouping === "approach_direction" ? "Approach grouping" : "System grouping"}
+           · ${escapeHtml(setup.system_grouping_confidence || "low")} confidence</span>`;
 
   // The estimate is shown as a placeholder, never as the field's value — the
   // same rule the operation times follow.
@@ -1516,6 +1526,174 @@ $("add-setup").addEventListener("click", () => {
   renumberSetups();
   renderPlan();
 });
+
+// ------------------------------------------------- setups by approach direction
+//
+// The server reads which way a tool must come from to reach each feature, checks
+// it with straight rays and proposes one setup per direction
+// (`/cad/setups/propose`). This section shows that proposal as sent and, when the
+// engineer presses Apply, asks the server to apply it
+// (`/cad/setups/apply-proposal`), which writes `user_setup_id`s through the
+// plan's own regrouping. Nothing is grouped, counted or chosen here.
+
+function approachRequestBody() {
+  const payload = planPayload();
+  if (!payload || !state.file) return null;
+  const body = new FormData();
+  body.append("file", state.file);
+  body.append("manufacturing_plan", JSON.stringify(payload));
+  // A component's plan is proposed on that component's own shape only.
+  if (state.planComponentId) body.append("component_id", state.planComponentId);
+  return body;
+}
+
+async function proposeSetups() {
+  const body = approachRequestBody();
+  if (!body) {
+    showError("Build a manufacturing plan from a CAD file first.");
+    return;
+  }
+  $("approach-proposal").innerHTML = `<p class="hint">Casting rays against the CAD…</p>`;
+  try {
+    state.approachProposal = await api("/cad/setups/propose", { method: "POST", body });
+    state.approachProposalPlan = JSON.stringify(planPayload());
+    state.approachApplied = null;
+  } catch (error) {
+    $("approach-proposal").innerHTML = "";
+    showError(error.message);
+    return;
+  }
+  renderApproachProposal();
+}
+
+function approachSetupItem(setup) {
+  const operations = setup.operations
+    .map(
+      (placed) =>
+        `<li><span class="mono">${escapeHtml(placed.operation_id)}</span>
+          ${escapeHtml(placed.operation_name)}
+          <span class="muted">— ${escapeHtml(placed.feature_ids.join(", "))},
+          ${placed.access === "flank" ? "side milled by the tool's flank" : "head-on"}</span></li>`
+    )
+    .join("");
+  return `<li class="approach-setup" data-position="${setup.position}">
+      <strong>Setup ${setup.position} — ${escapeHtml(setup.direction_label)}</strong>
+      <span class="muted">· ${setup.operation_ids.length} operation(s)</span>
+      <button type="button" class="secondary tiny approach-show" data-position="${setup.position}">Show on model</button>
+      <ul class="declined-list">${operations}</ul>
+    </li>`;
+}
+
+function renderApproachProposal() {
+  const box = $("approach-proposal");
+  const apply = $("apply-approach");
+  const proposal = state.approachProposal;
+  if (!box || !apply) return;
+  if (!proposal) {
+    box.innerHTML = state.approachApplied
+      ? `<p class="hint">${escapeHtml(state.approachApplied)}</p>`
+      : "";
+    apply.classList.add("hidden");
+    return;
+  }
+  if (!proposal.available) {
+    box.innerHTML = `<p class="warning-inline">No proposal: ${escapeHtml(proposal.unavailable_reason || "")}</p>`;
+    apply.classList.add("hidden");
+    return;
+  }
+
+  const stale = state.approachProposalPlan !== JSON.stringify(planPayload());
+  const unplaced = proposal.unplaced
+    .map(
+      (entry) =>
+        `<li><span class="mono">${escapeHtml(entry.operation_id)}</span>
+          ${escapeHtml(entry.operation_name)} — <strong>${escapeHtml(entry.status.replace(/_/g, " "))}</strong>:
+          ${escapeHtml(entry.reason)}</li>`
+    )
+    .join("");
+  box.innerHTML =
+    `<p class="hint"><strong>${proposal.setups.length} setup(s) proposed</strong> for
+      ${proposal.considered_operation_count} milled or drilled operation(s) ·
+      confidence <strong>${escapeHtml(proposal.confidence)}</strong> —
+      ${escapeHtml(proposal.confidence_reason)}</p>` +
+    (stale
+      ? `<p class="warning-inline">The plan has changed since this proposal. Applying recomputes it
+          from the plan as it is now.</p>`
+      : "") +
+    `<ol class="feature-summary">${proposal.setups.map(approachSetupItem).join("")}</ol>` +
+    (unplaced
+      ? `<p class="hint"><strong>Not placed</strong> — left in the setup they are in now:</p>
+         <ul class="declined-list">${unplaced}</ul>`
+      : "") +
+    `<details class="detail-toggle"><summary>What this does not check</summary>
+       <ul class="declined-list">
+         ${proposal.limitations.map((line) => `<li>${escapeHtml(line)}</li>`).join("")}
+         <li>${escapeHtml(proposal.machine_note)}</li>
+         <li>${escapeHtml(proposal.algorithm_note)}</li>
+       </ul></details>` +
+    `<p class="hint">${escapeHtml(proposal.note)}</p>`;
+  apply.classList.toggle("hidden", proposal.setups.length === 0);
+
+  box.querySelectorAll("button.approach-show").forEach((button) =>
+    button.addEventListener("click", () => showApproachSetup(Number(button.dataset.position)))
+  );
+}
+
+// Points at the setup's features with the existing feature selection, then draws
+// the approach direction as a line at one of the setup's own ray origins. Both
+// the point and the direction are the server's.
+function showApproachSetup(position) {
+  const proposal = state.approachProposal;
+  const setup = proposal && proposal.setups.find((entry) => entry.position === position);
+  if (!setup) return;
+  if (typeof selectFeatures === "function") {
+    selectFeatures(setup.feature_ids, { label: `Setup ${setup.position} — ${setup.direction_label}` });
+  }
+  if (window.CadViewer && setup.marker_origin) {
+    window.CadViewer.markFeature?.(
+      { location: setup.marker_origin, axis: setup.direction },
+      { keep: true }
+    );
+  }
+}
+
+async function applyApproachProposal() {
+  const body = approachRequestBody();
+  if (!body) return;
+  let applied;
+  try {
+    applied = await api("/cad/setups/apply-proposal", { method: "POST", body });
+  } catch (error) {
+    showError(error.message);
+    return;
+  }
+  // The server's plan replaces the table's, keeping only the browser's
+  // display-only `_` fields, and in place, so a component's plan entry that
+  // `state.plan` points at is updated with it.
+  const previous = new Map(state.plan.operations.map((operation) => [operation.operation_id, operation]));
+  state.plan.setups = applied.plan.setups;
+  state.plan.operations = applied.plan.operations.map((operation) => {
+    const before = previous.get(operation.operation_id) || {};
+    const display = {};
+    Object.keys(before)
+      .filter((key) => key.startsWith("_"))
+      .forEach((key) => {
+        display[key] = before[key];
+      });
+    return { ...operation, ...display };
+  });
+  state.approachProposal = null;
+  state.approachApplied =
+    `Applied: ${applied.created_setup_ids.length} setup(s) created, ` +
+    `${applied.moved_operation_ids.length} operation(s) moved` +
+    (applied.removed_setup_ids.length ? `, ${applied.removed_setup_ids.join(", ")} left empty and removed` : "") +
+    (applied.left_in_place.length ? `, ${applied.left_in_place.length} left where they were` : "") +
+    `. ${applied.note}`;
+  renderPlan();
+}
+
+$("propose-setups").addEventListener("click", proposeSetups);
+$("apply-approach").addEventListener("click", applyApproachProposal);
 
 // ---------------------------------------------------------- the cost impact
 //
