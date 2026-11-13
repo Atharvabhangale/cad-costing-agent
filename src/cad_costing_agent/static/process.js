@@ -213,7 +213,7 @@ function renderStageInputs() {
                <input type="number" step="any" min="0" class="stage-mass" data-stage="${escapeHtml(stage.stage)}"
                  value="${entered ?? ""}" placeholder="from CAD unless entered"></label>` +
             (yieldStages.includes(stage.stage)
-              ? `<label>${keepsLine ? "Yield, % of the shot that is parts (runner and sprue are the rest)" : "Yield, % of the metal poured or billet bought"}
+              ? `<label>${keepsLine ? `Yield, % of the shot that is parts (${escapeHtml(SHOT_WORDS[stage.stage].rest)} are the rest)` : "Yield, % of the metal poured or billet bought"}
                    <input type="number" step="any" min="0" max="100" class="stage-yield" data-stage="${escapeHtml(stage.stage)}"
                      value="${enteredYield ?? ""}" placeholder="none unless entered"></label>`
               : "")
@@ -236,9 +236,16 @@ function renderStageInputs() {
              <input type="number" step="1" min="1" class="stage-cavities" data-stage="${escapeHtml(stage.stage)}"
                value="${(state.stageInputs[stage.stage] || {}).cavities ?? ""}" placeholder="none assumed"></label>`
         : "";
+      // The core count is the engineer's confirmation. The pull-direction card
+      // only proposes one; blank is "not confirmed", and no core is timed.
+      const cores = materialLine
+        ? `<label>Cores / side actions, confirmed
+             <input type="number" step="1" min="0" class="stage-cores" data-stage="${escapeHtml(stage.stage)}"
+               value="${(state.stageInputs[stage.stage] || {}).cores ?? ""}" placeholder="none confirmed"></label>`
+        : "";
       const timedText = materialLine
-        ? `<span class="muted">press priced by shot time; this line charges the material at the rate ` +
-          `set's price per kg${rate.batch_charge ? ` + the mould, ${money(rate.batch_charge, currency)}` : " — no mould charge published"}</span>`
+        ? `<span class="muted">${escapeHtml(SHOT_WORDS[stage.stage].machine)} priced by shot time; this line charges the material at the rate ` +
+          `set's price per kg${rate.batch_charge ? ` + the ${escapeHtml(SHOT_WORDS[stage.stage].tool)}, ${money(rate.batch_charge, currency)}` : ` — no ${escapeHtml(SHOT_WORDS[stage.stage].tool)} charge published`}</span>`
         : `<span class="muted">not used — priced by ${timeWord} time</span>`;
       const rateText = published
         ? parts.join(" + ")
@@ -255,7 +262,7 @@ function renderStageInputs() {
       return `<tr><th>${escapeHtml(stage.label)}</th>
         <td>${timed ? timedText : rateText}${
           rate.note && !timed ? `<div class="hint">${escapeHtml(rate.note)}</div>` : ""}</td>
-        <td>${pricing || input || amortise || cavities ? `<div class="stage-input-fields">${pricing}${cavities}${input}${amortise}</div>` : ""}</td></tr>`;
+        <td>${pricing || input || amortise || cavities ? `<div class="stage-input-fields">${pricing}${cavities}${cores}${input}${amortise}</div>` : ""}</td></tr>`;
     })
     .join("");
   host.innerHTML =
@@ -290,6 +297,14 @@ function renderStageInputs() {
     input.addEventListener("input", () => {
       const raw = input.value.trim();
       setStageInput(input.dataset.stage, "cavities", raw === "" ? null : Number(raw));
+    })
+  );
+  // A confirmed core count; blank is "not confirmed" and times no core. A line
+  // timed for another count is refused by the server.
+  host.querySelectorAll("input.stage-cores").forEach((input) =>
+    input.addEventListener("input", () => {
+      const raw = input.value.trim();
+      setStageInput(input.dataset.stage, "cores", raw === "" ? null : Number(raw));
     })
   );
   host.querySelectorAll("input.stage-amortisation").forEach((input) =>
@@ -342,29 +357,54 @@ $("process-unknown").addEventListener("click", () => decideProcess("edited", "un
 $("process-reset").addEventListener("click", () => decideProcess("pending"));
 
 // The moulding line, from the part's measured governing wall (the thickest region
-// found) and the cavities entered on the moulding stage. The server measures,
-// estimates and returns the line unaccepted; this only puts it in the plan,
-// replacing any earlier one by its fixed id. Nothing is worked out here.
+// found), and the die-casting line, from its measured casting modulus (volume over
+// surface area), each with the cavities and any confirmed cores entered on its
+// stage. The server measures, estimates and returns the line unaccepted; this only
+// puts it in the plan, replacing any earlier one by its fixed id. Nothing is worked
+// out here.
 (function () {
+  const SHOT_LINES = {
+    moulding: {
+      measure: "/cad/governing-wall",
+      line: "/operations/moulding-line",
+      key: "governing_wall",
+      needs: "the moulding line comes from its measured wall",
+      note: (m) => `Governing wall ${m.thickness_mm} mm — ${m.method_description}`,
+    },
+    die_casting: {
+      measure: "/cad/casting-modulus",
+      line: "/operations/die-casting-line",
+      key: "casting_modulus",
+      needs: "the die-casting line comes from its measured volume and surface area",
+      note: (m) => `Casting modulus V/A ${m.modulus_mm} mm — ${m.method_description}`,
+    },
+  };
+
   async function addMouldLine() {
+    return addShotLine("moulding");
+  }
+
+  async function addShotLine(stageId) {
+    const kind = SHOT_LINES[stageId];
     if (!state.file) {
-      showError("Choose the CAD file first: the moulding line comes from its measured wall.");
+      showError(`Choose the CAD file first: ${kind.needs}.`);
       return;
     }
-    const cavities = ((state.stageInputs || {}).moulding || {}).cavities;
-    let wall;
+    const entered = (state.stageInputs || {})[stageId] || {};
+    let measured;
     let lines;
     try {
       const body = new FormData();
       body.append("file", state.file);
-      wall = await api("/cad/governing-wall", { method: "POST", body });
-      lines = await api(`/operations/moulding-line${timeProfileQuery()}`, {
+      measured = await api(kind.measure, { method: "POST", body });
+      lines = await api(`${kind.line}${timeProfileQuery()}`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          governing_wall: wall,
+          [kind.key]: measured,
           material: $("material").value,
-          cavities: cavities === undefined ? null : cavities,
+          cavities: entered.cavities === undefined ? null : entered.cavities,
+          cores: entered.cores === undefined ? null : entered.cores,
         }),
       });
     } catch (error) {
@@ -389,17 +429,15 @@ $("process-reset").addEventListener("click", () => decideProcess("pending"));
       state.plan.time_profile_version = lines.time_profile_version;
       state.plan.time_profile_name = lines.time_profile_name;
     }
-    state.planWarnings = [
-      `Governing wall ${wall.thickness_mm} mm — ${wall.method_description}`,
-      ...(wall.limitations || []),
-      ...(lines.warnings || []),
-    ];
+    state.planWarnings = [kind.note(measured), ...(measured.limitations || []), ...(lines.warnings || [])];
     renumberSetups();
     renderPlan();
   }
 
-  // The route stage row's "+ Add from measured wall" button is drawn by plan.js.
+  // The route stage rows' "+ Add from measured wall" and "+ Add from measured
+  // casting" buttons are drawn by plan.js.
   document.addEventListener("click", (event) => {
     if (event.target.closest("button.add-moulding-line")) addMouldLine();
+    if (event.target.closest("button.add-die-casting-line")) addShotLine("die_casting");
   });
 })();

@@ -119,6 +119,32 @@ defaulted. The cavity count is the engineer's; absent, no time is given. A
 moulding cycle is seconds per part, so it is reported to 0.0001 min rather than
 the 0.01 min (0.6 s) every machining time is rounded to.
 
+**High-pressure die casting** — one shot, from the casting's measured volume and area::
+
+    modulus        = V / A                                   (mm; exact B-Rep volume and area)
+    solidification = B · modulus^n                           (Chvorinov's rule, seconds)
+    shot           = fill + solidification + open_eject + spray
+                   + cores · core_seconds                    (only for confirmed cores)
+    cycle          = shot / cavities / 60                    (minutes per part)
+
+Chvorinov's rule relates the solidification time of a casting to its volume and
+the surface area in contact with the mould: "t = B(V/A)^n", where "B is the mold
+constant" and "the constant n is usually 2" (Askeland), or "between 1.5 and 2"
+(Degarmo), as quoted in https://en.wikipedia.org/wiki/Chvorinov%27s_rule. Unlike
+the slab cooling formula above, B carries the latent heat: "The mold constant B
+depends on the properties of the metal, such as density, heat capacity, heat of
+fusion and superheat, and the mold, such as initial temperature, density,
+thermal conductivity, heat capacity and wall thickness." So B and n are a row
+per alloy in the profile, keyed by the material's name, never defaulted and
+never borrowed from another alloy. V and A are the part's own, measured once on
+the exact B-Rep by the geometry every estimate is costed from; the whole surface
+is taken as die contact, and the biscuit, runners and overflows, which a shot
+also solidifies, are not modelled. Reported to 0.0001 min, like moulding.
+
+**Cores** (moulding and die casting): a side action moved once per shot. Only a
+core count the engineer confirmed is timed, at the profile's seconds per core
+(absent by default); with cores confirmed and no such figure, no time is given.
+
 Setup time is a flat per-process figure, and is per *operation line* rather than
 per physical setup — six drilled holes listed separately carry six setups. That
 is stated in the assumptions rather than being quietly consolidated, because
@@ -224,6 +250,37 @@ class MouldingMaterial(BaseModel):
                 "hotter than the mould and colder than the melt."
             )
         return self
+
+
+class DieCastingAlloy(BaseModel):
+    """One alloy's Chvorinov mould constant and exponent for die casting, keyed by its name.
+
+    A property of the alloy in a given die (B also depends on the die material
+    and temperatures, which is why the profile, not the code, carries it). Keyed
+    by the material name the cost request and rate set already use, so nothing
+    about it is read from the CAD or assumed for an alloy the profile omits.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    material: str = Field(
+        min_length=1,
+        max_length=100,
+        description="The alloy name as the cost request and rate set name it, e.g. 'aluminium'.",
+    )
+    mould_constant: float = Field(
+        gt=0,
+        le=1000.0,
+        allow_inf_nan=False,
+        description="Chvorinov's B, in seconds per mm^n (s/mm² when n = 2).",
+    )
+    exponent: float = Field(
+        gt=0,
+        le=3.0,
+        allow_inf_nan=False,
+        description="Chvorinov's n: usually 2 (Askeland), between 1.5 and 2 (Degarmo).",
+    )
+    note: str = Field(default="", max_length=500, description="Where the figures came from.")
 
 
 class TimeAssumptions(BaseModel):
@@ -455,6 +512,64 @@ class TimeAssumptions(BaseModel):
         le=10000.0,
         description="Hanging the mould, heating it and proving the first shots, once per setup.",
     )
+    # Optional on its own, like a weld's handling: absent, a moulding shot is
+    # timed exactly as before. Only a core count the engineer confirmed uses it.
+    moulding_core_seconds_per_core: float | None = Field(
+        default=None,
+        ge=0,
+        le=600.0,
+        allow_inf_nan=False,
+        description=(
+            "Setting and pulling one core or side action, added to every shot once per core the "
+            "engineer confirmed. With cores confirmed and no figure here, no time is given."
+        ),
+    )
+
+    # --- high-pressure die casting ---
+    #
+    # None by default, like moulding: no die-casting figure is assumed on a
+    # machining shop's behalf. The casting's volume and surface area are
+    # measured from the CAD; the cavity and core counts are the engineer's.
+    die_casting_alloys: tuple[DieCastingAlloy, ...] | None = Field(
+        default=None,
+        description=(
+            "Chvorinov's mould constant B and exponent n per alloy, keyed by material name. An "
+            "alloy the profile does not list gets no die-casting time."
+        ),
+    )
+    die_casting_fill_seconds: float | None = Field(
+        default=None, ge=0, le=600.0, allow_inf_nan=False, description="Injecting one shot."
+    )
+    die_casting_open_eject_seconds: float | None = Field(
+        default=None,
+        ge=0,
+        le=600.0,
+        allow_inf_nan=False,
+        description="Opening the die, extracting the shot and closing again.",
+    )
+    die_casting_spray_seconds: float | None = Field(
+        default=None,
+        ge=0,
+        le=600.0,
+        allow_inf_nan=False,
+        description="Spraying die release agent between shots.",
+    )
+    die_casting_setup_minutes: float | None = Field(
+        default=None,
+        ge=0,
+        le=10000.0,
+        description="Hanging the die, heating it and proving the first shots, once per setup.",
+    )
+    die_casting_core_seconds_per_core: float | None = Field(
+        default=None,
+        ge=0,
+        le=600.0,
+        allow_inf_nan=False,
+        description=(
+            "Setting and pulling one core or slide, added to every shot once per core the "
+            "engineer confirmed. With cores confirmed and no figure here, no time is given."
+        ),
+    )
 
     # --- shared spindle limits ---
     #
@@ -498,6 +613,21 @@ class TimeAssumptions(BaseModel):
         names = [row.material.strip().lower() for row in rows]
         if len(set(names)) != len(names):
             raise ValueError("moulding_materials lists a material more than once.")
+        return self
+
+    @model_validator(mode="after")
+    def _check_die_casting_alloys(self) -> "TimeAssumptions":
+        rows = self.die_casting_alloys
+        if rows is None:
+            return self
+        if not rows:
+            raise ValueError(
+                "die_casting_alloys must have at least one row, or be left out for a profile that "
+                "times no die casting."
+            )
+        names = [row.material.strip().lower() for row in rows]
+        if len(set(names)) != len(names):
+            raise ValueError("die_casting_alloys lists an alloy more than once.")
         return self
 
     @model_validator(mode="after")
@@ -1519,7 +1649,13 @@ def _moulding(dimensions: dict[str, float], material: str | None, a: TimeAssumpt
     cooling = moulding_cooling_seconds(wall, alpha, melt, mould, eject)
     fill, pack = a.moulding_fill_seconds, a.moulding_pack_seconds
     open_eject = a.moulding_open_eject_seconds
+    cores = _confirmed_cores(dimensions, a.moulding_core_seconds_per_core,
+                             "moulding_core_seconds_per_core", a.is_illustrative)
+    if isinstance(cores, OperationTimeEstimate):
+        return cores
     shot = fill + pack + cooling + open_eject
+    if cores is not None:
+        shot += cores[0] * cores[1]
     per_part = shot / cavities
     cycle = per_part / 60.0
     plural = "y" if cavities == 1 else "ies"
@@ -1528,6 +1664,8 @@ def _moulding(dimensions: dict[str, float], material: str | None, a: TimeAssumpt
         "ball that fits inside the material at a sampled wall)",
         f"{cavities} cavit{plural} — entered by the engineer, not read from the CAD",
     ]
+    if cores is not None:
+        evidence.append(_CORE_EVIDENCE.format(count=cores[0]))
     assumptions = [
         f"{row.material}: thermal diffusivity {alpha:g} mm²/s, melt {melt:g} °C, mould {mould:g} "
         f"°C, ejection {eject:g} °C — the profile's row for this material"
@@ -1536,7 +1674,7 @@ def _moulding(dimensions: dict[str, float], material: str | None, a: TimeAssumpt
         f"{mould:g}) / ({eject:g} − {mould:g})) — a slab of the governing wall cooled from both "
         "faces until its centre reaches the ejection temperature",
         f"shot {shot:.6f} s = fill {fill:g} + pack {pack:g} + cooling {cooling:.6f} + open and "
-        f"eject {open_eject:g}",
+        f"eject {open_eject:g}" + _core_term(cores),
         f"per part {per_part:.6f} s = shot / {cavities} cavit{plural}; cycle {cycle:.4f} min",
         "a round boss of the same thickness cools faster than the slab assumed here, so a wall "
         "that is really a boss errs long; a thick region the wall measurement did not find errs "
@@ -1557,7 +1695,165 @@ def _moulding(dimensions: dict[str, float], material: str | None, a: TimeAssumpt
         "moulding_shot_seconds": round(shot, 6),
         "moulding_seconds_per_part": round(per_part, 6),
     }
+    if cores is not None:
+        parameters["cores"] = float(cores[0])
+        parameters["moulding_core_seconds_per_core"] = cores[1]
     return cycle, "injection_moulding_time_v1", evidence, assumptions, parameters
+
+
+_CORE_EVIDENCE = (
+    "{count} core(s) or side action(s) — confirmed by the engineer (the undercut regions the "
+    "pull-direction measurement found are only a proposal)"
+)
+
+
+def _confirmed_cores(dimensions: dict[str, float], per_core: float | None, field: str, illustrative: bool):
+    """(cores, seconds per core) for a shot, None when no core was confirmed, or a refusal.
+
+    `cores` is in the dimensions only when the engineer confirmed a count of at
+    least one. A count that is not a whole number, or one with no per-core time
+    in the profile, gives no time rather than a shot without its cores.
+    """
+    if "cores" not in dimensions:
+        return None
+    cores = _count(dimensions, "cores")
+    if cores is None:
+        return _needs_input(
+            "The confirmed core count must be a whole number of at least 1. Missing: cores.",
+            ["cores"],
+            illustrative,
+        )
+    if per_core is None:
+        return _needs_input(
+            f"{cores} core(s) were confirmed, and this time profile has no time per core "
+            f"({field}), so the shot cannot be timed with them. Nothing is assumed: select a "
+            "profile that publishes one, or enter the time.",
+            [field],
+            illustrative,
+        )
+    return cores, per_core
+
+
+def _core_term(cores) -> str:
+    return "" if cores is None else f" + cores {cores[0]} × {cores[1]:g}"
+
+
+_DIE_CASTING_PARAMETERS = (
+    "die_casting_alloys",
+    "die_casting_fill_seconds",
+    "die_casting_open_eject_seconds",
+    "die_casting_spray_seconds",
+    "die_casting_setup_minutes",
+)
+
+
+def chvorinov_seconds(volume_mm3: float, area_mm2: float, mould_constant: float, exponent: float) -> float:
+    """t = B · (V/A)^n, in seconds, with V in mm³, A in mm² and B in s/mm^n."""
+    return mould_constant * (volume_mm3 / area_mm2) ** exponent
+
+
+def die_casting_alloy_row(a: TimeAssumptions, material: str | None) -> DieCastingAlloy | None:
+    """The profile's Chvorinov row for this alloy name, or None."""
+    key = (material or "").strip().lower()
+    return next(
+        (row for row in (a.die_casting_alloys or ()) if row.material.strip().lower() == key), None
+    )
+
+
+def _die_casting(dimensions: dict[str, float], material: str | None, a: TimeAssumptions):
+    """One shot of a high-pressure die, shared by its cavities."""
+    absent = [name for name in _DIE_CASTING_PARAMETERS if getattr(a, name) is None]
+    if absent:
+        return _needs_input(
+            "This time profile has no die-casting parameters (" + ", ".join(absent) + "), so no "
+            "die-casting time is estimated. Select a profile that publishes them, or enter the "
+            "time.",
+            absent,
+            a.is_illustrative,
+        )
+    volume = _positive(dimensions, "casting_volume_mm3")
+    area = _positive(dimensions, "casting_surface_area_mm2")
+    cavities = _count(dimensions, "cavities")
+    missing = [
+        name
+        for name, value in (
+            ("casting_volume_mm3", volume),
+            ("casting_surface_area_mm2", area),
+            ("cavities", cavities),
+            ("material", (material or "").strip() or None),
+        )
+        if value is None
+    ]
+    if missing:
+        return _needs_input(
+            "A die-casting time needs the casting's volume and surface area measured from the CAD "
+            "model, the number of cavities in the die (the engineer's — none is assumed, not even "
+            f"one) and the part's alloy. Missing: {', '.join(missing)}.",
+            missing,
+            a.is_illustrative,
+        )
+    row = die_casting_alloy_row(a, material)
+    if row is None:
+        listed = ", ".join(r.material for r in a.die_casting_alloys)
+        return _needs_input(
+            f"This time profile has no Chvorinov constant for '{material}' (it lists {listed}), so "
+            "its solidification time cannot be worked out. Nothing is borrowed from another "
+            "alloy: publish a profile version with a row for it, or enter the time.",
+            ["die_casting_alloys"],
+            a.is_illustrative,
+        )
+    cores = _confirmed_cores(dimensions, a.die_casting_core_seconds_per_core,
+                             "die_casting_core_seconds_per_core", a.is_illustrative)
+    if isinstance(cores, OperationTimeEstimate):
+        return cores
+    b, n = row.mould_constant, row.exponent
+    modulus = volume / area
+    solidification = chvorinov_seconds(volume, area, b, n)
+    fill, open_eject = a.die_casting_fill_seconds, a.die_casting_open_eject_seconds
+    spray = a.die_casting_spray_seconds
+    shot = fill + solidification + open_eject + spray
+    if cores is not None:
+        shot += cores[0] * cores[1]
+    per_part = shot / cavities
+    cycle = per_part / 60.0
+    plural = "y" if cavities == 1 else "ies"
+    evidence = [
+        f"casting volume {volume:g} mm³ and surface area {area:g} mm² — measured on the CAD "
+        f"model's exact B-Rep; modulus V/A = {modulus:.6f} mm",
+        f"{cavities} cavit{plural} — entered by the engineer, not read from the CAD",
+    ]
+    if cores is not None:
+        evidence.append(_CORE_EVIDENCE.format(count=cores[0]))
+    assumptions = [
+        f"{row.material}: Chvorinov mould constant B {b:g} s/mm^{n:g}, exponent n {n:g} — the "
+        "profile's row for this alloy" + (f" ({row.note})" if row.note else ""),
+        f"solidification {solidification:.6f} s = {b:g} × ({volume:g} / {area:g})^{n:g} — "
+        "Chvorinov's rule, t = B·(V/A)^n",
+        f"shot {shot:.6f} s = fill {fill:g} + solidification {solidification:.6f} + open and "
+        f"eject {open_eject:g} + die spray {spray:g}" + _core_term(cores),
+        f"per part {per_part:.6f} s = shot / {cavities} cavit{plural}; cycle {cycle:.4f} min",
+        "the whole part surface is taken as in contact with the die, and the biscuit, runners "
+        "and overflows, which solidify in the same shot and can take longer, are not modelled",
+    ]
+    parameters = {
+        "die_casting_fill_seconds": fill,
+        "die_casting_open_eject_seconds": open_eject,
+        "die_casting_spray_seconds": spray,
+        "die_casting_setup_minutes": a.die_casting_setup_minutes,
+        "die_casting_mould_constant": b,
+        "die_casting_exponent": n,
+        "casting_volume_mm3": volume,
+        "casting_surface_area_mm2": area,
+        "casting_modulus_mm": round(modulus, 6),
+        "cavities": float(cavities),
+        "die_casting_solidification_seconds": round(solidification, 6),
+        "die_casting_shot_seconds": round(shot, 6),
+        "die_casting_seconds_per_part": round(per_part, 6),
+    }
+    if cores is not None:
+        parameters["cores"] = float(cores[0])
+        parameters["die_casting_core_seconds_per_core"] = cores[1]
+    return cycle, "die_casting_time_v1", evidence, assumptions, parameters
 
 
 _SETUP_MINUTES = {
@@ -1568,7 +1864,11 @@ _SETUP_MINUTES = {
     "sheet_cutting": lambda a: a.sheet_cutting_setup_minutes,
     "bending": lambda a: a.bending_setup_minutes,
     "injection_moulding": lambda a: a.moulding_setup_minutes,
+    "die_casting": lambda a: a.die_casting_setup_minutes,
 }
+
+# Processes whose cycle is seconds per part, reported to MOULDING_TIME_DECIMALS.
+_FINE_TIME_PROCESSES = frozenset({"injection_moulding", "die_casting"})
 
 # The one-line reason an estimate gives, by process. Machining's is generic.
 _TIME_REASONS = {
@@ -1584,6 +1884,11 @@ _TIME_REASONS = {
     "injection_moulding": (
         "Injection-moulding time derived from the measured governing wall, the material's thermal "
         "data and the profile's shot times, shared by the engineer's cavity count."
+    ),
+    "die_casting": (
+        "Die-casting time derived from the casting's measured volume and surface area by "
+        "Chvorinov's rule with the alloy's constant, and the profile's shot times, shared by the "
+        "engineer's cavity count."
     ),
 }
 
@@ -1609,7 +1914,8 @@ def estimate_operation_time(
     """Estimate setup and cycle time for one operation. Deterministic.
 
     For injection moulding, `material` is the part's material name, which picks
-    the profile's thermal row; every other process ignores it.
+    the profile's thermal row; for die casting it picks the alloy's Chvorinov
+    row. Every other process ignores it.
 
     For welding, `weld` is the engineer's description of the weld; nothing
     about a weld is read from the geometry.
@@ -1683,6 +1989,8 @@ def estimate_operation_time(
         outcome = _bending(dimensions, a)
     elif process == "injection_moulding":
         outcome = _moulding(dimensions, material, a)
+    elif process == "die_casting":
+        outcome = _die_casting(dimensions, material, a)
     elif process == "turning" and (feature_type or "").lower() == "plane":
         outcome = _facing(dimensions, a)
     elif process == "turning":
@@ -1702,7 +2010,7 @@ def estimate_operation_time(
         else _weakest(suggestion_confidence, METHOD_CONFIDENCE_CEILING)
     )
 
-    if process == "injection_moulding":
+    if process in _FINE_TIME_PROCESSES:
         cycle = round(cycle, MOULDING_TIME_DECIMALS)
         setup = _round(setup)
         total = round(setup + cycle, MOULDING_TIME_DECIMALS)
@@ -1769,6 +2077,9 @@ __all__ = [
     "drilling_steps",
     "METHOD_CONFIDENCE_CEILING",
     "MOULDING_TIME_DECIMALS",
+    "DieCastingAlloy",
+    "chvorinov_seconds",
+    "die_casting_alloy_row",
     "MouldingMaterial",
     "moulding_cooling_seconds",
     "moulding_material_row",
@@ -1815,7 +2126,10 @@ class OperationTimeInput(BaseModel):
     )
     material: str | None = Field(
         default=None,
-        description="Injection moulding only: the part's material, which picks the thermal row.",
+        description=(
+            "Injection moulding and die casting only: the part's material, which picks the "
+            "thermal or Chvorinov row."
+        ),
     )
 
 

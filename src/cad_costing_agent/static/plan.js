@@ -464,10 +464,11 @@ function asFormedLabel() {
 // and weld finishing are timed by the same welds (their tack and finishing
 // time), never on their own. Sheet cutting and bending are timed by the cut and
 // bend lines the sheet-metal measurement proposes (sheet.js); moulding by the one
-// moulding line the measured governing wall proposes (process.js).
+// moulding line the measured governing wall proposes, die casting by the one
+// die-casting line the measured casting modulus proposes (process.js).
 const TIMED_STAGE_PROCESSES = {
   welding: "welding", fit_up: "welding", weld_finishing: "welding", sheet_cutting: "sheet_cutting", bending: "bending",
-  moulding: "injection_moulding",
+  moulding: "injection_moulding", die_casting: "die_casting",
 };
 // What a timed stage's own operations are called and how they get into the plan.
 // Display words only: welds are typed by the engineer, cut and bend lines come
@@ -489,6 +490,19 @@ const TIMED_STAGE_WORK = {
     add: `<button type="button" class="secondary tiny add-moulding-line">+ Add from measured wall</button>`,
     how: "enter the cavities, then + Add from measured wall",
   },
+  die_casting: {
+    many: "die-casting line(s)",
+    add: `<button type="button" class="secondary tiny add-die-casting-line">+ Add from measured casting</button>`,
+    how: "enter the cavities, then + Add from measured casting",
+  },
+};
+// The words a timed stage that keeps its material-and-tool line uses: the machine
+// its shot time charges, the tool its one-off charge buys and what the rest of a
+// shot is. Display words only; the keys mirror `stage_costing._SHOT_WORDS` (a test
+// holds them equal).
+const SHOT_WORDS = {
+  moulding: { machine: "press", tool: "mould", rest: "runner and sprue" },
+  die_casting: { machine: "die-casting machine", tool: "die", rest: "biscuit, runners and overflows" },
 };
 // The timed stages whose time is a part of each weld's time rather than welds of
 // their own, and what that part is called. Display words only; the keys mirror

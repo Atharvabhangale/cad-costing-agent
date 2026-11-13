@@ -9,6 +9,11 @@ drafted wall is not evidence that a part is cast, moulded or forged — a
 machined part can carry a taper — so nothing here proposes a process. It
 imports `limits`, `features.model` and `features.rays` from this package.
 
+`propose_cores` groups the undercut faces into regions that share edges, each
+a proposed core or side action. The count is a proposal: it is shown to the
+engineer and reaches a time only as a count the engineer enters on the forming
+stage, never from here.
+
 A pull axis and its two halves
 ------------------------------
 A candidate axis `d` stands for a mould or die that opens along it: one half
@@ -722,4 +727,157 @@ __all__ = [
     "normalise_axis",
     "not_measured",
     "refusal_reason",
+]
+
+
+# ---------------------------------------------------------------------------
+# Proposed cores: the undercut faces, grouped into connected regions.
+# ---------------------------------------------------------------------------
+
+CORE_METHOD = "undercut_faces_connected_by_shared_edges"
+
+CORE_METHOD_DESCRIPTION = (
+    "The faces found undercut against the pull axis used are grouped into regions: two undercut "
+    "faces are in one region when they share an edge, directly or through other undercut faces. "
+    "Each region is proposed as one core or side action."
+)
+
+CORE_LIMITATIONS: tuple[str, ...] = (
+    "A proposal, not a tool design: the engineer confirms or changes the count. Nothing is "
+    "charged for a core until a count is confirmed on the forming stage.",
+    "One region is one core only when a single straight side pull frees it. A region may need "
+    "two slides, or two regions one, and an undercut can also be met by a loose piece, a "
+    "collapsible core or later machining.",
+    "Only undercuts the pull-direction measurement found are grouped. An undercut it missed "
+    "between sample points is not proposed, so the count can be too low, never invented.",
+)
+
+
+class CoreRegion(BaseModel):
+    """One connected group of undercut faces: one proposed core or side action."""
+
+    region: int = Field(description="1-based, in order of the region's smallest face id.")
+    face_ids: list[int] = Field(description="The undercut faces in the region, ascending.")
+    area_mm2: float
+    marker: Point3D | None = Field(
+        default=None, description="The first undercut point of the region's first face; a pointer."
+    )
+
+
+class CoreProposal(BaseModel):
+    """Undercut regions against one pull axis, each a proposed core. Proposed, never applied."""
+
+    filename: str = ""
+    measured: bool
+    not_measured_reason: str | None = None
+    method: str = CORE_METHOD
+    method_description: str = CORE_METHOD_DESCRIPTION
+    limitations: list[str] = Field(default_factory=lambda: list(CORE_LIMITATIONS))
+    pull_axis: Point3D | None = None
+    pull_axis_label: str | None = None
+    axis_source: str | None = Field(default=None, description="'engineer_entered' or 'recommended'.")
+    regions: list[CoreRegion] = Field(default_factory=list)
+    proposed_core_count: int | None = Field(
+        default=None,
+        description=(
+            "The number of regions. A proposal: it reaches a time only once the engineer enters "
+            "a confirmed count on the forming stage, and that count may differ."
+        ),
+    )
+    undercut_face_count: int = 0
+    budget_limited: bool = False
+    budget_note: str | None = None
+
+
+def core_regions_not_measured(reason: str, *, filename: str = "") -> CoreProposal:
+    return CoreProposal(filename=filename, measured=False, not_measured_reason=reason)
+
+
+def _connected(face_ids: list[int], neighbours: dict[int, set[int]]) -> list[list[int]]:
+    """Connected components of the undercut faces, each sorted, ordered by smallest id."""
+    remaining = set(face_ids)
+    regions: list[list[int]] = []
+    for start in sorted(face_ids):
+        if start not in remaining:
+            continue
+        remaining.discard(start)
+        stack, region = [start], [start]
+        while stack:
+            face = stack.pop()
+            for other in sorted(neighbours.get(face, ())):
+                if other in remaining:
+                    remaining.discard(other)
+                    region.append(other)
+                    stack.append(other)
+        regions.append(sorted(region))
+    return regions
+
+
+def _undercut_neighbours(shape, face_ids: list[int]) -> dict[int, set[int]]:
+    """Which of these faces share an edge, numbered as recognition numbers faces."""
+    from OCP.TopAbs import TopAbs_ShapeEnum
+    from OCP.TopExp import TopExp
+    from OCP.TopTools import TopTools_IndexedDataMapOfShapeListOfShape, TopTools_IndexedMapOfShape
+
+    faces = TopTools_IndexedMapOfShape()
+    TopExp.MapShapes_s(shape, TopAbs_ShapeEnum.TopAbs_FACE, faces)
+    edge_faces = TopTools_IndexedDataMapOfShapeListOfShape()
+    TopExp.MapShapesAndAncestors_s(
+        shape, TopAbs_ShapeEnum.TopAbs_EDGE, TopAbs_ShapeEnum.TopAbs_FACE, edge_faces
+    )
+    wanted = set(face_ids)
+    neighbours: dict[int, set[int]] = {face: set() for face in face_ids}
+    for index in range(1, edge_faces.Extent() + 1):
+        touching = {faces.FindIndex(face) for face in edge_faces.FindFromIndex(index)}
+        touching &= wanted
+        for face in touching:
+            neighbours[face] |= touching - {face}
+    return neighbours
+
+
+def propose_cores(shape, result: DrawDirectionResult) -> CoreProposal:
+    """Group a pull-direction measurement's undercut faces into proposed cores.
+
+    `shape` is the shape `result` was measured on; only its face adjacency is
+    read. Nothing is measured again and no ray is cast.
+    """
+    if not result.measured:
+        return core_regions_not_measured(
+            result.not_measured_reason or "The pull direction was not measured.",
+            filename=result.filename,
+        ).model_copy(update={"budget_limited": result.budget_limited, "budget_note": result.budget_note})
+    by_id = {face.face_id: face for face in result.faces}
+    undercut = list(result.undercut_face_ids)
+    regions = []
+    for number, face_ids in enumerate(
+        _connected(undercut, _undercut_neighbours(shape, undercut)), start=1
+    ):
+        regions.append(
+            CoreRegion(
+                region=number,
+                face_ids=face_ids,
+                area_mm2=round(sum(by_id[face].area_mm2 for face in face_ids), OUTPUT_DECIMALS),
+                marker=by_id[face_ids[0]].marker,
+            )
+        )
+    return CoreProposal(
+        filename=result.filename,
+        measured=True,
+        pull_axis=result.pull_axis,
+        pull_axis_label=result.pull_axis_label,
+        axis_source=result.axis_source,
+        regions=regions,
+        proposed_core_count=len(regions),
+        undercut_face_count=len(undercut),
+        budget_limited=result.budget_limited,
+        budget_note=result.budget_note,
+    )
+
+
+__all__ += [
+    "CORE_LIMITATIONS",
+    "CoreProposal",
+    "CoreRegion",
+    "core_regions_not_measured",
+    "propose_cores",
 ]
