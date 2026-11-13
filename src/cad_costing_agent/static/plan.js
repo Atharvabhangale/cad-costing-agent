@@ -463,7 +463,7 @@ function stagePricing(stageId) {
   return ((state.stageInputs || {})[stageId] || {}).pricing === "timed" ? "timed" : "stage_rate";
 }
 
-// One stage's inputs are a mass, a yield and a pricing choice; changing one
+// One stage's inputs are a mass, a yield, a tool life and a pricing choice; changing one
 // keeps the others. A stage with neither is removed, so "not entered" is never sent as 0.
 function setStageInput(stageId, field, value) {
   state.stageInputs = state.stageInputs || {};
@@ -731,6 +731,11 @@ function stageRateText(stage) {
   if (rate.batch_charge) parts.push(`${money(rate.batch_charge, currency)} per batch`);
   const entered = ((state.stageInputs || {})[stage.stage] || {}).mass_kg;
   const enteredYield = ((state.stageInputs || {})[stage.stage] || {}).yield_percent;
+  const enteredToolLife = ((state.stageInputs || {})[stage.stage] || {}).amortisation_quantity;
+  const toolLife =
+    rate.batch_charge && enteredToolLife !== undefined
+      ? ` · one-off charge amortised over ${number(enteredToolLife, 0)} pieces (entered) — the estimate states the share charged`
+      : "";
   const mass =
     rate.unit_basis === "per_kg"
       ? (entered !== undefined
@@ -740,7 +745,7 @@ function stageRateText(stage) {
           ? ` · at a yield of ${number(enteredYield, 2)}% (entered) — the estimate states the mass charged`
           : "")
       : "";
-  return `<span class="muted">${parts.join(" + ")}${mass}</span>`;
+  return `<span class="muted">${parts.join(" + ")}${mass}${toolLife}</span>`;
 }
 
 // The decided route's non-machining stages, as rows of the table in route

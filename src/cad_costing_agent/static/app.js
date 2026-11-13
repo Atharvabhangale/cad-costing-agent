@@ -835,18 +835,25 @@ function renderResult(response) {
   $("r-stages-row").classList.toggle("hidden", !stages.length);
   $("r-stage-detail-row").classList.toggle("hidden", !stages.length && !cost.material_note);
   $("r-stages").textContent = stages.length ? money(cost.total_stage_cost, currency) : "";
+  // A one-off charge is either the whole of it, per batch, or — when the
+  // engineer stated a tool life — the share the server charged, named as one.
+  const batchText = (line) =>
+    line.batch_charge_note
+      ? `${money(line.batch_charge, currency)} share of the tool`
+      : `${money(line.batch_charge, currency)} per batch`;
   $("r-stage-detail").innerHTML = [
     ...stages.map(
         (line) =>
           `${escapeHtml(line.label)}: ${money(line.total_cost, currency)}` +
           (line.unit_basis === "per_kg"
             ? ` (${money(line.unit_rate, currency)}/kg × ${number(line.mass_kg, 3)} kg × ${line.quantity}` +
-              `${line.batch_charge ? ` + ${money(line.batch_charge, currency)} per batch` : ""})` +
+              `${line.batch_charge ? ` + ${batchText(line)}` : ""})` +
               (line.mass_note ? ` — ${escapeHtml(line.mass_note)}` : "")
             : line.unit_basis === "per_piece"
               ? ` (${money(line.unit_rate, currency)} × ${line.quantity}` +
-                `${line.batch_charge ? ` + ${money(line.batch_charge, currency)} per batch` : ""})`
-              : ` (${money(line.batch_charge, currency)} per batch)`)
+                `${line.batch_charge ? ` + ${batchText(line)}` : ""})`
+              : ` (${batchText(line)})`) +
+          (line.batch_charge_note ? ` — ${escapeHtml(line.batch_charge_note)}` : "")
     ),
     ...(cost.material_note ? [escapeHtml(cost.material_note)] : []),
   ].join("<br>");

@@ -192,6 +192,16 @@ code { background: #eef1f4; padding: 1px 5px; border-radius: 4px; font-size: 12.
 table.mini { width: 100%; border-collapse: collapse; margin-top: 8px; }
 table.mini th { text-align: left; font-weight: 500; color: var(--muted); padding: 3px 0; width: 40%; font-size: 13px; }
 table.mini td { padding: 3px 0; font-size: 13px; }
+/* The route card's stage rates: one band per stage, its inputs side by side
+   and wrapping, each a fixed width, so a number field is not 370 px wide and a
+   long label cannot push its input out of line with its neighbours'. */
+table.mini.stage-rates th, table.mini.stage-rates td { vertical-align: top; padding: 8px 12px 8px 0; border-top: 1px solid var(--line); }
+table.mini.stage-rates tr:first-child th, table.mini.stage-rates tr:first-child td { border-top: 0; }
+table.mini.stage-rates th { width: 22%; }
+table.mini.stage-rates td:last-child { padding-right: 0; }
+.stage-input-fields { display: flex; flex-wrap: wrap; gap: 8px 12px; }
+.stage-input-fields label { width: 12rem; justify-content: space-between; font-size: 12px; }
+.stage-input-fields input, .stage-input-fields select { width: 100%; box-sizing: border-box; }
 
 .badges { display: flex; gap: 6px; flex-wrap: wrap; margin-top: 10px; }
 .badge { font-size: 12px; padding: 2px 9px; border-radius: 999px; border: 1px solid var(--line); background: #f3f5f7; }

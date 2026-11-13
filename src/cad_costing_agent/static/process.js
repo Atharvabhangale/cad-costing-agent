@@ -196,6 +196,7 @@ function renderStageInputs() {
       const entered = (state.stageInputs[stage.stage] || {}).mass_kg;
       const timed = stagePricing(stage.stage) === "timed";
       const enteredYield = (state.stageInputs[stage.stage] || {}).yield_percent;
+      const enteredToolLife = (state.stageInputs[stage.stage] || {}).amortisation_quantity;
       // Which stages may carry a yield is the server's list, read with the
       // routes; the page keeps none of its own.
       const yieldStages = (processRoutes && processRoutes.yield_stages) || [];
@@ -210,6 +211,14 @@ function renderStageInputs() {
                      value="${enteredYield ?? ""}" placeholder="none unless entered"></label>`
               : "")
           : "";
+      // Only a stage whose published rate has a one-off charge can have it
+      // amortised; the rate set says which. The share is the server's to work out.
+      const amortise =
+        rate.batch_charge && !timed
+          ? `<label>Tool life, pieces the pattern/die will make
+               <input type="number" step="1" min="1" class="stage-amortisation" data-stage="${escapeHtml(stage.stage)}"
+                 value="${enteredToolLife ?? ""}" placeholder="whole charge to this batch"></label>`
+          : "";
       // A stage with a time model can be priced by time instead: its welds are
       // then operations in the plan, costed at the rate set's hourly rate.
       const pricing = TIMED_STAGE_PROCESSES[stage.stage]
@@ -221,7 +230,7 @@ function renderStageInputs() {
       return `<tr><th>${escapeHtml(stage.label)}</th>
         <td>${timed ? `<span class="muted">not used — priced by weld time</span>` : parts.join(" + ")}${
           rate.note && !timed ? `<div class="hint">${escapeHtml(rate.note)}</div>` : ""}</td>
-        <td>${pricing}${input}</td></tr>`;
+        <td>${pricing || input || amortise ? `<div class="stage-input-fields">${pricing}${input}${amortise}</div>` : ""}</td></tr>`;
     })
     .join("");
   host.innerHTML =
@@ -230,7 +239,10 @@ function renderStageInputs() {
     `model, and the estimate says so. A casting or forging machined afterwards is heavier than ` +
     `that by the material removed — enter the blank's weight to correct it. A yield is yours to ` +
     `enter and none is assumed: with one, the estimate charges that mass divided by the yield, ` +
-    `to cover gating, risers, flash and melt loss, and states the mass it charged.</p>`;
+    `to cover gating, risers, flash and melt loss, and states the mass it charged. A one-off ` +
+    `charge (pattern, die) falls whole on this batch unless you enter how many pieces the tool ` +
+    `will make; the estimate then charges this batch's share and says the rest is carried by ` +
+    `pieces outside it. No tool life is assumed.</p>`;
   host.querySelectorAll("input.stage-mass").forEach((input) =>
     input.addEventListener("input", () => {
       const raw = input.value.trim();
@@ -243,6 +255,13 @@ function renderStageInputs() {
     input.addEventListener("input", () => {
       const raw = input.value.trim();
       setStageInput(input.dataset.stage, "yield_percent", raw === "" ? null : Number(raw));
+      if (typeof renderPlanRoute === "function") renderPlanRoute();
+    })
+  );
+  host.querySelectorAll("input.stage-amortisation").forEach((input) =>
+    input.addEventListener("input", () => {
+      const raw = input.value.trim();
+      setStageInput(input.dataset.stage, "amortisation_quantity", raw === "" ? null : Number(raw));
       if (typeof renderPlanRoute === "function") renderPlanRoute();
     })
   );

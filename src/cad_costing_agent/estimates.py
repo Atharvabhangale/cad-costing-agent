@@ -691,10 +691,21 @@ def decompose(
             else "; yield "
             + " → ".join("none" if value is None else f"{value:g}%" for value in yields)
         )
+        # So is the quantity a tool's one-off charge is amortised over; absent,
+        # the whole charge fell on that batch.
+        tool_lives = [stage.get("amortisation_quantity") for stage in (before_stage, after_stage)]
+        amortisation_change = (
+            ""
+            if tool_lives[0] == tool_lives[1]
+            else "; tool charge amortised over "
+            + " → ".join(
+                "this batch only" if value is None else f"{value} pieces" for value in tool_lives
+            )
+        )
         impacts.extend(
             _flat(
                 "route_stage",
-                f"{label} (route stage{yield_change})"
+                f"{label} (route stage{yield_change}{amortisation_change})"
                 if before_stage and after_stage
                 else f"{label} is no longer a route stage"
                 if before_stage

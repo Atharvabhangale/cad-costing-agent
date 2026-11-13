@@ -3096,6 +3096,31 @@ def _refuse_weld_finishing_charged_twice(
         )
 
 
+def _entered_amortisation_quantity(stage_id: str, entry) -> int | None:
+    """The tool life a person entered for one stage in `stage_inputs`, or None when absent.
+
+    Absent (or null) means the stage's one-off charge falls whole on this batch,
+    as it always has; nothing stands in for it. Anything else must be a whole
+    number of pieces, at least 1, or the request is refused.
+    """
+    if not isinstance(entry, dict) or entry.get("amortisation_quantity") is None:
+        return None
+    value = entry["amortisation_quantity"]
+    if (
+        isinstance(value, bool)
+        or not isinstance(value, (int, float))
+        or not math.isfinite(value)
+        or value != int(value)
+        or value < 1
+    ):
+        raise ValueError(
+            f"'amortisation_quantity' for stage '{stage_id}' must be a whole number of pieces, at "
+            f"least 1 — how many pieces the pattern or die is expected to make; got {value!r}. "
+            "Leave it out to charge the whole one-off charge to this batch."
+        )
+    return int(value)
+
+
 @dataclass
 class PricedCadPart:
     """Everything `/cost/cad-part` works out before it stores an estimate.
@@ -3211,6 +3236,11 @@ def price_cad_part(
         # stage sent, priced by this route or not, because it is stored as sent.
         stage_yields = {
             stage_id: _entered_yield_percent(stage_id, entry)
+            for stage_id, entry in stage_input_values.items()
+        }
+        # So is a tool life, for the same reason.
+        stage_amortisation = {
+            stage_id: _entered_amortisation_quantity(stage_id, entry)
             for stage_id, entry in stage_input_values.items()
         }
         timed: dict[str, str] = {}
@@ -3336,6 +3366,15 @@ def price_cad_part(
                     f"{STAGES[stage_id][0]}, but that stage is priced by time, so there is no "
                     "per-kg mass for a yield to apply to. Remove the yield."
                 )
+            # Its stage rate is not charged at all, so neither is its one-off
+            # charge: there is no tool charge here to spread over a quantity.
+            if stage_amortisation.get(stage_id) is not None:
+                raise ValueError(
+                    f"An amortisation quantity of {stage_amortisation[stage_id]} pieces was "
+                    f"entered for {STAGES[stage_id][0]}, but that stage is priced by time, so its "
+                    "stage rate's one-off charge is not charged and there is nothing to amortise. "
+                    "Remove the amortisation quantity."
+                )
         stage_lines = []
         material_supplied_by: str | None = None
         if classification is not None and classification.costing_status == "stage_rates_required":
@@ -3346,6 +3385,7 @@ def price_cad_part(
                     label=STAGES[stage.stage][0] if stage.stage in STAGES else stage.label,
                     mass_kg=(stage_input_values.get(stage.stage) or {}).get("mass_kg"),
                     yield_percent=stage_yields.get(stage.stage),
+                    amortisation_quantity=stage_amortisation.get(stage.stage),
                 )
                 for stage in classification.route.stages
                 if (stage.stage not in STAGES or STAGES[stage.stage][1] is None)
@@ -3507,7 +3547,11 @@ async def cost_cad_part(
             "mass, labelled as such. The per-kg stage that supplies the material may also carry "
             "\"yield_percent\" (above 0, at most 100): the blank's mass as a percentage of the "
             "metal poured or billet bought, so the rate is charged on mass / (yield / 100). "
-            "There is no default yield; absent, nothing is added."
+            "There is no default yield; absent, nothing is added. A stage whose rate has a "
+            "one-off batch charge (pattern, die) may carry \"amortisation_quantity\" (a whole "
+            "number of pieces, at least this estimate's quantity): how many pieces the tool is "
+            "expected to make, so only batch_charge x quantity / amortisation_quantity is "
+            "charged. There is no default tool life; absent, the whole charge falls on this batch."
         ),
     ),
     session: Session = Depends(get_session),
