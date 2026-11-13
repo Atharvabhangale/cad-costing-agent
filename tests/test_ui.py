@@ -540,6 +540,17 @@ def test_the_browsers_timeable_stages_mirror_the_backends():
     assert mirrored == TIMEABLE_STAGES
 
 
+def test_the_browsers_stages_timed_inside_the_welds_mirror_the_backends():
+    """plan.js words fit-up and weld finishing as part of each weld's time, with no
+    + Add weld of their own. Its keys must be exactly the stages the server times
+    only together with welding."""
+    from cad_costing_agent.stage_costing import TIMED_ONLY_WITH
+
+    source = (STATIC_PATH / "plan.js").read_text(encoding="utf-8")
+    declared = re.search(r"const TIMED_IN_WELDS = (\{[^}]*\});", source).group(1)
+    assert set(re.findall(r"(\w+): \"", declared)) == set(TIMED_ONLY_WITH) == {"fit_up", "weld_finishing"}
+
+
 def test_a_weld_lines_time_resolves_like_the_backends():
     """estimatedFor mirrors PlannedOperation.estimated_for: the suggested process,
     else the one a weld's time was estimated for — and nothing else."""

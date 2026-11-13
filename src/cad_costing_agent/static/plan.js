@@ -455,9 +455,14 @@ function asFormedLabel() {
 // single part's route.
 // Stages an engineer may price by time instead of by stage rate, and the hourly
 // process their operations are costed as. Mirrors `stage_costing.TIMEABLE_STAGES`
-// (a test holds the two equal); the server refuses any other stage anyway. Weld
-// finishing is timed by the same welds (their finishing time), never on its own.
-const TIMED_STAGE_PROCESSES = { welding: "welding", weld_finishing: "welding" };
+// (a test holds the two equal); the server refuses any other stage anyway. Fit-up
+// and weld finishing are timed by the same welds (their tack and finishing
+// time), never on their own.
+const TIMED_STAGE_PROCESSES = { welding: "welding", fit_up: "welding", weld_finishing: "welding" };
+// The timed stages whose time is a part of each weld's time rather than welds of
+// their own, and what that part is called. Display words only; the keys mirror
+// `stage_costing.TIMED_ONLY_WITH` (a test holds them equal).
+const TIMED_IN_WELDS = { fit_up: "each weld's tack time", weld_finishing: "each weld's finishing time" };
 
 function stagePricing(stageId) {
   return ((state.stageInputs || {})[stageId] || {}).pricing === "timed" ? "timed" : "stage_rate";
@@ -760,13 +765,20 @@ function routeStageRows() {
   }
   const stages = classification.route.stages;
   const timed = (stage) => !stage.process_type && stagePricing(stage.stage) === "timed" && TIMED_STAGE_PROCESSES[stage.stage];
+  // A timed stage whose time is part of each weld's (fit-up, weld finishing)
+  // heads no operations of its own; welding does.
+  const heads = (stage) => timed(stage) && !TIMED_IN_WELDS[stage.stage];
   // Operations are listed where the route's first operation-costed stage is: a
   // machining stage, or a stage the engineer chose to price by time.
-  const firstOperations = stages.findIndex((stage) => stage.process_type || timed(stage));
+  const firstOperations = stages.findIndex((stage) => stage.process_type || heads(stage));
+  // A timed stage heads its own operations, so it goes above them.
+  let cut = firstOperations === -1 ? stages.length : firstOperations;
+  if (cut < stages.length && heads(stages[cut])) cut += 1;
   const row = (stage) => {
     const position = stages.indexOf(stage) + 1;
-    const band = timed(stage) && stage.stage === "weld_finishing"
-      ? `<span class="pill pill-ok">priced by time — each weld's finishing time, in the welds above</span>`
+    const band = timed(stage) && TIMED_IN_WELDS[stage.stage]
+      ? `<span class="pill pill-ok">priced by time — ${escapeHtml(TIMED_IN_WELDS[stage.stage])}, ` +
+        `in the welds ${position - 1 < cut ? "below" : "above"}</span>`
       : timed(stage)
       ? `<span class="pill pill-ok">priced by time — its welds are operations below</span>` +
         `<button type="button" class="secondary tiny add-weld">+ Add weld</button>`
@@ -777,9 +789,6 @@ function routeStageRows() {
       `<strong>${escapeHtml(stage.label)}</strong>${band}</div></td></tr>`
     );
   };
-  // A timed stage heads its own operations, so it goes above them.
-  let cut = firstOperations === -1 ? stages.length : firstOperations;
-  if (cut < stages.length && timed(stages[cut])) cut += 1;
   const shown = (stage) => !stage.process_type;
   return {
     before: stages.slice(0, cut).filter(shown).map(row),
@@ -807,9 +816,17 @@ function renderPlanRoute() {
     if (!stage.process_type && TIMED_STAGE_PROCESSES[stage.stage] && stagePricing(stage.stage) === "timed") {
       const process = TIMED_STAGE_PROCESSES[stage.stage];
       const count = counted.filter((operation) => effectiveType(operation) === process).length;
+      const welds = `${count} weld${count === 1 ? "" : "s"}`;
+      if (TIMED_IN_WELDS[stage.stage]) {
+        return (
+          `<li>${escapeHtml(stage.label)} <span class="pill pill-ok">priced by time — ` +
+          `${escapeHtml(TIMED_IN_WELDS[stage.stage])}, hourly rate</span> ` +
+          `<span class="muted">${count ? `in the ${welds} below` : "no welds yet — add them on the welding step"}</span></li>`
+        );
+      }
       return (
         `<li>${escapeHtml(stage.label)} <span class="pill pill-ok">priced by time — hourly rate</span> ` +
-        `<span class="muted">${count ? `${count} weld${count === 1 ? "" : "s"} below` : "no welds yet — use + Add weld"}</span></li>`
+        `<span class="muted">${count ? `${welds} below` : "no welds yet — use + Add weld"}</span></li>`
       );
     }
     if (!stage.process_type) {

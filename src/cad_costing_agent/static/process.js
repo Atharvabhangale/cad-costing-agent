@@ -224,7 +224,10 @@ function renderStageInputs() {
       const pricing = TIMED_STAGE_PROCESSES[stage.stage]
         ? `<label>Priced by <select class="stage-pricing" data-stage="${escapeHtml(stage.stage)}">
              <option value="stage_rate"${timed ? "" : " selected"}>this stage rate</option>
-             <option value="timed"${timed ? " selected" : ""}>weld time × hourly rate</option>
+             <option value="timed"${timed ? " selected" : ""}>${
+               TIMED_IN_WELDS[stage.stage]
+                 ? `${escapeHtml(TIMED_IN_WELDS[stage.stage])} × hourly rate (with welding)`
+                 : "weld time × hourly rate"}</option>
            </select></label>`
         : "";
       return `<tr><th>${escapeHtml(stage.label)}</th>

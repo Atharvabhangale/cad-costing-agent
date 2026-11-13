@@ -3017,39 +3017,56 @@ def _entered_yield_percent(stage_id: str, entry) -> float | None:
     return float(value)
 
 
-# The component of a weld's system time that is the work the route's
-# weld-finishing stage prices (`operation_time`'s finishing rate).
-_WELD_FINISHING_COMPONENT = "weld_finishing_minutes"
+# Route stages whose work a weld's system time can carry as a named component,
+# in route order: stage -> (the component's key in `system_time_parameters`,
+# the error when it is charged twice, and the words the refusals use: the time
+# a weld carries, the work, the stage as a choice, the profile figure).
+_WELD_COMPONENT_STAGES = {
+    "fit_up": (
+        "welding_tack_minutes_per_weld",
+        "fit_up_charged_twice",
+        ("a tack time", "tacking", "fit-up", "tack time"),
+    ),
+    "weld_finishing": (
+        "weld_finishing_minutes",
+        "weld_finishing_charged_twice",
+        ("a finishing time", "grinding", "weld finishing", "finishing rate"),
+    ),
+}
 
 
-def _refuse_weld_finishing_charged_twice(
+def _refuse_weld_component_charged_twice(
     plan: "ManufacturingPlan | None", classification, timed: dict[str, str]
 ) -> None:
-    """Weld grinding is charged once: by its stage rate, or inside the welds' time.
+    """Tacking and weld grinding are each charged once: by the route stage's
+    rate, or inside the welds' time.
 
-    A costed weld whose committed time is the system's and carries a finishing
-    component, on a route whose weld-finishing stage is priced by its stage
-    rate, would charge the same grinding twice — refused. Weld finishing priced
-    by time with a system-timed weld that carries no finishing component would
-    charge that weld's grinding nowhere — refused too. A time the engineer typed
-    is their whole figure for the weld and is taken as they entered it.
+    A costed weld whose committed time is the system's and carries a stage's
+    component, on a route that prices that stage by its stage rate, would charge
+    the same work twice — refused. The stage priced by time with a system-timed
+    weld that carries no such component would charge that weld's share nowhere —
+    refused too. A time the engineer typed is their whole figure for the weld
+    and is taken as they entered it.
     """
     route = classification.route if classification is not None else None
-    if route is None or "weld_finishing" not in [stage.stage for stage in route.stages]:
+    route_ids = [stage.stage for stage in route.stages] if route is not None else []
+    stages = [stage_id for stage_id in _WELD_COMPONENT_STAGES if stage_id in route_ids]
+    if not stages:
         return
-    label = STAGES["weld_finishing"][0]
-    finishing_timed = "weld_finishing" in timed
     if plan is None:
-        if finishing_timed:
+        unpriced = [stage_id for stage_id in stages if stage_id in timed]
+        if unpriced:
             raise HTTPException(
                 status_code=422,
                 detail={
                     "error": "timed_stage_not_costed",
-                    "message": (
-                        f"No estimate was produced: {label} is priced by weld time, which needs a "
-                        "manufacturing plan whose welds carry a finishing time."
+                    "message": " ".join(
+                        f"No estimate was produced: {STAGES[stage_id][0]} is priced by weld "
+                        "time, which needs a manufacturing plan whose welds carry "
+                        f"{_WELD_COMPONENT_STAGES[stage_id][2][0]}."
+                        for stage_id in unpriced
                     ),
-                    "stages": ["weld_finishing"],
+                    "stages": unpriced,
                 },
             )
         return
@@ -3060,40 +3077,42 @@ def _refuse_weld_finishing_charged_twice(
         and operation.operation_type == "welding"
         and operation.time_source is TimeSource.SYSTEM
     ]
-    carrying = [o.operation_id for o in welds if _WELD_FINISHING_COMPONENT in o.system_time_parameters]
-    lacking = [o.operation_id for o in welds if _WELD_FINISHING_COMPONENT not in o.system_time_parameters]
-    if not finishing_timed and carrying:
-        raise HTTPException(
-            status_code=422,
-            detail={
-                "error": "weld_finishing_charged_twice",
-                "message": (
-                    f"No estimate was produced: {len(carrying)} costed weld(s) carry a finishing "
-                    f"time from their time profile, and {label} is also priced by its stage rate, "
-                    "so the same grinding would be charged twice. Choose one: price weld "
-                    "finishing by weld time, or time the welds with a profile that has no "
-                    "finishing rate."
-                ),
-                "stage": "weld_finishing",
-                "operations": carrying,
-            },
-        )
-    if finishing_timed and lacking:
-        raise HTTPException(
-            status_code=422,
-            detail={
-                "error": "timed_stage_not_costed",
-                "message": (
-                    f"No estimate was produced: {label} is priced by weld time, but "
-                    f"{len(lacking)} costed weld(s) were timed by a profile with no finishing "
-                    "rate, so their grinding would be charged nowhere. Time them with a profile "
-                    "that states one, enter their times, or price weld finishing from its stage "
-                    "rate."
-                ),
-                "stages": ["weld_finishing"],
-                "operations": lacking,
-            },
-        )
+    for stage_id in stages:
+        key, twice_error, (time, work, name, figure) = _WELD_COMPONENT_STAGES[stage_id]
+        label = STAGES[stage_id][0]
+        carrying = [o.operation_id for o in welds if key in o.system_time_parameters]
+        lacking = [o.operation_id for o in welds if key not in o.system_time_parameters]
+        if stage_id not in timed and carrying:
+            raise HTTPException(
+                status_code=422,
+                detail={
+                    "error": twice_error,
+                    "message": (
+                        f"No estimate was produced: {len(carrying)} costed weld(s) carry {time} "
+                        f"from their time profile, and {label} is also priced by its stage rate, "
+                        f"so the same {work} would be charged twice. Choose one: price {name} by "
+                        f"weld time, or time the welds with a profile that has no {figure}."
+                    ),
+                    "stage": stage_id,
+                    "operations": carrying,
+                },
+            )
+        if stage_id in timed and lacking:
+            raise HTTPException(
+                status_code=422,
+                detail={
+                    "error": "timed_stage_not_costed",
+                    "message": (
+                        f"No estimate was produced: {label} is priced by weld time, but "
+                        f"{len(lacking)} costed weld(s) were timed by a profile with no {figure}, "
+                        f"so their {work} would be charged nowhere. Time them with a profile "
+                        f"that states one, enter their times, or price {name} from its stage "
+                        "rate."
+                    ),
+                    "stages": [stage_id],
+                    "operations": lacking,
+                },
+            )
 
 
 def _entered_amortisation_quantity(stage_id: str, entry) -> int | None:
@@ -3319,7 +3338,7 @@ def price_cad_part(
                     "stages": untimed,
                 },
             )
-        _refuse_weld_finishing_charged_twice(plan, classification, timed)
+        _refuse_weld_component_charged_twice(plan, classification, timed)
 
         # A bar counts only once a person confirmed it; an unconfirmed proposal
         # is recorded but material is costed from the finished part as before.
