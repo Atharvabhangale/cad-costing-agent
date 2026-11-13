@@ -225,3 +225,113 @@ class CostActualRow(Base):
     drawing_revision: Mapped[str | None] = mapped_column(String(32), nullable=True)
     notes: Mapped[str] = mapped_column(String(2000), default="")
     supersedes_actual_id: Mapped[str | None] = mapped_column(String(32), nullable=True)
+
+
+# =============================================================================
+# Access control: users, estimate approval events, audit log (revision 0011).
+# Opt-in: with CAD_COSTING_AUTH_ENABLED off the users table is unused, while
+# approval events and audit rows are still written, attributed to `local`.
+# =============================================================================
+
+
+class UserRow(Base):
+    """A person who can be identified by an API token.
+
+    The token itself is never stored. `token_id` is a public lookup key (the
+    middle part of the token), and `token_hash` is PBKDF2-HMAC-SHA256 of the
+    secret part under `token_salt`. The only mutable field is `deactivated_at`:
+    a user is switched off, never deleted, so the actor ids in the approval
+    events and audit log keep naming someone.
+    """
+
+    __tablename__ = "users"
+    __table_args__ = (
+        UniqueConstraint("user_id", name="uq_user_id"),
+        UniqueConstraint("token_id", name="uq_user_token_id"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    user_id: Mapped[str] = mapped_column(String(64))
+    name: Mapped[str] = mapped_column(String(200))
+    role: Mapped[str] = mapped_column(String(16))
+    token_id: Mapped[str] = mapped_column(String(32))
+    token_salt: Mapped[str] = mapped_column(String(64))
+    token_hash: Mapped[str] = mapped_column(String(128))
+    kdf: Mapped[str] = mapped_column(String(32))
+    kdf_iterations: Mapped[int] = mapped_column(Integer)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=_utc_now)
+    created_by: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    deactivated_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    deactivated_by: Mapped[str | None] = mapped_column(String(64), nullable=True)
+
+
+class EstimateAttributionRow(Base):
+    """Who created an estimate: `local` with auth off, a user id with it on.
+
+    Its own table rather than a column on `estimates`, so the estimate row —
+    and every snapshot, query and test written against it — is untouched.
+    Written once, in the same flush as the estimate, by `auth.py`'s session
+    listener; no endpoint writes it. An estimate stored before revision 0011,
+    or outside a request, has no row: "not recorded", which is not the same
+    statement as anonymous.
+    """
+
+    __tablename__ = "estimate_attributions"
+    __table_args__ = (UniqueConstraint("estimate_id", name="uq_estimate_attribution"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    estimate_id: Mapped[str] = mapped_column(String(32))
+    created_by: Mapped[str] = mapped_column(String(64))
+    authenticated: Mapped[bool] = mapped_column(Boolean)
+    recorded_at: Mapped[datetime] = mapped_column(DateTime, default=_utc_now)
+
+
+class ApprovalEventRow(Base):
+    """One event in an estimate's approval history. Never updated or deleted.
+
+    `(estimate_id, sequence)` is unique, so two reviewers acting on the same
+    estimate at once cannot both append to the same state: the second insert
+    fails and is refused rather than recorded out of order.
+    """
+
+    __tablename__ = "approval_events"
+    __table_args__ = (
+        UniqueConstraint("event_id", name="uq_approval_event_id"),
+        UniqueConstraint("estimate_id", "sequence", name="uq_approval_event_sequence"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    event_id: Mapped[str] = mapped_column(String(32))
+    estimate_id: Mapped[str] = mapped_column(String(32), index=True)
+    sequence: Mapped[int] = mapped_column(Integer)
+    kind: Mapped[str] = mapped_column(String(16))
+    actor_id: Mapped[str] = mapped_column(String(64))
+    actor_name: Mapped[str] = mapped_column(String(200))
+    actor_role: Mapped[str | None] = mapped_column(String(16), nullable=True)
+    authenticated: Mapped[bool] = mapped_column(Boolean)
+    comment: Mapped[str] = mapped_column(String(2000), default="")
+    recorded_at: Mapped[datetime] = mapped_column(DateTime, default=_utc_now)
+
+
+class AuditEventRow(Base):
+    """One mutating request: who, what, against which record, and how it ended.
+
+    Written by one middleware (`auth.AccessMiddleware`) and nowhere else. It
+    holds no request body, no query string and no header, so a token, a
+    password or an uploaded file cannot reach it.
+    """
+
+    __tablename__ = "audit_events"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    recorded_at: Mapped[datetime] = mapped_column(DateTime, default=_utc_now)
+    actor_id: Mapped[str] = mapped_column(String(64), index=True)
+    actor_role: Mapped[str | None] = mapped_column(String(16), nullable=True)
+    authenticated: Mapped[bool] = mapped_column(Boolean)
+    method: Mapped[str] = mapped_column(String(8))
+    route: Mapped[str | None] = mapped_column(String(200), nullable=True)
+    path: Mapped[str] = mapped_column(String(500))
+    target_id: Mapped[str | None] = mapped_column(String(200), nullable=True, index=True)
+    created_ids: Mapped[list] = mapped_column(JSON)
+    status_code: Mapped[int] = mapped_column(Integer)
+    outcome: Mapped[str] = mapped_column(String(16))

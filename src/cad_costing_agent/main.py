@@ -694,6 +694,9 @@ def issue_quotation(
     document = _build_quotation(
         session, estimate_id, metadata=metadata, view=view, issued_at=issued_at
     )
+    # Access control (opt-in): with auth on, only an approved estimate is issued.
+    # A no-op with auth off. Defined in the access-control section below.
+    _require_approval_to_issue(session, estimate_id)
 
     if not document.available:
         raise HTTPException(
@@ -5531,3 +5534,268 @@ def operations_moulding_line(
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+# =========================================================================
+# Access control (opt-in): users, roles, estimate approval, the audit log.
+#
+# Off by default (`CAD_COSTING_AUTH_ENABLED`). Authorization and the audit
+# row are both decided in `auth.AccessMiddleware`, registered here and
+# nowhere else; the role each route needs is `auth.ROUTE_ROLES`. Endpoints
+# below only read the actor the middleware resolved. Approval changes no
+# figure of any estimate.
+# =========================================================================
+
+from typing import Literal  # noqa: E402
+
+from cad_costing_agent.approvals import (  # noqa: E402
+    ApprovalRefused,
+    ApprovalStatus,
+    status_of,
+)
+from cad_costing_agent.auth import (  # noqa: E402
+    ADMIN,
+    AccessMiddleware,
+    Actor,
+    auth_enabled,
+    current_actor,
+)
+from cad_costing_agent.repository import (  # noqa: E402
+    ApprovalEventRepository,
+    AuditPage,
+    AuditRepository,
+    StoredUser,
+    UserRepository,
+)
+
+app.add_middleware(AccessMiddleware)
+
+
+class AuthStatus(BaseModel):
+    auth_enabled: bool
+    signed_in: bool
+    actor: Actor
+    note: str
+
+
+@app.get("/auth/status", response_model=AuthStatus)
+def auth_status(actor: Actor = Depends(current_actor)) -> AuthStatus:
+    """Whether auth is on, and who the presented token (if any) identifies.
+
+    Public, so the page can ask before it has a token. With auth off the actor
+    is `local` and every action is recorded as `local`.
+    """
+    enabled = auth_enabled()
+    if not enabled:
+        note = "Auth off — actions recorded as local."
+    elif actor.authenticated:
+        note = f"Signed in as {actor.name} ({actor.role})."
+    else:
+        note = "Auth on — sign in with an API token to use the application."
+    return AuthStatus(
+        auth_enabled=enabled, signed_in=actor.authenticated, actor=actor, note=note
+    )
+
+
+class UserCreate(BaseModel):
+    name: str = Field(min_length=1, max_length=200)
+    role: Literal["estimator", "reviewer", "admin"]
+
+
+class CreatedUser(BaseModel):
+    user: StoredUser
+    token: str = Field(
+        description=(
+            "Shown once. Only a salted hash of its secret part is stored; it cannot be recovered."
+        )
+    )
+    note: str
+
+
+@app.get("/auth/users", response_model=list[StoredUser])
+def list_users(session: Session = Depends(get_session)) -> list[StoredUser]:
+    return UserRepository(session).list()
+
+
+@app.post("/auth/users", response_model=CreatedUser, status_code=201)
+def create_user(
+    request: UserCreate,
+    session: Session = Depends(get_session),
+    actor: Actor = Depends(current_actor),
+) -> CreatedUser:
+    """Create a user and return their API token — the only time it is shown."""
+    try:
+        user, token = UserRepository(session).create(
+            name=request.name, role=request.role, created_by=actor.actor_id
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    session.commit()
+    return CreatedUser(
+        user=user,
+        token=token,
+        note=(
+            "Copy this token now: it is not stored and cannot be shown again. Send it as "
+            "'Authorization: Bearer <token>'."
+        ),
+    )
+
+
+@app.post("/auth/users/{user_id}/deactivate", response_model=StoredUser)
+def deactivate_user(
+    user_id: str,
+    session: Session = Depends(get_session),
+    actor: Actor = Depends(current_actor),
+) -> StoredUser:
+    """Switch a user off. Their token stops working; nothing they did is removed."""
+    try:
+        user = UserRepository(session).deactivate(user_id, by=actor.actor_id)
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    session.commit()
+    return user
+
+
+def _approval_status(session: Session, estimate_id: str) -> ApprovalStatus:
+    repository = ApprovalEventRepository(session)
+    try:
+        created_by = repository.estimate_creator(estimate_id)
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    return status_of(
+        estimate_id,
+        repository.for_estimate(estimate_id),
+        created_by=created_by,
+        auth_enabled=auth_enabled(),
+    )
+
+
+@app.get("/estimates/{estimate_id}/approval", response_model=ApprovalStatus)
+def estimate_approval(estimate_id: str, session: Session = Depends(get_session)) -> ApprovalStatus:
+    """The estimate's approval state, derived from its events (never stored)."""
+    return _approval_status(session, estimate_id)
+
+
+class ApprovalAction(BaseModel):
+    comment: str = Field(default="", max_length=2000)
+
+
+def _record_approval_event(
+    session: Session, estimate_id: str, kind: str, comment: str, actor: Actor
+) -> ApprovalStatus:
+    enabled = auth_enabled()
+    repository = ApprovalEventRepository(session)
+    try:
+        repository.record(
+            estimate_id,
+            kind,
+            actor_id=actor.actor_id,
+            actor_name=actor.name,
+            actor_role=actor.role,
+            authenticated=actor.authenticated,
+            actor_is_admin=actor.role == ADMIN,
+            separation_enforced=enabled,
+            comment=comment,
+        )
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ApprovalRefused as exc:
+        status_code = 403 if exc.code in {"separation_of_duties", "not_the_submitter"} else 409
+        raise HTTPException(
+            status_code=status_code, detail={"error": exc.code, "message": exc.message}
+        ) from exc
+    session.commit()
+    return _approval_status(session, estimate_id)
+
+
+@app.post("/estimates/{estimate_id}/approval/submit", response_model=ApprovalStatus)
+def submit_estimate(
+    estimate_id: str,
+    request: ApprovalAction,
+    session: Session = Depends(get_session),
+    actor: Actor = Depends(current_actor),
+) -> ApprovalStatus:
+    """Submit an estimate for review. Its figures do not change."""
+    return _record_approval_event(session, estimate_id, "submitted", request.comment, actor)
+
+
+@app.post("/estimates/{estimate_id}/approval/approve", response_model=ApprovalStatus)
+def approve_estimate(
+    estimate_id: str,
+    request: ApprovalAction,
+    session: Session = Depends(get_session),
+    actor: Actor = Depends(current_actor),
+) -> ApprovalStatus:
+    """Approve a submitted estimate. With auth on, not by its creator or submitter."""
+    return _record_approval_event(session, estimate_id, "approved", request.comment, actor)
+
+
+@app.post("/estimates/{estimate_id}/approval/reject", response_model=ApprovalStatus)
+def reject_estimate(
+    estimate_id: str,
+    request: ApprovalAction,
+    session: Session = Depends(get_session),
+    actor: Actor = Depends(current_actor),
+) -> ApprovalStatus:
+    """Reject a submitted estimate. A rejection must carry a comment."""
+    return _record_approval_event(session, estimate_id, "rejected", request.comment, actor)
+
+
+@app.post("/estimates/{estimate_id}/approval/withdraw", response_model=ApprovalStatus)
+def withdraw_estimate(
+    estimate_id: str,
+    request: ApprovalAction,
+    session: Session = Depends(get_session),
+    actor: Actor = Depends(current_actor),
+) -> ApprovalStatus:
+    """Withdraw a submitted or approved estimate (its submitter, or an admin)."""
+    return _record_approval_event(session, estimate_id, "withdrawn", request.comment, actor)
+
+
+def _require_approval_to_issue(session: Session, estimate_id: str) -> None:
+    """The quotation gate. Auth off: nothing — today's behaviour exactly.
+
+    Auth on: the estimate's derived state must be `approved`, by an event an
+    identified reviewer recorded. An approval recorded with auth off was made by
+    `local`, with no separation of duties, and does not count.
+    """
+    if not auth_enabled():
+        return
+    status = _approval_status(session, estimate_id)
+    if status.state == "approved" and status.approved_with_authentication:
+        return
+    if status.state == "approved":
+        message = (
+            "This estimate was approved while auth was off, by `local`, so no separation of "
+            "duties was applied. Withdraw it and have it submitted and approved again."
+        )
+    else:
+        message = (
+            f"This estimate is '{status.state}'. With auth on, a quotation is issued only for an "
+            "approved estimate: submit it for review and have a reviewer who neither created "
+            "nor submitted it approve it."
+        )
+    raise HTTPException(
+        status_code=409,
+        detail={"error": "estimate_not_approved", "message": message, "state": status.state},
+    )
+
+
+@app.get("/audit", response_model=AuditPage)
+def audit_log(
+    target_id: str | None = Query(
+        None,
+        description="An estimate id, quote number, user id ... the request acted on or created.",
+    ),
+    actor_id: str | None = None,
+    limit: int = Query(100, ge=1, le=1000),
+    offset: int = Query(0, ge=0),
+    session: Session = Depends(get_session),
+) -> AuditPage:
+    """Every mutating request, newest first: who, which route, which record,
+    when, and the status code. Never a body, a query string or a header."""
+    return AuditRepository(session).list(
+        target_id=target_id, actor_id=actor_id, limit=limit, offset=offset
+    )

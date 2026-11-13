@@ -124,7 +124,7 @@ function clearError() {
 
 // ------------------------------------------------------------------ tabs
 
-const TABS = ["estimate", "setup", "timesetup", "history", "feedback", "bulk"];
+const TABS = ["estimate", "setup", "timesetup", "history", "feedback", "bulk", "audit"];
 
 function showTab(name) {
   document.querySelectorAll(".tab").forEach((tab) =>
@@ -139,6 +139,8 @@ function showTab(name) {
   if (name === "feedback" && typeof openFeedback === "function") openFeedback();
   // bulk.js is loaded after this file, so it is guarded forward as well.
   if (name === "bulk" && typeof openBulk === "function") openBulk();
+  // approval.js is loaded after this file, so it is guarded forward as well.
+  if (name === "audit" && typeof openAudit === "function") openAudit();
 }
 
 document.querySelectorAll(".tab").forEach((tab) =>
@@ -1053,10 +1055,13 @@ async function showEstimateDetail(estimateId) {
       <summary>Cost drivers</summary>
       <div id="history-drivers"></div>
     </details>
+    <div id="history-approval"></div>
     <div id="history-actuals"></div>`;
   panel.scrollIntoView({ behavior: "smooth", block: "nearest" });
   // Guarded forward: actuals.js is loaded after this file.
   if (typeof renderActualsPanel === "function") renderActualsPanel(estimate);
+  // Guarded forward: approval.js is loaded after this file.
+  if (typeof renderApprovalPanel === "function") renderApprovalPanel(estimate);
   // Guarded forward: drivers.js is loaded after this file.
   if (typeof renderCostDriversInto === "function") {
     renderCostDriversInto("history-drivers", estimate.estimate_id);

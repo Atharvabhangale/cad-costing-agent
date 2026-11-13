@@ -738,3 +738,322 @@ class CostActualRepository:
 
 def _row_to_actual(row: CostActualRow) -> ActualCostRecord:
     return ActualCostRecord.model_validate(row, from_attributes=True)
+
+
+# =============================================================================
+# Access control: users, estimate approval events, audit log (revision 0011).
+# Each repository below is append-only except `UserRepository.deactivate`,
+# which switches a user off without deleting them.
+# =============================================================================
+
+from sqlalchemy import String as _SqlString  # noqa: E402
+
+from cad_costing_agent import credentials  # noqa: E402
+from cad_costing_agent.approvals import (  # noqa: E402
+    ApprovalEvent,
+    ApprovalRefused,
+    check_event,
+)
+from cad_costing_agent.db_models import (  # noqa: E402
+    ApprovalEventRow,
+    AuditEventRow,
+    EstimateAttributionRow,
+    UserRow,
+)
+
+
+def _utc_naive_now() -> datetime:
+    return datetime.now(timezone.utc).replace(tzinfo=None)
+
+
+class StoredUser(BaseModel):
+    """A user as the API shows one. Carries no token, salt or hash."""
+
+    user_id: str
+    name: str
+    role: str
+    created_at: datetime
+    created_by: str | None = None
+    deactivated_at: datetime | None = None
+    deactivated_by: str | None = None
+
+
+class UserRepository:
+    """Creates, reads and deactivates users. A user is never deleted, and their
+    token is never stored — only a salted hash of its secret part."""
+
+    def __init__(self, session: Session) -> None:
+        self.session = session
+
+    def create(self, *, name: str, role: str, created_by: str | None) -> tuple[StoredUser, str]:
+        """Create a user and return them with their token. The token is not
+        recoverable afterwards: this return value is the only place it exists."""
+        if role not in credentials.ROLES:
+            raise ValueError(f"Unknown role '{role}'. Roles: {', '.join(credentials.ROLES)}.")
+        if not name.strip():
+            raise ValueError("A user needs a name, so the audit log can say who acted.")
+        token, token_id, secret = credentials.new_token()
+        salt = credentials.new_salt()
+        row = UserRow(
+            user_id=f"u-{uuid.uuid4().hex[:12]}",
+            name=name.strip(),
+            role=role,
+            token_id=token_id,
+            token_salt=salt,
+            token_hash=credentials.hash_secret(secret, salt, credentials.KDF_ITERATIONS),
+            kdf=credentials.KDF_NAME,
+            kdf_iterations=credentials.KDF_ITERATIONS,
+            created_at=_utc_naive_now(),
+            created_by=created_by,
+        )
+        self.session.add(row)
+        self.session.flush()
+        return StoredUser.model_validate(row, from_attributes=True), token
+
+    def by_token(self, token: str) -> StoredUser | None:
+        """The active user a presented token identifies, or None."""
+        parsed = credentials.parse_token(token)
+        if parsed is None:
+            return None
+        token_id, secret = parsed
+        row = self.session.execute(
+            select(UserRow).where(UserRow.token_id == token_id)
+        ).scalar_one_or_none()
+        if row is None:
+            credentials.burn_equivalent_time(secret)
+            return None
+        if row.kdf != credentials.KDF_NAME or not credentials.secret_matches(
+            secret, row.token_salt, row.kdf_iterations, row.token_hash
+        ):
+            return None
+        if row.deactivated_at is not None:
+            return None
+        return StoredUser.model_validate(row, from_attributes=True)
+
+    def get(self, user_id: str) -> StoredUser:
+        row = self._row(user_id)
+        if row is None:
+            raise LookupError(f"Unknown user '{user_id}'.")
+        return StoredUser.model_validate(row, from_attributes=True)
+
+    def list(self) -> list[StoredUser]:
+        rows = self.session.execute(select(UserRow).order_by(UserRow.id)).scalars().all()
+        return [StoredUser.model_validate(row, from_attributes=True) for row in rows]
+
+    def active_admin_count(self) -> int:
+        return self.session.execute(
+            select(func.count())
+            .select_from(UserRow)
+            .where(UserRow.role == "admin", UserRow.deactivated_at.is_(None))
+        ).scalar_one()
+
+    def deactivate(self, user_id: str, *, by: str) -> StoredUser:
+        """Switch a user off. Their token stops working; their history stays."""
+        row = self._row(user_id)
+        if row is None:
+            raise LookupError(f"Unknown user '{user_id}'.")
+        if row.deactivated_at is not None:
+            raise ValueError(f"User '{user_id}' is already deactivated.")
+        if row.role == "admin" and self.active_admin_count() <= 1:
+            raise ValueError(
+                "This is the last active admin. Create another admin before deactivating it, "
+                "or nobody could manage users again without the bootstrap script."
+            )
+        row.deactivated_at = _utc_naive_now()
+        row.deactivated_by = by
+        self.session.flush()
+        return StoredUser.model_validate(row, from_attributes=True)
+
+    def _row(self, user_id: str) -> UserRow | None:
+        return self.session.execute(
+            select(UserRow).where(UserRow.user_id == user_id)
+        ).scalar_one_or_none()
+
+
+class ApprovalEventRepository:
+    """Records and reads an estimate's approval events. There is deliberately no
+    update or delete: the current state is derived from these rows
+    (`approvals.derive_state`), so editing one would rewrite history.
+
+    `record` checks the rules itself (`approvals.check_event`) before inserting,
+    so there is no way to append an event the rules refuse. The unique
+    `(estimate_id, sequence)` constraint turns two simultaneous decisions on the
+    same state into one recorded event and one refusal.
+    """
+
+    def __init__(self, session: Session) -> None:
+        self.session = session
+
+    def estimate_creator(self, estimate_id: str) -> str | None:
+        """Who created the estimate (None = not recorded). LookupError if unknown."""
+        exists = self.session.execute(
+            select(EstimateRow.id).where(EstimateRow.estimate_id == estimate_id)
+        ).one_or_none()
+        if exists is None:
+            raise LookupError(f"Unknown estimate '{estimate_id}'.")
+        return self.session.execute(
+            select(EstimateAttributionRow.created_by).where(
+                EstimateAttributionRow.estimate_id == estimate_id
+            )
+        ).scalar_one_or_none()
+
+    def for_estimate(self, estimate_id: str) -> list[ApprovalEvent]:
+        rows = (
+            self.session.execute(
+                select(ApprovalEventRow)
+                .where(ApprovalEventRow.estimate_id == estimate_id)
+                .order_by(ApprovalEventRow.sequence)
+            )
+            .scalars()
+            .all()
+        )
+        return [ApprovalEvent.model_validate(row, from_attributes=True) for row in rows]
+
+    def record(
+        self,
+        estimate_id: str,
+        kind: str,
+        *,
+        actor_id: str,
+        actor_name: str,
+        actor_role: str | None,
+        authenticated: bool,
+        actor_is_admin: bool,
+        separation_enforced: bool,
+        comment: str = "",
+    ) -> ApprovalEvent:
+        created_by = self.estimate_creator(estimate_id)
+        events = self.for_estimate(estimate_id)
+        check_event(
+            events,
+            kind,
+            actor_id=actor_id,
+            actor_is_admin=actor_is_admin,
+            created_by=created_by,
+            separation_enforced=separation_enforced,
+            comment=comment,
+        )
+        row = ApprovalEventRow(
+            event_id=uuid.uuid4().hex,
+            estimate_id=estimate_id,
+            sequence=len(events) + 1,
+            kind=kind,
+            actor_id=actor_id,
+            actor_name=actor_name,
+            actor_role=actor_role,
+            authenticated=authenticated,
+            comment=comment,
+            recorded_at=_utc_naive_now(),
+        )
+        self.session.add(row)
+        try:
+            self.session.flush()
+        except IntegrityError as exc:
+            self.session.rollback()
+            raise ApprovalRefused(
+                "concurrent_decision",
+                "Someone else recorded an approval event on this estimate at the same moment. "
+                "Reload it and decide on what is now recorded.",
+            ) from exc
+        return ApprovalEvent.model_validate(row, from_attributes=True)
+
+
+class AuditEntry(BaseModel):
+    id: int
+    recorded_at: datetime
+    actor_id: str
+    actor_role: str | None = None
+    authenticated: bool
+    method: str
+    route: str | None = None
+    path: str
+    target_id: str | None = None
+    created_ids: list[str]
+    status_code: int
+    outcome: str
+
+
+class AuditPage(BaseModel):
+    total: int
+    limit: int
+    offset: int
+    items: list[AuditEntry]
+
+
+class AuditRepository:
+    """Appends and lists audit rows. No update or delete.
+
+    Only `auth.AccessMiddleware` calls `record`; nothing else writes here.
+    """
+
+    def __init__(self, session: Session) -> None:
+        self.session = session
+
+    def record(
+        self,
+        *,
+        actor_id: str,
+        actor_role: str | None,
+        authenticated: bool,
+        method: str,
+        route: str | None,
+        path: str,
+        target_id: str | None,
+        created_ids: list[str],
+        status_code: int,
+        outcome: str,
+    ) -> None:
+        self.session.add(
+            AuditEventRow(
+                recorded_at=_utc_naive_now(),
+                actor_id=actor_id,
+                actor_role=actor_role,
+                authenticated=authenticated,
+                method=method,
+                route=route,
+                path=path[:500],
+                target_id=None if target_id is None else target_id[:200],
+                created_ids=list(created_ids),
+                status_code=status_code,
+                outcome=outcome,
+            )
+        )
+        self.session.flush()
+
+    def list(
+        self,
+        *,
+        target_id: str | None = None,
+        actor_id: str | None = None,
+        limit: int = 100,
+        offset: int = 0,
+    ) -> AuditPage:
+        """Newest first. `target_id` matches the record a request acted on —
+        its path parameter, or a record the request created."""
+        query = select(AuditEventRow)
+        if target_id:
+            escaped = target_id.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+            query = query.where(
+                (AuditEventRow.target_id == target_id)
+                | AuditEventRow.created_ids.cast(_SqlString).like(
+                    f'%"{escaped}"%', escape="\\"
+                )
+            )
+        if actor_id:
+            query = query.where(AuditEventRow.actor_id == actor_id)
+        total = self.session.execute(
+            select(func.count()).select_from(query.subquery())
+        ).scalar_one()
+        rows = (
+            self.session.execute(
+                query.order_by(AuditEventRow.id.desc()).limit(limit).offset(offset)
+            )
+            .scalars()
+            .all()
+        )
+        return AuditPage(
+            total=total,
+            limit=limit,
+            offset=offset,
+            items=[AuditEntry.model_validate(row, from_attributes=True) for row in rows],
+        )

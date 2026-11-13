@@ -76,10 +76,28 @@ function field(label, value, plain) {
     <span class="value${plain ? " plain" : ""}">${value === null || value === undefined || value === "" ? "—" : escapeHtml(value)}</span></div>`;
 }
 
+// Opt-in access control. This page shares nothing with the shell, so it reads
+// the shell's token itself (sessionStorage, same key as auth.js). A tab opened
+// without it gets the server's 401 message, which says to sign in.
+function authHeaders() {
+  let token = "";
+  try {
+    token = window.sessionStorage.getItem("cadCostingApiToken") || "";
+  } catch {
+    token = "";
+  }
+  return token ? { Authorization: `Bearer ${token}` } : {};
+}
+
+function refusalText(detail, fallback) {
+  if (detail && typeof detail === "object" && detail.message) return detail.message;
+  return detail || fallback;
+}
+
 async function api(path) {
-  const response = await fetch(path);
+  const response = await fetch(path, { headers: authHeaders() });
   const body = await response.json();
-  if (!response.ok) throw new Error(body.detail || response.statusText);
+  if (!response.ok) throw new Error(refusalText(body.detail, response.statusText));
   return body;
 }
 
@@ -620,7 +638,7 @@ $("issue").addEventListener("click", async () => {
       `/estimates/${encodeURIComponent(estimateId)}/quotation?view=${currentView}`,
       {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: { "Content-Type": "application/json", ...authHeaders() },
         body: JSON.stringify({
           customer_name: metadata.customer_name,
           project_name: metadata.project_name,
@@ -632,7 +650,7 @@ $("issue").addEventListener("click", async () => {
       }
     );
     const body = await response.json();
-    if (!response.ok) throw new Error(body.detail || response.statusText);
+    if (!response.ok) throw new Error(refusalText(body.detail, response.statusText));
     // Reopened by its quote number, so what is on screen from here on is the
     // issued document read back rather than a preview that looks like one.
     location.search = `?quote=${encodeURIComponent(body.issued.quote_number)}&view=${currentView}`;

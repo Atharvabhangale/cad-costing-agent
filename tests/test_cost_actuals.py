@@ -502,7 +502,7 @@ def test_upgrading_a_0005_database_keeps_its_estimates_and_adds_the_table():
 
     assert "cost_actuals" in inspect(engine).get_table_names()
     with engine.connect() as connection:
-        assert connection.execute(text("select version_num from alembic_version")).scalar_one() == "0008"
+        assert connection.execute(text("select version_num from alembic_version")).scalar_one() == "0011"
     with sessionmaker(bind=engine)() as session:
         kept = EstimateRepository(session).get(estimate_id)
         assert kept.request_snapshot == {"before": "0006"}
@@ -955,7 +955,7 @@ def test_upgrading_a_0007_database_keeps_every_recorded_actual_and_calls_it_an_a
     assert run_migrations(engine) == "upgraded"
 
     with engine.connect() as connection:
-        assert connection.execute(text("select version_num from alembic_version")).scalar_one() == "0008"
+        assert connection.execute(text("select version_num from alembic_version")).scalar_one() == "0011"
         after = connection.execute(
             text(f"select {', '.join(columns_before)} from cost_actuals order by id")
         ).fetchall()
