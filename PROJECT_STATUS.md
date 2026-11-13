@@ -1,11 +1,17 @@
 # Project Status
 
-Last updated: 2026-11-13 (Iteration 5 — five aPriori gaps closed in parallel)
+Last updated: 2026-11-13 (Iteration 6 — tool life, cost drivers, weld prep and finishing, tacking charged once)
 
 `CHECKPOINT.md` is a point-in-time handoff written at the Step 30 pause and is not
 updated in place; this file is the step-by-step record.
 
 ## Current stage
+
+**Iteration 6: three more gaps from `APRIORI_GAP_ANALYSIS.md`, built by three agents, reviewed
+and merged** — a stage's pattern/die charge amortised over a tool life the engineer states, a
+cost-driver breakdown of any stored estimate, and weld preparation and finishing timed from the
+typed weld. The review also found and fixed a double charge merged in Iteration 5 (tacking).
+Details in *Iteration 6* below.
 
 **Iteration 5: five small gaps from `APRIORI_GAP_ANALYSIS.md`, built in parallel by separate
 agents, reviewed and merged** — a yield on the casting/forging stage, a matrix costing preview
@@ -862,6 +868,72 @@ all. One test added. Suite: **1,760 passing**, 1 skipped.
   (1,722 collected, 1 skipped). One file added, `static/estimateflow.js`. **No
   Python file changed, no endpoint, no schema, no migration.**
 
+### Iteration 6 — tool life, cost drivers, weld prep and finishing (built in parallel)
+
+Three agents, each in its own worktree from the pushed branch, reviewed and merged into
+`timed-welding`; one merge conflict in `main.py` (two independent new helpers) was resolved by
+keeping both. Full suite on the merged code: **2316 passed, 8 skipped** in about 2 min
+(Linux, Python 3.13, no `cadmodels/`). The merged app was started on a scratch database: both
+new endpoints present, the page loaded with no script error, and a costed part's drivers summed
+to its stored total. The live numbers below were observed by each agent against a running
+server on a scratch database before the merge.
+
+**A stage's one-off charge amortised over the tool's life.**
+`stage_inputs[stage].amortisation_quantity` — a whole number of pieces the pattern or die is
+expected to make, stated by the engineer, never defaulted — charges this estimate only
+`batch_charge x quantity / amortisation_quantity`, unrounded until output. On such a line
+`batch_charge` is the share charged (so `total_cost = run_cost + batch_charge` still holds) and
+`full_batch_charge`, `amortisation_quantity`, `batch_charge_basis: "amortised_share"` and a note
+say the rest is carried by pieces outside this estimate; without one a line has exactly its
+previous keys. A tool life below the quantity (that would silently buy a second tool), one on a
+stage with no one-off charge, one on a timed stage, or a non-whole number is a 400. The
+comparison names the change; the quotation's route-stages line carries the note **in both
+views**, because a customer total that includes only a share of a tool should say so. The page
+offers the input where the selected rate set's stage rate has a batch charge. Live
+(`block_with_counterbore`, 5 off, casting 120/kg + 15,000, 3.0 kg): the casting line went from
+16,800.00 to 2,550.00 (a 750.00 share) at a tool life of 100; in a matrix, quantities 1/40/100
+gave stage totals 540/21,600/54,000 and 150 was refused with the reason. The route card's stage
+inputs, never seen in a browser after Iteration 5's yield input, were found stacked in one tall
+column and now sit side by side (checked at 1280 and 900 px). Not done: bulk preview sends no
+stage inputs; the rate set's top-level `tooling_cost_per_batch` is unchanged; no cavity count
+(flat stage rates have no cycle for it to act on).
+
+**Cost-driver breakdown.** `GET /estimates/{id}/cost-drivers` breaks one stored estimate's
+total into the stored figures that built it, each with its share of the stored total: material
+(0.00 with the stage's note when a casting or purchase supplies it), each priced route stage,
+operations grouped by process type (setup, machine and labour as stored — never rate x time),
+overhead, scrap and tooling. Build-up order, never sorted, nothing called a hotspot. Any
+remainder is its own `reconciliation` driver; an absent field is "not recorded", never zero.
+An assembly roll-up breaks down by its stored categories and per component; an incomplete one
+is `partial` with the roll-up's own reason. `cost_drivers.py` imports `money` only. UI: a card in
+the Cost section, a disclosure in History and in the roll-up card (`drivers.js`), share bars
+whose width is the server's percentage. Live (`block_with_counterbore`, `poc-machine-shop`, 5
+off): seven drivers summing to the stored 3,304.05 exactly — milling 63.56%, drilling 13.12%,
+overhead 9.59%, tooling 9.08%. Setup sits on whichever process's operation the plan charged it
+to, and the row says so. Not seen in a browser: the assembly disclosure (API only).
+
+**Weld preparation and finishing from the typed weld.** Two optional time-profile rates, absent
+by default: `welding_butt_prep_mm_per_min` (butt welds only — a fillet is never charged
+preparation) and `welding_finishing_mm_per_min`. Each turns the weld length into minutes, added
+to the weld's cycle as its own named component. `illustrative-welding-2026` 1.2.0 adds prep 100
+and finishing 200 mm/min (estimates, no published source). Travel speed by weld size was
+deliberately not added: passes already scale with size. Live: a 600 mm x 8 mm MIG weld is 10.39
+min under 1.1.0, and 13.39 as a fillet / 19.39 as a butt weld under 1.2.0.
+
+**Tacking and grinding are each charged once.** The cutting + welding route carries `fit_up`
+("Fit-up and tacking") and `weld_finishing` stages priced by stage rate, while the profile can
+put tack and finishing time inside each weld. Both stages may now be priced by weld time, only
+together with welding; `/cost/cad-part` refuses a system-timed weld carrying either component
+beside that stage's rate (`422 fit_up_charged_twice` / `weld_finishing_charged_twice`), and a
+timed stage whose welds carry none (`422 timed_stage_not_costed`). A typed weld time is the
+engineer's whole figure. Repositioning is no stage's work and stays in the weld. **Behaviour
+change:** under the illustrative 1.1.0/1.2.0 profiles, timing welding alone on `cutting_welding`
+is now refused until fit-up (and, under 1.2.0, finishing) is timed too. The test that had
+accepted the double charge was changed to expect the refusal. Live (5 off, welding 550/h, stage
+rates cutting 25, fit-up 40, finishing 50 per piece): a fillet weld under 1.1.0 with welding
+alone timed is refused; with fit-up timed too it costs 852.66 with no fit-up line. Not done:
+the route comparison still labels every stage's pricing as stage rate.
+
 ### Iteration 5 — five aPriori gaps closed (built in parallel)
 
 Five agents each built one feature in its own worktree; each was reviewed, re-tested and merged
@@ -924,7 +996,10 @@ estimates with no published source) and is idempotent. Live: a 600 mm, 8 mm-leg 
 8.89 min under 1.0.0 and 10.39 under 1.1.0 (4.00 / 0.45 + 0.5 + 1.0). **Known overlap:** the
 arc-on factor's remainder is already described as "handling and cleaning", and 1.1.0 keeps
 0.45 while adding fixed handling, so the two may double count; whoever publishes real figures
-must decide the split. Not done: robotic programming time, weld prep/grind from length.
+must decide the split. Not done: robotic programming time. **Corrected in Iteration 6:** the
+clamp-and-tack time charged tacking a second time beside the `fit_up` stage rate on the cutting +
+welding route; such a request is now refused (`422 fit_up_charged_twice`) unless fit-up is also
+priced by weld time. Weld prep and finishing were added in Iteration 6.
 
 **DFM flags pointed at on the 3D model.** `/cad/dfm` now returns `flagged_features` beside
 `flags` — the recognized features the flags name, unchanged — so a flag row marks its

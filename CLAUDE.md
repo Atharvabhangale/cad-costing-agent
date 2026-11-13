@@ -18,7 +18,7 @@ uvicorn cad_costing_agent.main:app --reload
 # whatever it is pointed at.
 CAD_COSTING_DATABASE_URL=sqlite:///./scratch.db uvicorn cad_costing_agent.main:app --port 8710
 
-# Tests (2244 collected; measured without cadmodels/: 2236 pass, 8 skip; full run about 2-12 min)
+# Tests (2324 collected; measured without cadmodels/: 2316 pass, 8 skip; full run about 2-12 min)
 # cadquery-ocp must stay below 8 (pinned): 8.x drops names this code imports.
 # A git worktree has no cadmodels/ (git-ignored), so tests needing real models
 # skip there (8 skips instead of 1). Judge a branch by a run in the main tree.
@@ -333,6 +333,23 @@ optional one-off batch charge (pattern, die).
   yield on a per-piece, batch-only, non-supplying or timed stage is a 400; one for a stage
   the route lacks is ignored, because `stage_inputs` is shared across a comparison's routes.
   The page offers the input from `/process-routes`'s `yield_stages` and never divides.
+- **A tool's life is the engineer's, and only a stage with a one-off charge takes one.**
+  `stage_inputs[stage].amortisation_quantity` makes the line's `batch_charge` the share
+  `full_batch_charge x quantity / amortisation_quantity`, so `total_cost = run_cost +
+  batch_charge` still holds. Never default one, and never let one below the quantity through —
+  that silently buys a second tool. Absent means absent keys (a test pins the key set). The
+  page offers the input where the selected rate set's stage rate has a `batch_charge`, and
+  never divides.
+- **Tacking and weld grinding are each charged once: by the route stage's rate or inside the
+  welds' time.** `fit_up` and `weld_finishing` are in `TIMEABLE_STAGES` (-> welding), timeable
+  only with welding (`TIMED_ONLY_WITH`). `_WELD_COMPONENT_STAGES` in `main.py` maps each to the
+  weld component it reads (`welding_tack_minutes_per_weld`, `weld_finishing_minutes`) and its
+  `*_charged_twice` error; a timed stage whose welds lack the component, or with no plan, is
+  `timed_stage_not_costed`. A typed weld time is the engineer's whole figure. Repositioning
+  has no stage and no guard. Edge preparation (`welding_butt_prep_mm_per_min`) is butt-only
+  and no stage prices bevelling. Any new weld time component that some route stage also
+  prices must join that table, or it is a double charge. `plan.js`'s `TIMED_IN_WELDS` keys
+  equal `TIMED_ONLY_WITH` (a test holds it).
 - The comparison (`estimates.decompose`) reads a material not charged at a zero rate and
   attributes stage changes as `route_stage`; the quotation adds a `route_stages` line only
   when there are stages.
@@ -462,6 +479,18 @@ reach a plan, a time or a cost.
   drawn without depth testing, not a face highlight; never describe it as one.
 - Adding a seeded catalog changes `init_db`'s return count and the head revision: update
   `test_persistence`, `test_migrations`, `test_cost_actuals` and `test_money`'s helper.
+
+### A cost-driver table reads one estimate; it never ranks
+
+- `cost_drivers.py` imports `money` only, and only `main.py` imports it; it is handed the
+  result snapshot as a plain dict. Never let it import `estimates`, `quotation` or a
+  calculator, and never re-derive a figure from a rate and a time.
+- The drivers partition the stored total *as shown*; the remainder is `reconciliation`, never
+  absorbed, and an absent field is `recorded: false`, never 0.
+- Build-up order, never sorted, never "biggest" or "hotspot". `drivers.js` passes the server's
+  `share_percent` into a CSS width and prints it; a test greps it for arithmetic.
+- A process row's setup is wherever the plan charged it (the first costed operation of the
+  setup). Do not distribute it.
 
 ### An actual cost is a recorded fact, never an input
 
@@ -769,6 +798,7 @@ feedback.js   the feedback and correction analytics panel
 actuals.js    actual costs and their variance, in the History detail
 routecompare.js  route comparison table in the route card; "Use this route"
               goes through /cad/process/decide
+drivers.js    the cost-driver table (Cost section, History detail, roll-up card)
 matrix.js     the Matrix preview disclosure in the Cost section; shows the server's grid
 bulk.js       the Bulk preview tab; shows the server's rows and CSV
 dfm.js        the advisory DFM panel in the CAD section

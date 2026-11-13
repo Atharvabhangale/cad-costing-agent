@@ -25,10 +25,10 @@ sheet unfolding.
 |---|---|---|---|
 | Matrix costing: one scenario per region × annual volume × batch | Route comparison and bulk preview, both through `price_cad_part` | **Done (Iteration 5):** `POST /cost/matrix-preview` | — |
 | Scenario comparison and what-if | `estimates.compare_estimates` with variance decomposition | A side-by-side view of two stored estimates or previews | S |
-| Cost-driver breakdown (material, factory, admin) | A cost split in the stored result | A driver table read from the stored result, with no new arithmetic | S |
+| Cost-driver breakdown (material, factory, admin) | A cost split in the stored result | **Done (Iteration 6):** `GET /estimates/{id}/cost-drivers`, partitioning the stored total | — |
 | Supplier quote against should-cost | `cost_actuals`: immutable, per unit, variance shown | **Done (Iteration 5):** `figure_kind: supplier_quote`, per-category gap, quotes side by side unranked | — |
 | Digital factories: per-region labour, per-machine overhead (direct and indirect), material catalogue | Versioned, immutable rate sets, INR by default | Region and factory metadata on rate sets, a per-machine overhead split, and a picker. Currencies stay unconverted | M |
-| Annual volume and tooling amortisation | A one-off batch charge on a stage | A lifetime or annual quantity, tooling per unit, and a quotation line | S–M |
+| Annual volume and tooling amortisation | A one-off batch charge on a stage | **Done (Iteration 6)** for a stage's pattern/die charge: `amortisation_quantity`, engineer-entered. The rate set's top-level tooling charge is not amortised | — |
 | DFM issues highlighted on the 3D model | DFM flags with cited thresholds, and feature selection in the viewer | **Partly done (Iteration 5):** a flag marks its features with a pointer; face-level highlighting still needs per-face ids | L for faces |
 | Cost hotspots on the 3D model | None. There is no per-operation cost by design | Per-operation cost, which conflicts with the plan-level cost preview | L |
 | Bulk costing, BOM and reports | CSV bulk preview (never stored) and assembly roll-up | Persisted bulk runs behind a review gate, plus export | M |
@@ -62,7 +62,7 @@ sheet unfolding.
 | Nesting and utilisation | Sheet candidate detection only | A rectangular nesting estimate with an override | M |
 | Weld time from length × passes / travel speed × arc factor | **Same formula**, with welds the engineer types in | Passes already come from size / size-per-pass. Travel speed by throat size and filler is still open | S |
 | Weld repositioning, clamping and robotic programming time | None | **Done (Iteration 5)** for reposition and clamp/tack per weld; no robotic programming (no robot input) | — |
-| Weld prep, grind and clean-up from weld length | Per-piece stage rates | Derive them from the typed weld length (cut speed, cuts per groove type) | S–M |
+| Weld prep, grind and clean-up from weld length | Per-piece stage rates | **Done (Iteration 6):** butt-weld prep and finishing rates per mm of weld, each charged once against the fit-up / weld-finishing stages | — |
 | Weld auto-detection from contact regions | Manual entry | Contact analysis between assembly components | L |
 | Mechanical assembly: screw, rivet, press-fit standard times | None. An assembly total carries no labour | A fastener-operation catalogue the engineer assigns (aPriori also assigns these by hand) | M |
 | Tube and bar fabrication: saw, tube laser, bending | Bar-stock proposal only | Profile detection, plus cut and bend counts | M–L |
@@ -73,7 +73,7 @@ sheet unfolding.
 | aPriori capability | What we have | What we'd need | Effort |
 |---|---|---|---|
 | Poured mass = machined mass + waste + bad parts + loss, all overridable | Per-kg rate × the finished CAD mass, or a mass the engineer types in | **Done (Iteration 5):** `yield_percent` on the material-supplying per-kg stage, engineer-entered, no default | — |
-| Cavities and setup amortised over the batch | A one-off batch charge | A cavity-count input and amortisation over batch size | S–M |
+| Cavities and setup amortised over the batch | A one-off batch charge | Amortisation done (Iteration 6). A cavity count is not added: flat stage rates have no cycle for it to act on, so it needs a moulding cycle model (L) | L |
 | Melt, pour and cool steps priced by mass, energy and time | One per-kg rate | Per-step rates. Cooling time needs wall thickness | M |
 | Forging: flash, press force, tooling per die station, billet | A per-kg stage plus a batch charge | Projected area along a parting direction and a flash allowance | M |
 | Cooling time from maximum wall thickness | None | A wall-thickness measurement | L |
@@ -94,9 +94,10 @@ decision, not a gap to close by default:
 
 ## Recommended next iterations, smallest first
 
-All four items below were built in Iteration 5 (see `PROJECT_STATUS.md`). The next smallest open
-rows are tooling amortisation over a lifetime quantity (S–M), a cost-driver table read from the
-stored result (S), cavity count on a stage (S–M), and weld prep/grind from weld length (S–M).
+All four items below were built in Iteration 5, and tooling amortisation, the cost-driver table
+and weld prep/finishing in Iteration 6 (see `PROJECT_STATUS.md`). What remains is mostly M–L:
+new geometric measurement (wall thickness, draw direction, tool access, sheet unfolding),
+per-region factory data, CO2e, and roles/approvals.
 
 1. **Casting/forging yield on per-kg stages (S).** One editable, labelled field. It closes a real
    under-costing gap: casting is charged on finished mass with no gating or loss. Planning for this is
