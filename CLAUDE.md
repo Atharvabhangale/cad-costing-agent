@@ -18,7 +18,7 @@ uvicorn cad_costing_agent.main:app --reload
 # whatever it is pointed at.
 CAD_COSTING_DATABASE_URL=sqlite:///./scratch.db uvicorn cad_costing_agent.main:app --port 8710
 
-# Tests (2324 collected; measured without cadmodels/: 2316 pass, 8 skip; full run about 2-12 min)
+# Tests (2499 collected; measured without cadmodels/: 2491 pass, 8 skip; full run about 2.5-12 min)
 # cadquery-ocp must stay below 8 (pinned): 8.x drops names this code imports.
 # A git worktree has no cadmodels/ (git-ignored), so tests needing real models
 # skip there (8 skips instead of 1). Judge a branch by a run in the main tree.
@@ -465,7 +465,8 @@ checks recognized features against a versioned, immutable `DfmProfile` (table
 reach a plan, a time or a cost.
 
 - **A rule needs a measured input.** Never add one for a quantity no recognizer measures
-  (wall thickness, pocket corner radius). A feature missing the dimension is not checked; a
+  (pocket corner radius). Wall thickness is now measured (`features/wall_thickness.py`) and
+  feeds exactly one rule, `dfm_min_wall`. A feature missing the dimension is not checked; a
   rule absent from a profile is reported as not evaluated.
 - **A threshold cites a source or says none was found** (`no_published_source_found_illustrative`).
   Publishing one marked published without a title and URL is refused (422). Never present
@@ -479,6 +480,42 @@ reach a plan, a time or a cost.
   drawn without depth testing, not a face highlight; never describe it as one.
 - Adding a seeded catalog changes `init_db`'s return count and the head revision: update
   `test_persistence`, `test_migrations`, `test_cost_actuals` and `test_money`'s helper.
+
+### Geometry measured for Iteration 7: walls, approach directions, sheet
+
+Analytic B-Rep only, all three — faceted STEP, STL and IGES surface models are refused with
+the reason. Each reads the shape through the single STEP/IGES readers.
+
+- **A wall is measured, never inferred, and the minimum is the thinnest *found*.**
+  `features/wall_thickness.py` (rays along inward normals, fixed 5x5 grid per face) imports
+  `limits`, `features.model` and `features.topology` only; only `main.py` imports it, and
+  `dfm.py` receives a plain `WallEvidence`, never the module. The true minimum can only be
+  thinner; `limitations` travels with every result. A DFM flag may carry a `marker` instead of
+  `feature_ids` — draw it with the viewer marker, never through `selectFeatures`. Adding a rule
+  means a new DFM profile version in `SEED_DFM_PROFILES`; never edit 1.0.0 or 1.1.0.
+- **An approach grouping is offered, never applied by default.** `features/approach.py` reads
+  directions and casts rays and imports no plan or costing; `setup_proposal.py` groups and
+  applies and only `main.py` imports it. Apply is recomputed on the server and goes through
+  `with_operation_in_setup` — never write `system_setup_id`. New setups carry
+  `system_grouping="approach_direction"` and an *uncommitted* estimate. Never place an
+  operation without evidence; confidence is medium at most (a validator enforces it). A ray is
+  not a tool: never present "reachable" as proof of access. Flank coverage of a planar face is
+  only along directions some feature already needs, so it never creates a setup of its own.
+- **K is the engineer's.** `/cad/sheet-metal`'s `k_factor` (0 < K <= 0.5) has no default;
+  without it `flat_pattern` is null and `needs_input` is `["k_factor"]`. `features/sheet_metal.py`
+  imports only `features.topology`; what sheet cannot make is handed in from `main.py`
+  (`sheet_excluding_features`), never copied, and its 10% thinness ratio equals the classifier's
+  (a test holds it). A flat pattern is claimed only when the outline's area and perimeter agree
+  with flange area + sum(BA x L); anything else is `unsupported` with a reason. A cutting speed
+  is never extrapolated past the profile's table.
+- **Cut and bend lines come from the measurement, never auto-accepted.** `sheet_operations.py`
+  (read only by `main.py`) gives them fixed ids (`OP-SHEET-CUT`, `OP-SHEET-BEND`) so measuring
+  again replaces them. `sheet_cutting` and `bending` are timeable stages; `plan.js`'s
+  `TIMED_STAGE_PROCESSES` mirrors all five timeable stages and `TIMED_STAGE_WORK` holds display
+  words only. The blank is reported, not charged — material is still the finished CAD mass.
+- `sheet.js` declares no global functions (an IIFE) and wraps `renderProcessClassification` /
+  `resetFeaturesPanel` the way `dfm.js` does. The time-setup editor must round-trip
+  `sheet_cutting_table`.
 
 ### A cost-driver table reads one estimate; it never ranks
 
@@ -769,7 +806,7 @@ features — the status that path has always returned).
 
 ### Resource budgets
 
-`limits.py` holds nine separately configurable budgets (the ninth is the matrix preview's cell cap) (`CAD_COSTING_MAX_*`) because they answer
+`limits.py` holds ten separately configurable budgets (the ninth is the matrix preview's cell cap, the tenth `CAD_COSTING_MAX_WALL_RAYS`) (`CAD_COSTING_MAX_*`) because they answer
 different questions, plus one threshold that is not a budget at all —
 `CAD_COSTING_MIN_FEEDBACK_SAMPLE`, the observation count below which the analytics prints a sentence
 instead of a number. The module docstring lists seven of the nine; if you add one, list it there. The ordering that matters: **a model too complex to draw or
@@ -799,6 +836,7 @@ actuals.js    actual costs and their variance, in the History detail
 routecompare.js  route comparison table in the route card; "Use this route"
               goes through /cad/process/decide
 drivers.js    the cost-driver table (Cost section, History detail, roll-up card)
+sheet.js      the sheet-metal card (Manufacturing): K, bends, flat pattern, cut/bend lines
 matrix.js     the Matrix preview disclosure in the Cost section; shows the server's grid
 bulk.js       the Bulk preview tab; shows the server's rows and CSV
 dfm.js        the advisory DFM panel in the CAD section

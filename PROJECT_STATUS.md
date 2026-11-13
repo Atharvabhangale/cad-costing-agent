@@ -1,11 +1,17 @@
 # Project Status
 
-Last updated: 2026-11-13 (Iteration 6 — tool life, cost drivers, weld prep and finishing, tacking charged once)
+Last updated: 2026-11-13 (Iteration 7 — wall thickness, setups from tool access, sheet-metal unfolding)
 
 `CHECKPOINT.md` is a point-in-time handoff written at the Step 30 pause and is not
 updated in place; this file is the step-by-step record.
 
 ## Current stage
+
+**Iteration 7: the first three *large* gaps from `APRIORI_GAP_ANALYSIS.md` — each needed new
+geometric measurement on the exact B-Rep** — measured wall thickness (and a minimum-wall DFM rule),
+setups proposed from tool approach directions with a ray access check, and sheet-metal unfolding
+with cut and bend times priceable by time. Built by three agents, reviewed and merged. Details in
+*Iteration 7* below.
 
 **Iteration 6: three more gaps from `APRIORI_GAP_ANALYSIS.md`, built by three agents, reviewed
 and merged** — a stage's pattern/die charge amortised over a tool life the engineer states, a
@@ -867,6 +873,84 @@ all. One test added. Suite: **1,760 passing**, 1 skipped.
   assertions that pinned the old numbering. Suite: 1,716 to **1,721 passing**
   (1,722 collected, 1 skipped). One file added, `static/estimateflow.js`. **No
   Python file changed, no endpoint, no schema, no migration.**
+
+### Iteration 7 — wall thickness, setups from tool access, sheet-metal unfolding
+
+Three agents, each in its own worktree from the pushed branch, reviewed and merged into
+`timed-welding`. Two merges conflicted only because each agent appended a section to the end of
+`main.py`; the file was rebuilt as the sections in sequence, after confirming neither branch
+changed anything else there except one message wording. Full suite on the merged code: **2491
+passed, 8 skipped** in about 2.5 min (Linux, Python 3.13, no `cadmodels/`). The merged app was
+started on a scratch database and the new endpoints exercised together on generated fixtures:
+the sheet analysis of an L-bracket gave t = 2.0 mm and a 251.94 mm cut perimeter at K = 0.4, the
+independent wall measurement of the same part also gave 2.0 mm, `/cad/dfm` ran five rules, and
+the page loaded with every new panel and no script error. The numbers below were observed by each
+agent against a running server on a scratch database before the merge. **No real model was
+measured**: `cadmodels/` is absent from this environment, so all three were verified on generated
+fixtures only.
+
+**Measured wall thickness.** `features/wall_thickness.py` casts a ray along each face's inward
+normal from a fixed 5x5 grid on every face of every exact B-Rep solid; the wall at a point is the
+distance to the face the ray leaves through. Exact for parallel planes and coaxial cylinders:
+fixtures measured 2.0 (pocket floor), 3.0 (tube), 10.0 (plate) and 0.6 mm (rib), each the known
+value. Every response carries its limits: the minimum is the thinnest wall *found* — the true one
+can only be thinner (an over-budget 906-face part sampled at 4x4 reported 3.64 mm against a real
+2.0, with the budget note) — and a tapering wall reads thick. Faceted STEP, STL and IGES surface
+models are refused. `CAD_COSTING_MAX_WALL_RAYS` (20,000) coarsens the grid and says so; a 406-face
+part measured in 1.4 s. `POST /cad/wall-thickness` is read-only. Its one consumer is the DFM rule
+`dfm_min_wall` in a new seeded profile version, `dfm-general-guidelines` 1.1.0 (1.0.0 unchanged;
+fresh and existing databases checked identical): 0.8 mm, quoted from the same CNC guide 1.0.0
+cites — the quote was re-fetched and confirmed during review. It is the guide's *metal* figure
+applied to every material, because a profile has no material; the guide gives 1.5 mm for
+plastics, which a plastics shop must publish as its own version. The flag names no feature and
+carries a marker the viewer draws on the thinnest wall. Wall thickness feeds no cost, time, route
+or sheet detection yet.
+
+**Setups proposed from tool approach directions.** `features/approach.py` reads from the B-Rep
+which way a tool must approach each milled or drilled feature — a blind hole out through its open
+end, a through hole either end, a pocket's floor normal, a face's outward normal, a blend's
+blended planes, and a planar face's side by the tool's flank along a direction another feature
+already needs — and checks each direction with straight rays (5 per hole end, a 3x3 grid per face)
+that must all leave the part. `setup_proposal.py` groups operations by a deterministic greedy
+cover, one setup per direction on a 3-axis mill, said not to be guaranteed minimal. **Nothing is
+applied by default**: `build_plan` still starts with one assumed setup, `POST /cad/setups/propose`
+returns the proposal beside the plan, and `POST /cad/setups/apply-proposal` recomputes it on the
+server and regroups through the existing `with_operation_in_setup` (`user_setup_id` written,
+`system_setup_id` untouched); new setups carry `system_grouping: "approach_direction"` and an
+uncommitted baseline estimate. Unreachable or rule-less operations are listed and left where they
+were; confidence is medium at most, low when anything is unplaced. Live: holes on top and one side
+gave +Z and +X setups; with both 10-minute estimates accepted the operations went from 360.65 to
+660.65, exactly one extra setup at 10 min x 1,800/h. An overhung bracket reported "+Z: 5 of 5
+ray(s) hit material, the nearest 29.990 mm away" and used -Z. Limits stated on every proposal: a
+ray is not a tool (no holder or shank collision, tool length, undercut or fixture check). Because
+the cover minimises setups it leans on flank milling — an irregular bracket's +X setup side-mills
+about 8 faces — and the suggested plan faces the bottom of every block, so "holes on top only"
+proposes two setups. Applying counts in the feedback as the engineer moving those operations.
+
+**Sheet-metal flat pattern, cut and bend times.** `features/sheet_metal.py` decides from the
+exact B-Rep whether a part is a constant-thickness sheet (opposite skins at one t, coaxial r / r+t
+bend cylinders, every other face square through t, volume equal to t x the unfolded area within
+0.1%), reports each bend and unfolds the flange tree with BA = θ(r + K·t). **K is the engineer's**,
+a request field on `POST /cad/sheet-metal` (0 < K <= 0.5) with no default; without it the flat
+pattern is null and `needs_input` is `["k_factor"]`. Cut perimeter, contours and pierces come from
+the unfolded outline, and a flat pattern is claimed only when its area and perimeter (Green's
+theorem over the exact lines and arcs) agree with the flanges plus bend allowances. Hems, closed
+rings of bends, sharp corners and cut-outs across bends are reported unsupported, never
+approximated. Seven fixtures matched the hand flat size, perimeter and pierces to 1e-5 (e.g. an
+L-bracket 40 x 85.969 mm, perimeter 251.938 mm, 1 pierce). Sheet cutting (perimeter / table speed
++ pierces x pierce time, interpolated in the table, never extrapolated) and bending (bends x time
++ repositioning) join the time model, all None by default, with an illustrative profile
+`illustrative-sheet-2026` (estimates, no published source). `sheet_cutting` and `bending` are now
+timeable stages; `POST /operations/sheet-metal-lines` proposes unaccepted cut and bend lines from
+the measurement, each in its own setup. Live: L-bracket x 10, both stages timed: cut 422.50, bend
+410.00, deburring by stage rate 60.00, total 892.93 — the same in the API, the browser and the hand
+calculation. Material is still the finished part's CAD mass: the blank is reported, not charged,
+and there is no nesting or utilisation.
+
+**Debt this iteration left.** Three paths now obtain "the exact shape plus its recognized
+features" — `recognize_features_with_shape` (walls), `features.approach.shape_and_features`
+(setups) and `analyse_sheet_metal_from_bytes` (sheet). Each calls the single STEP/IGES readers, so
+none is a second parser, but they repeat the faceted/IGES gating and should become one function.
 
 ### Iteration 6 — tool life, cost drivers, weld prep and finishing (built in parallel)
 
@@ -2419,7 +2503,7 @@ a fault of the comparison. It is the kind of gap this feature exists to expose.
 - Importing actual costs from a file. Each is entered through the History panel or the API
 - Adjusting a variance for a difference in batch size. It is reported as a warning only
 - Matching an actual's client part number or drawing revision to anything. They are stored as entered
-- Fixture recognition. The system cannot tell from geometry whether two operations can share a fixturing; it groups conservatively, says so at low confidence, and leaves the decision to the engineer
+- Fixture recognition. The system cannot tell from geometry whether two operations can share a fixturing; it groups conservatively, says so at low confidence, and leaves the decision to the engineer. Since Iteration 7 it can *propose* a grouping by tool approach direction, checked only with straight rays, which the engineer applies or ignores
 - A training pipeline. Step 20 *persists* the prediction/decision pairs an eventual learning loop would need, but nothing reads them back, aggregates them, or learns from them
 - Face-level highlighting in the 3D viewer. A selected feature is marked with a point and its axis; lighting up its exact faces needs a per-face id the wire mesh does not carry
 - AI/agent components

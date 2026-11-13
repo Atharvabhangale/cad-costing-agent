@@ -41,7 +41,7 @@ sheet unfolding.
 
 | aPriori capability | What we have | What we'd need | Effort |
 |---|---|---|---|
-| Setup count from tool access (setup-axis GCDs, capped at 4 setups on a 3-axis mill) | One assumed setup that the engineer regroups | Per-face approach directions and an obstruction test on the B-Rep | L |
+| Setup count from tool access (setup-axis GCDs, capped at 4 setups on a 3-axis mill) | **Done (Iteration 7):** approach directions + straight-ray access check, a proposed grouping the engineer applies | Tool-body collision, 4/5-axis | L |
 | Tolerance and roughness add finish passes or secondary operations | No tolerance input | A tolerance/Ra field per feature, a process-capability table and finish-pass logic | M |
 | Threads | None | A thread recognizer and a tap/thread-mill time rule | M |
 | Prismatic stock (bar or plate) with per-face allowances and utilisation | Bar-stock proposal for turned parts | Bounding-box stock, per-face allowances, utilisation and a saw operation | M |
@@ -56,8 +56,8 @@ sheet unfolding.
 
 | aPriori capability | What we have | What we'd need | Effort |
 |---|---|---|---|
-| Laser/plasma cut time from cut perimeter, pierces and thickness | A flat per-piece cutting rate | Flattening, blank and hole perimeters, and a cut-rate table by thickness | L |
-| Bend-brake cycle: bends × (bend time + handling by mass) | A flat per-piece bending rate | Bend detection and unfolding | L |
+| Laser/plasma cut time from cut perimeter, pierces and thickness | **Done (Iteration 7):** unfolding (K entered), cut perimeter, pierces, a cut-speed table by thickness, priceable by time | Nesting; hems/jogs | — |
+| Bend-brake cycle: bends × (bend time + handling by mass) | **Done (Iteration 7):** bend count from the B-Rep, bends × time + repositioning, priceable by time | Handling by part mass | — |
 | Turret hits, nibbling and tooling | None | Hole and edge geometry and a tool library | L |
 | Nesting and utilisation | Sheet candidate detection only | A rectangular nesting estimate with an override | M |
 | Weld time from length × passes / travel speed × arc factor | **Same formula**, with welds the engineer types in | Passes already come from size / size-per-pass. Travel speed by throat size and filler is still open | S |
@@ -76,9 +76,9 @@ sheet unfolding.
 | Cavities and setup amortised over the batch | A one-off batch charge | Amortisation done (Iteration 6). A cavity count is not added: flat stage rates have no cycle for it to act on, so it needs a moulding cycle model (L) | L |
 | Melt, pour and cool steps priced by mass, energy and time | One per-kg rate | Per-step rates. Cooling time needs wall thickness | M |
 | Forging: flash, press force, tooling per die station, billet | A per-kg stage plus a batch charge | Projected area along a parting direction and a flash allowance | M |
-| Cooling time from maximum wall thickness | None | A wall-thickness measurement | L |
+| Cooling time from maximum wall thickness | Wall thickness is measured (Iteration 7) | A cooling-time model and material properties that use it | M |
 | Core making for features hidden from the draw direction | None | Draw-direction computation | L |
-| Draft, undercut and minimum-wall DFM | Hole and fillet DFM rules only | Draw direction and face-normal draft | M–L |
+| Draft, undercut and minimum-wall DFM | Minimum-wall rule done (Iteration 7) | Draw direction and face-normal draft, undercuts | M–L |
 | Machining after casting or forging | Done: as-formed defaults with an engineer override | — | — |
 
 ## Policy conflicts
@@ -95,9 +95,10 @@ decision, not a gap to close by default:
 ## Recommended next iterations, smallest first
 
 All four items below were built in Iteration 5, and tooling amortisation, the cost-driver table
-and weld prep/finishing in Iteration 6 (see `PROJECT_STATUS.md`). What remains is mostly M–L:
-new geometric measurement (wall thickness, draw direction, tool access, sheet unfolding),
-per-region factory data, CO2e, and roles/approvals.
+and weld prep/finishing in Iteration 6 (see `PROJECT_STATUS.md`). Iteration 7 added wall thickness, setups from
+tool access and sheet unfolding. What remains: draw/parting direction (draft, undercut, cores),
+casting/moulding cycle models that use the measured wall, nesting, per-region factory data, CO2e,
+and roles/approvals.
 
 1. **Casting/forging yield on per-kg stages (S).** One editable, labelled field. It closes a real
    under-costing gap: casting is charged on finished mass with no gating or loss. Planning for this is
