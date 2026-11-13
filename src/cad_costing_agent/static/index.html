@@ -250,6 +250,9 @@
           <div id="dfm-body" class="hidden">
             <p id="dfm-profile-line" class="muted"></p>
             <p id="dfm-disclaimer" class="provenance"></p>
+            <!-- The measured wall thickness the thin-wall rule read, exactly as the
+                 server reported it, with its method and what it can miss. -->
+            <div id="dfm-wall" class="dfm-wall hidden"></div>
             <div id="dfm-marking" class="dfm-marking hidden">
               <div class="dfm-marking-controls">
                 <button type="button" id="dfm-show-all" class="secondary tiny">Show all flagged features</button>
@@ -261,6 +264,8 @@
                 A marker is a point at the feature's recognized location, with a line along its axis where it has one.
                 It points at the feature; it does not outline the feature's faces. A flag marker is drawn over the part,
                 because a through hole's location is on the far face and a slot's is on its floor.
+                A thin-wall flag names no feature: its marker sits halfway through the thinnest wall measured,
+                with its line across the wall.
               </p>
               <p id="dfm-marked" class="hint" role="status" aria-live="polite"></p>
             </div>

@@ -4476,7 +4476,8 @@ async def cad_dfm(
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     _import(data, file.filename or "", CAPABILITY_FEATURES, with_geometry=False)
     try:
-        recognition = recognize_features_from_bytes(data, file.filename or "")
+        # The shape is kept so the minimum-wall rule measures the B-Rep recognition read.
+        recognized = recognize_features_with_shape(data, file.filename or "")
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except Exception as exc:  # noqa: BLE001 - a bad model must not take the app down
@@ -4487,7 +4488,10 @@ async def cad_dfm(
                 f"({type(exc).__name__}). DFM flags are unavailable; costing is unaffected."
             ),
         ) from exc
-    report = evaluate_dfm(recognition.features, profile, file.filename or "")
+    recognition = recognized.recognition
+    # Walls are measured only when the profile has a rule that reads them.
+    wall = _wall_evidence(recognized, file.filename or "") if _profile_reads_walls(profile) else None
+    report = evaluate_dfm(recognition.features, profile, file.filename or "", wall=wall)
     report.warnings.extend(recognition.warnings)
     return report
 
@@ -4513,3 +4517,120 @@ def estimate_cost_drivers(
     except ValueError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     return cost_drivers.cost_drivers(stored.estimate_id, stored.result_snapshot)
+
+
+# ------------------------------------------------------------- wall thickness
+#
+# The measured wall thickness of an exact B-Rep (`features.wall_thickness`), and
+# the one place it becomes the minimum-wall DFM rule's evidence. Analysis only:
+# nothing here reaches a mass, a time, a route or a cost, and nothing is stored.
+# The shape measured is the one recognition read (`recognize_features_with_shape`),
+# so the file is parsed once, by the one reader, and the same representation
+# decides what can be measured. A faceted export, an STL or an IGES surface
+# model is refused with its reason; over the ray budget the measurement degrades
+# and says so, and an estimate is never touched.
+
+from cad_costing_agent.dfm import RuleId, WallEvidence  # noqa: E402
+from cad_costing_agent.features import (  # noqa: E402
+    RecognizedShape,
+    recognize_features_with_shape,
+)
+from cad_costing_agent.features import wall_thickness  # noqa: E402
+
+
+def _measure_walls(recognized: RecognizedShape, filename: str) -> wall_thickness.WallThicknessResult:
+    """The one path from a recognized upload to its wall measurement."""
+    reason = wall_thickness.refusal_reason(
+        recognized.recognition.representation, recognized.shape is not None
+    )
+    if reason is not None:
+        return wall_thickness.not_measured(reason, filename=filename)
+    return wall_thickness.measure_wall_thickness(recognized.shape, filename=filename)
+
+
+def _profile_reads_walls(profile: DfmProfile) -> bool:
+    return profile.setting(RuleId.MIN_WALL) is not None
+
+
+def _wall_evidence(recognized: RecognizedShape, filename: str) -> WallEvidence:
+    """The measurement as the DFM rule's plain carrier, copied field by field."""
+    try:
+        result = _measure_walls(recognized, filename)
+    except Exception as exc:  # noqa: BLE001 - a failed measurement skips one rule, no more
+        return WallEvidence(
+            measured=False,
+            not_measured_reason=(
+                f"Wall-thickness measurement failed on this model ({type(exc).__name__})."
+            ),
+        )
+    minimum = result.minimum
+    return WallEvidence(
+        measured=result.measured,
+        not_measured_reason=result.not_measured_reason,
+        minimum_mm=minimum.thickness_mm if minimum else None,
+        from_face=minimum.from_face if minimum else None,
+        to_face=minimum.to_face if minimum else None,
+        location=minimum.midpoint if minimum else None,
+        direction=minimum.direction if minimum else None,
+        face_minima=[
+            (face.face_id, face.minimum_mm) for face in result.faces if face.minimum_mm is not None
+        ],
+        method=result.method,
+        method_description=result.method_description,
+        limitations=list(result.limitations),
+        grid_side=result.grid_side,
+        budget_limited=result.budget_limited,
+        budget_note=result.budget_note,
+    )
+
+
+@app.post("/cad/wall-thickness", response_model=wall_thickness.WallThicknessResult)
+async def cad_wall_thickness(file: UploadFile = File(...)) -> wall_thickness.WallThicknessResult:
+    """Measure the walls of an uploaded exact B-Rep part: the thinnest found, per face, and a
+    fixed-bin distribution, with the method and what it can miss.
+
+    Read-only analysis. Changes no cost, time, route or suggestion and persists
+    nothing. Refused (400) for geometry it cannot measure honestly — a faceted
+    export, an STL, an IGES surface model — with the reason.
+    """
+    data = await file.read()
+    if len(data) > MAX_UPLOAD_BYTES:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"CAD file is {len(data) / 1024 / 1024:.1f} MB, above the "
+                f"{MAX_UPLOAD_BYTES // 1024 // 1024} MB limit for this POC."
+            ),
+        )
+    filename = file.filename or ""
+    # The same capability as recognition: walls are measured on the shape it reads.
+    _import(data, filename, CAPABILITY_FEATURES, with_geometry=False)
+    try:
+        recognized = recognize_features_with_shape(data, filename)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:  # noqa: BLE001 - a bad model must not take the app down
+        raise HTTPException(
+            status_code=500,
+            detail=(
+                f"This model could not be read for analysis ({type(exc).__name__}). "
+                "Geometry, the 3D preview and costing are unaffected."
+            ),
+        ) from exc
+    reason = wall_thickness.refusal_reason(
+        recognized.recognition.representation, recognized.shape is not None
+    )
+    if reason is not None:
+        raise HTTPException(status_code=400, detail=reason)
+    try:
+        # Over budget, or with no solid, this still answers 200 with `measured` false and
+        # the reason: the file is fine, this one analysis is what degraded.
+        return _measure_walls(recognized, filename)
+    except Exception as exc:  # noqa: BLE001 - a bad model must not take the app down
+        raise HTTPException(
+            status_code=500,
+            detail=(
+                f"Wall-thickness measurement failed unexpectedly on this model "
+                f"({type(exc).__name__}). Geometry, the 3D preview and costing are unaffected."
+            ),
+        ) from exc

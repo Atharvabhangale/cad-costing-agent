@@ -26,6 +26,7 @@ conditions that were checked, and the same file always produces the same list.
 from __future__ import annotations
 
 import time
+from dataclasses import dataclass
 from pathlib import Path
 
 from cad_costing_agent import limits
@@ -342,7 +343,7 @@ NO_SOLID_WARNING = (
 )
 
 
-def _recognize_iges_features(data: bytes, filename: str) -> FeatureRecognitionResult:
+def _recognize_iges_features(data: bytes, filename: str) -> "RecognizedShape":
     """Recognize features in an IGES file, from the shape that was measured.
 
     Recognition runs on whatever `analyse_iges_shape` established: the solid,
@@ -377,22 +378,28 @@ def _recognize_iges_features(data: bytes, filename: str) -> FeatureRecognitionRe
     # surfaces, and the warning goes first — whether or not sewing managed to
     # close them, because closing them does not bring a cylinder back.
     if not topology.sewing_applied:
-        return result.model_copy(
-            update={
-                "representation": "brep",
-                "warnings": list(result.warnings) + list(topology.notes),
-            }
+        return RecognizedShape(
+            result.model_copy(
+                update={
+                    "representation": "brep",
+                    "warnings": list(result.warnings) + list(topology.notes),
+                }
+            ),
+            topology.shape,
         )
 
     warnings = [SURFACE_MODEL_WARNING]
     if not topology.is_solid:
         warnings.append(NO_SOLID_WARNING)
 
-    return result.model_copy(
-        update={
-            "representation": "surface_model",
-            "warnings": warnings + list(result.warnings) + list(topology.notes),
-        }
+    return RecognizedShape(
+        result.model_copy(
+            update={
+                "representation": "surface_model",
+                "warnings": warnings + list(result.warnings) + list(topology.notes),
+            }
+        ),
+        topology.shape,
     )
 
 
@@ -441,8 +448,27 @@ def recognize_component_features(
     )
 
 
+@dataclass(frozen=True)
+class RecognizedShape:
+    """A recognition result and the exact B-Rep it was recognized from.
+
+    For an analysis that must run on the same shape recognition read (wall
+    thickness), so the file is parsed once and by the one reader. `shape` is
+    None when no exact B-Rep was read: a faceted export is reconstructed from
+    polygons instead.
+    """
+
+    recognition: FeatureRecognitionResult
+    shape: object | None
+
+
 def recognize_features_from_bytes(data: bytes, filename: str) -> FeatureRecognitionResult:
-    """Recognize features in an uploaded STEP or IGES file.
+    """Recognize features in an uploaded STEP or IGES file (see `recognize_features_with_shape`)."""
+    return recognize_features_with_shape(data, filename).recognition
+
+
+def recognize_features_with_shape(data: bytes, filename: str) -> RecognizedShape:
+    """Recognize features in an uploaded STEP or IGES file, keeping the shape read.
 
     A STEP file is classified before anything heavy is attempted, because what
     it contains decides which rules can apply — and because a 200 MB export
@@ -478,7 +504,7 @@ def recognize_features_from_bytes(data: bytes, filename: str) -> FeatureRecognit
     representation = classify_step_bytes(data)
 
     if representation.is_faceted:
-        return recognize_faceted_features(data, filename, representation)
+        return RecognizedShape(recognize_faceted_features(data, filename, representation), None)
 
     if representation.representation == WIREFRAME:
         raise ValueError(
@@ -491,16 +517,18 @@ def recognize_features_from_bytes(data: bytes, filename: str) -> FeatureRecognit
     # that than a keyword count can.
 
     shape = read_step_shape(data)
-    return recognize_features(shape, filename=filename, source_format="step")
+    return RecognizedShape(recognize_features(shape, filename=filename, source_format="step"), shape)
 
 
 __all__ = [
     "FeatureRecognitionResult",
     "MAX_FACES",
     "NO_SOLID_WARNING",
+    "RecognizedShape",
     "SURFACE_MODEL_WARNING",
     "describe_feature",
     "recognize_component_features",
     "recognize_features",
     "recognize_features_from_bytes",
+    "recognize_features_with_shape",
 ]

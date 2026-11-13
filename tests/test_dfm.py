@@ -141,7 +141,8 @@ def test_a_rule_absent_from_a_profile_is_reported_as_not_evaluated():
     )
     report = evaluate_dfm([_hole("H-001", 5, 30)], profile)
     skipped = [r for r in report.rules if not r.evaluated]
-    assert len(skipped) == 3 and all(r.skipped_reason for r in skipped)
+    # Every rule but the one the profile sets (the minimum-wall rule joined RuleId in 1.1.0).
+    assert len(skipped) == len(RuleId) - 1 and all(r.skipped_reason for r in skipped)
 
 
 def test_evaluation_is_deterministic():
@@ -191,7 +192,9 @@ def test_the_summary_says_exceeded_and_never_calls_an_unmeasured_part_clean():
     assert "none exceeded its threshold" in clean["summary"]
     assert "passed" not in clean["summary"]
 
-    nothing = _dfm(step_fixtures.plain_block()).json()
+    # Pinned to 1.0.0, which has no wall rule: under 1.1.0 the plain block's walls are
+    # measured, so the block is no longer a part with nothing measurable.
+    nothing = _dfm(step_fixtures.plain_block(), dfm_profile_version="1.0.0").json()
     assert nothing["measurements_checked"] == 0
     assert "not a clean bill of health" in nothing["summary"]
     assert {rule["label"] for rule in nothing["rules"]} == {
@@ -199,6 +202,7 @@ def test_the_summary_says_exceeded_and_never_calls_an_unmeasured_part_clean():
         "Deep, narrow pockets or slots",
         "Small internal radii",
         "Many different hole sizes",
+        "Thin walls",
     }
 
 
@@ -230,7 +234,10 @@ def _new_version(version: str, deep_hole: float, rule_overrides=None) -> dict:
 
 def test_profiles_are_listed_and_fetchable_with_sources():
     listing = client.get("/dfm-profiles").json()
-    assert [(p["dfm_profile_id"], p["version"]) for p in listing] == [(DEFAULT_DFM_PROFILE_ID, "1.0.0")]
+    assert [(p["dfm_profile_id"], p["version"]) for p in listing] == [
+        (DEFAULT_DFM_PROFILE_ID, "1.0.0"),
+        (DEFAULT_DFM_PROFILE_ID, "1.1.0"),
+    ]
     detail = client.get(f"/dfm-profiles/{DEFAULT_DFM_PROFILE_ID}").json()
     assert all(r["source_url"] for r in detail["rules"] if r["basis"] == BASIS_PUBLISHED)
     assert client.get("/dfm-profiles/unknown").status_code == 404
@@ -240,11 +247,12 @@ def test_a_new_version_changes_the_flags_and_the_old_version_is_untouched():
     data = _deep_hole_plate()
     assert _dfm(data).json()["flags"]  # ratio 5 > 4 under 1.0.0
 
-    created = client.post(f"/dfm-profiles/{DEFAULT_DFM_PROFILE_ID}/versions", json=_new_version("1.1.0", 6.0))
+    # 1.1.0 is seeded (it adds the minimum-wall rule), so the shop's version is 1.2.0.
+    created = client.post(f"/dfm-profiles/{DEFAULT_DFM_PROFILE_ID}/versions", json=_new_version("1.2.0", 6.0))
     assert created.status_code == 201
 
     latest = _dfm(data).json()  # no version -> latest
-    assert latest["dfm_profile_version"] == "1.1.0"
+    assert latest["dfm_profile_version"] == "1.2.0"
     assert not [f for f in latest["flags"] if f["rule_id"] == "dfm_deep_hole"]
 
     pinned = _dfm(data, dfm_profile_version="1.0.0").json()

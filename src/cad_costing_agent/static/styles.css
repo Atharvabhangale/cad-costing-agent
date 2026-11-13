@@ -790,6 +790,9 @@ table.mini.actual-variance td.num, table.mini.actual-variance th.num { padding-l
 .dfm-swatch-flag { background: #c2185b; transform: rotate(45deg); }
 .dfm-swatch-select { background: #ffa726; border-radius: 50%; }
 #dfm-marked { margin: 0; }
+.dfm-wall { margin: 8px 0 0; padding: 8px 10px; border: 1px solid var(--line); border-radius: 6px; font-size: 13.5px; display: grid; gap: 4px; }
+.dfm-wall ul { margin: 4px 0 0; padding-left: 18px; }
+.dfm-wall p { margin: 4px 0 0; }
 
 /* Route comparison: a stage's mass box stays compact, its source tag inline. */
 .route-compare .route-mass { display: flex; flex-wrap: wrap; align-items: center; gap: 4px; font-size: 12px; margin-top: 4px; }

@@ -11,6 +11,12 @@
 // request and does not depend on the features panel having been analysed. The
 // marking itself is the existing feature selection (`selectFeatures`) and the
 // viewer's marker: a point and an axis line, not the feature's faces.
+//
+// A thin-wall flag names no feature: a wall is a measurement, not a recognized
+// feature. Its `marker` is the measurement's own point (halfway through the
+// thinnest wall found) and direction (across it), drawn by the same viewer
+// marker and never put through the feature selection. The measured wall itself
+// (`report.wall`) is printed as the server wrote it, method and limits included.
 
 (function () {
   // `marked` is what this panel last drew on the model: a flag's index, "all",
@@ -30,7 +36,34 @@
       if (feature && feature.location) drawable.push(feature);
       else undrawable.push(id);
     });
-    return { drawable, undrawable };
+    // A flag raised on a measurement carries its own point instead of feature ids.
+    const markers = flag.marker && flag.marker.location ? [flag.marker] : [];
+    if (!flag.feature_ids.length && !markers.length) undrawable.push("this measurement");
+    return { drawable, undrawable, markers };
+  }
+
+  function dfmMarkersOf(report) {
+    return (report.flags || []).filter((flag) => flag.marker && flag.marker.location).map((flag) => flag.marker);
+  }
+
+  // The measured wall, as the server reported it. Nothing here compares it with anything.
+  function dfmWallMarkup(wall) {
+    if (!wall) return "";
+    if (!wall.measured) {
+      return `<strong>Walls not measured.</strong> ${escapeHtml(wall.not_measured_reason || "")}`;
+    }
+    const limits = (wall.limitations || []).map((line) => `<li>${escapeHtml(line)}</li>`).join("");
+    const budget = wall.budget_note
+      ? `<div class="warning-inline">${escapeHtml(wall.budget_note)}</div>`
+      : "";
+    return `<strong>Thinnest wall measured: ${number(wall.minimum_mm, 3)} mm</strong>
+      <span class="muted">from face ${escapeHtml(String(wall.from_face))} to face ${escapeHtml(String(wall.to_face))},
+      ${escapeHtml(String(wall.face_minima.length))} face(s) measured, a ${escapeHtml(String(wall.grid_side))} x ${escapeHtml(String(wall.grid_side))} grid per face.</span>
+      ${budget}
+      <details class="detail-toggle"><summary>How walls are measured, and what it can miss</summary>
+        <p>${escapeHtml(wall.method_description || "")} <span class="mono">${escapeHtml(wall.method || "")}</span></p>
+        <ul>${limits}</ul>
+      </details>`;
   }
 
   function dfmFlagMarkup(flag, index) {
@@ -39,16 +72,20 @@
       ? `<a href="${escapeHtml(flag.source_url)}" target="_blank" rel="noopener">${escapeHtml(flag.source_title || flag.source_url)}</a>`
       : `<span class="muted">No published source found — illustrative threshold</span>`;
     const comparison = flag.comparison === "less_than" ? "below" : "above";
-    const { drawable, undrawable } = dfmFeaturesOf(flag);
-    const button = drawable.length
+    const { drawable, undrawable, markers } = dfmFeaturesOf(flag);
+    const markable = drawable.length || markers.length;
+    const button = markable
       ? `<button type="button" class="secondary tiny dfm-show" aria-pressed="false">Show on model</button>`
       : "";
-    const scope = drawable.length ? "that part of this flag" : "this flag";
+    const scope = markable ? "that part of this flag" : "this flag";
     const missing = undrawable.length
       ? `<div class="warning-inline dfm-undrawable">No location was recorded for ${escapeHtml(undrawable.join(", "))}, so ${scope} cannot be marked on the model. The flag itself stands.</div>`
       : "";
+    const raisedOn = flag.feature_ids.length
+      ? `Raised on <span class="mono">${escapeHtml(flag.feature_ids.join(", "))}</span>`
+      : `Raised on a measurement, not a recognized feature${markers.length ? `: <span class="mono">${escapeHtml(markers[0].label)}</span>` : ""}`;
     return `
-      <li class="dfm-flag${drawable.length ? " is-markable" : ""}" data-index="${index}">
+      <li class="dfm-flag${markable ? " is-markable" : ""}" data-index="${index}">
         <div><strong>${escapeHtml(flag.rule_id)}</strong>
           <span class="pill">${escapeHtml(flag.evidence_type)}</span></div>
         <div>Measured ${number(flag.measured_value, 2)} ${escapeHtml(flag.measured_unit)},
@@ -57,7 +94,7 @@
         ${faceted ? `<div class="warning-inline">${escapeHtml(flag.evidence_note || "")}</div>` : ""}
         <div class="muted">Profile ${escapeHtml(flag.dfm_profile_id)} v${escapeHtml(flag.dfm_profile_version)} · ${source}</div>
         <div class="dfm-flag-actions">${button}
-          <span class="muted">Raised on <span class="mono">${escapeHtml(flag.feature_ids.join(", "))}</span></span></div>
+          <span class="muted">${raisedOn}</span></div>
         ${missing}
       </li>`;
   }
@@ -85,23 +122,25 @@
     dfmRefreshMarked();
   }
 
-  // Mark the given features through the existing selection, then report what
-  // the viewer actually drew rather than assuming it drew anything.
-  function dfmMark(features, label, key) {
-    if (!features.length) {
+  // Mark the given features through the existing selection, and any measured
+  // point (`markers`) with the same viewer marker but no selection, then report
+  // what the viewer actually drew rather than assuming it drew anything.
+  function dfmMark(features, markers, label, key) {
+    const targets = features.concat(markers);
+    if (!targets.length) {
       dfmUnmark(
         `${label}: no flagged feature has a recorded location, so there is nothing to mark on the model.`
       );
       return;
     }
-    if (typeof selectFeatures === "function") {
+    if (features.length && typeof selectFeatures === "function") {
       selectFeatures(
         features.map((feature) => feature.feature_id),
         { features, flagged: true, label }
       );
     }
     const viewer = window.CadViewer;
-    const drawn = viewer && viewer.markFlaggedFeatures ? viewer.markFlaggedFeatures(features) : 0;
+    const drawn = viewer && viewer.markFlaggedFeatures ? viewer.markFlaggedFeatures(targets) : 0;
     if (!drawn) {
       dfmUnmark(
         "Nothing could be marked: the 3D preview is not showing this model (it may still be " +
@@ -110,11 +149,14 @@
       return;
     }
     state_.marked = key;
-    const names = features.map((feature) => feature.feature_id).join(", ");
+    const names = features
+      .map((feature) => feature.feature_id)
+      .concat(markers.map((marker) => marker.label))
+      .join(", ");
     const shown = viewer.componentState ? viewer.componentState() : null;
     const partial =
-      drawn < features.length
-        ? ` ${features.length} were asked for; the rest could not be drawn.`
+      drawn < targets.length
+        ? ` ${targets.length} were asked for; the rest could not be drawn.`
         : "";
     const exploded =
       shown && shown.explodeFactor
@@ -122,7 +164,7 @@
           "so set the explode slider back to its start to see them on their components."
         : "";
     $("dfm-marked").textContent =
-      `${label}: ${drawn} feature(s) marked with a magenta diamond — ${names}.` + partial + exploded;
+      `${label}: ${drawn} marker(s) drawn with a magenta diamond — ${names}.` + partial + exploded;
     dfmRefreshMarked();
   }
 
@@ -134,6 +176,8 @@
       `Thresholds: ${report.dfm_profile_id} v${report.dfm_profile_version}` +
       (report.profile_is_illustrative ? " (illustrative)" : "");
     $("dfm-disclaimer").textContent = report.disclaimer;
+    $("dfm-wall").innerHTML = dfmWallMarkup(report.wall);
+    $("dfm-wall").classList.toggle("hidden", !report.wall);
     list.innerHTML = report.flags.map(dfmFlagMarkup).join("");
     list.classList.toggle("hidden", !report.flags.length);
     $("dfm-marking").classList.toggle("hidden", !report.flags.length);
@@ -159,12 +203,14 @@
     state_.report = null;
     state_.marked = null;
     $("dfm-flags").innerHTML = "";
+    $("dfm-wall").innerHTML = "";
+    $("dfm-wall").classList.add("hidden");
     $("dfm-marked").textContent = "";
     $("dfm-marking").classList.add("hidden");
     $("dfm-clear-marks").disabled = true;
     $("dfm-body").classList.add("hidden");
     $("dfm-status").textContent =
-      "Check recognized features against general machining guidelines. Advisory only.";
+      "Check recognized features and measured walls against general machining guidelines. Advisory only.";
     const enabled = typeof featuresEnabledFor === "function" && !!state.file && featuresEnabledFor();
     $("dfm-run").disabled = !enabled;
   }
@@ -186,13 +232,14 @@
     const index = Number(row.dataset.index);
     const flag = state_.report.flags[index];
     if (!flag) return;
-    dfmMark(dfmFeaturesOf(flag).drawable, flag.rule_id, index);
+    const { drawable, markers } = dfmFeaturesOf(flag);
+    dfmMark(drawable, markers, flag.rule_id, index);
   });
 
   $("dfm-show-all").addEventListener("click", () => {
     if (!state_.report) return;
     const drawable = (state_.report.flagged_features || []).filter((feature) => feature.location);
-    dfmMark(drawable, "All flags", ALL);
+    dfmMark(drawable, dfmMarkersOf(state_.report), "All flags", ALL);
   });
 
   // Restores the ordinary view: no marker, no selected row, no selection box.
