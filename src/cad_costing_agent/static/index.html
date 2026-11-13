@@ -17,7 +17,9 @@
     <button class="tab" data-tab="setup">Rate sets</button>
     <button class="tab" data-tab="timesetup">Time profiles</button>
     <button class="tab" data-tab="feedback">Engineering</button>
+    <button class="tab hidden" data-tab="audit">Audit</button>
   </nav>
+  <div id="auth-bar" class="auth-bar"></div>
 </header>
 
 <main>
@@ -1140,6 +1142,26 @@
   <div id="compare-result" class="card hidden"></div>
 </section>
 
+<!-- ===================== AUDIT (opt-in access control) ===================== -->
+<!-- Every mutating request, read back from the append-only audit log. Shown to
+     admins with auth on, and to everyone with auth off (where every row says
+     `local`). Nothing on this tab writes. -->
+<section id="tab-audit" class="hidden">
+  <div class="card">
+    <h2>Audit log</h2>
+    <p class="muted" id="audit-mode"></p>
+    <form id="audit-filter" class="history-controls">
+      <input id="audit-target" placeholder="Filter by estimate id, quote number, user id…">
+      <button type="submit" class="secondary">Show</button>
+      <span id="audit-status" class="muted"></span>
+    </form>
+    <table class="history">
+      <thead><tr><th>When</th><th>Actor</th><th>Request</th><th>Target</th><th>Created</th><th>Outcome</th></tr></thead>
+      <tbody id="audit-body"></tbody>
+    </table>
+  </div>
+</section>
+
 <!-- ---------------- feedback and learning (read-only) ---------------- -->
 <!-- Where engineers disagree with the system, read back out of the
      corrections four earlier steps recorded. Nothing on this tab writes:
@@ -1225,6 +1247,7 @@
 </section>
 </main>
 
+<script src="auth.js"></script>
 <script src="app.js"></script>
 <script src="features.js"></script>
 <script src="suggestions.js"></script>
@@ -1238,6 +1261,7 @@
 <script src="assembly.js"></script>
 <script src="feedback.js"></script>
 <script src="actuals.js"></script>
+<script src="approval.js"></script>
 <script src="routecompare.js"></script>
 <script src="matrix.js"></script>
 <script src="bulk.js"></script>

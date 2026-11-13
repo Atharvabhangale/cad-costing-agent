@@ -30,6 +30,14 @@ h1 { font-size: 18px; margin: 0; }
 h2 { font-size: 14px; margin: 0 0 12px; text-transform: uppercase; letter-spacing: .04em; color: var(--muted); }
 nav { display: flex; gap: 8px; align-items: center; }
 nav .nav-sep { width: 1px; height: 20px; background: var(--line); margin: 0 4px; }
+/* opt-in access control: the sign-in bar and the approval state */
+.auth-bar { display: flex; align-items: center; gap: 8px; margin-left: auto; font-size: 13px; color: var(--muted); }
+.auth-bar .auth-form { display: flex; align-items: center; gap: 6px; margin: 0; }
+.auth-bar input { width: 220px; }
+.approval-state { display: inline-block; padding: 2px 8px; border-radius: 10px; border: 1px solid var(--line); font-weight: 600; }
+.approval-approved { border-color: #2e7d32; color: #2e7d32; }
+.approval-rejected { border-color: #b00020; color: #b00020; }
+.approval-actions input { flex: 1; min-width: 200px; }
 main { max-width: 1400px; margin: 24px auto; padding: 0 24px 64px; }
 
 .card { background: var(--card); border: 1px solid var(--line); border-radius: 8px; padding: 16px; }
