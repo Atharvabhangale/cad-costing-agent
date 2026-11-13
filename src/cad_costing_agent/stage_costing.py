@@ -101,10 +101,11 @@ MATERIAL_SUPPLYING_STAGES = frozenset(
 )
 
 # Stages an engineer may choose to price by time instead of by stage rate, and
-# the hourly process type their operations are costed as. Only welding: it is
-# the one stage with a time model (`operation_time`'s weld formula). A timed
-# stage is left out of `price_stages` — its cost comes from its operations —
-# so it can never be charged twice.
+# the hourly process type their operations are costed as: the stages with a
+# time model in `operation_time` — welding (the weld formula), sheet cutting
+# (cut perimeter and pierces from the flat pattern) and bending (the measured
+# bend count). A timed stage is left out of `price_stages` — its cost comes
+# from its operations — so it can never be charged twice.
 #
 # Fit-up (clamping and tacking) and weld finishing (grinding and cleaning) are
 # timed by the same weld operations: each weld's `welding_tack_minutes_per_weld`
@@ -112,7 +113,13 @@ MATERIAL_SUPPLYING_STAGES = frozenset(
 # only together with welding — timing one alone would put the welds' whole
 # time, arc included, beside a welding stage rate. Whether the welds actually
 # carry that time is checked where the plan is costed.
-TIMEABLE_STAGES = {"welding": "welding", "fit_up": "welding", "weld_finishing": "welding"}
+TIMEABLE_STAGES = {
+    "welding": "welding",
+    "fit_up": "welding",
+    "weld_finishing": "welding",
+    "sheet_cutting": "sheet_cutting",
+    "bending": "bending",
+}
 TIMED_ONLY_WITH = {"fit_up": "welding", "weld_finishing": "welding"}
 STAGE_RATE_PRICING = "stage_rate"
 TIMED_PRICING = "timed"
@@ -136,9 +143,9 @@ def timed_stages(stage_input_values: dict, route_stage_ids: list[str]) -> dict[s
             continue
         if stage_id not in TIMEABLE_STAGES:
             raise ValueError(
-                f"Stage '{stage_id}' cannot be priced by time: only welding has a time model "
-                "(fit-up and weld finishing may be timed with it, from each weld's tack and "
-                "finishing time). It is priced from its stage rate."
+                f"Stage '{stage_id}' cannot be priced by time: only welding, sheet cutting and "
+                "bending have a time model (fit-up and weld finishing may be timed with welding, "
+                "from each weld's tack and finishing time). It is priced from its stage rate."
             )
         if stage_id in route_stage_ids:
             timed[stage_id] = TIMEABLE_STAGES[stage_id]

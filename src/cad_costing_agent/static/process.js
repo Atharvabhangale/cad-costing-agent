@@ -219,19 +219,21 @@ function renderStageInputs() {
                <input type="number" step="1" min="1" class="stage-amortisation" data-stage="${escapeHtml(stage.stage)}"
                  value="${enteredToolLife ?? ""}" placeholder="whole charge to this batch"></label>`
           : "";
-      // A stage with a time model can be priced by time instead: its welds are
-      // then operations in the plan, costed at the rate set's hourly rate.
+      // A stage with a time model can be priced by time instead: its welds, or
+      // its cut and bend lines, are then operations in the plan, costed at the
+      // rate set's hourly rate.
+      const timeWord = TIMED_STAGE_PROCESSES[stage.stage] === "welding" ? "weld" : "measured";
       const pricing = TIMED_STAGE_PROCESSES[stage.stage]
         ? `<label>Priced by <select class="stage-pricing" data-stage="${escapeHtml(stage.stage)}">
              <option value="stage_rate"${timed ? "" : " selected"}>this stage rate</option>
              <option value="timed"${timed ? " selected" : ""}>${
                TIMED_IN_WELDS[stage.stage]
                  ? `${escapeHtml(TIMED_IN_WELDS[stage.stage])} × hourly rate (with welding)`
-                 : "weld time × hourly rate"}</option>
+                 : `${timeWord} time × hourly rate`}</option>
            </select></label>`
         : "";
       return `<tr><th>${escapeHtml(stage.label)}</th>
-        <td>${timed ? `<span class="muted">not used — priced by weld time</span>` : parts.join(" + ")}${
+        <td>${timed ? `<span class="muted">not used — priced by ${timeWord} time</span>` : parts.join(" + ")}${
           rate.note && !timed ? `<div class="hint">${escapeHtml(rate.note)}</div>` : ""}</td>
         <td>${pricing || input || amortise ? `<div class="stage-input-fields">${pricing}${input}${amortise}</div>` : ""}</td></tr>`;
     })

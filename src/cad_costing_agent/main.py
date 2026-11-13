@@ -3332,8 +3332,9 @@ def price_cad_part(
                     "error": "timed_stage_not_costed",
                     "message": (
                         f"No estimate was produced: {labels} is priced by time, and the plan has "
-                        "no operation of it with a committed time. Add the welds and accept or "
-                        "enter their times, or price it from its stage rate."
+                        "no operation of it with a committed time. Add its operations — the "
+                        "welds, or the cut and bend lines from the measured flat pattern — and "
+                        "accept or enter their times, or price it from its stage rate."
                     ),
                     "stages": untimed,
                 },
@@ -4575,3 +4576,43 @@ async def cad_sheet_metal(
                 f"({type(exc).__name__}). Geometry, the 3D preview and costing are unaffected."
             ),
         ) from exc
+
+
+from cad_costing_agent.sheet_operations import SheetPlanLines, sheet_plan_lines  # noqa: E402
+
+
+class SheetPlanLinesRequest(BaseModel):
+    analysis: SheetMetalAnalysis = Field(
+        description="The /cad/sheet-metal measurement the lines are proposed from, as returned."
+    )
+
+
+@app.post("/operations/sheet-metal-lines", response_model=SheetPlanLines)
+def operations_sheet_metal_lines(
+    request: SheetPlanLinesRequest,
+    time_profile_id: str | None = Query(
+        None, description="Published profile to estimate under. Omit for the built-in baseline."
+    ),
+    time_profile_version: str | None = Query(
+        None, description="Exact profile version to pin. Omit to use the latest."
+    ),
+    session: Session = Depends(get_session),
+) -> SheetPlanLines:
+    """The cut and bend operations a measured sheet part adds to its plan, with estimated times.
+
+    Takes the measurement rather than the file, as `/operations/estimate-time`
+    takes normalized operations. Each line is a system proposal: its time is
+    estimated under the selected profile and **not accepted** — it reaches a
+    cost only once someone accepts it or enters a time, and only on a route
+    whose sheet stage is priced by time. Nothing is stored and nothing priced.
+    """
+    profile = None
+    if time_profile_id:
+        try:
+            profile = TimeProfileRepository(session).get(time_profile_id, time_profile_version)
+        except ValueError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+    try:
+        return sheet_plan_lines(request.analysis, profile=profile)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
