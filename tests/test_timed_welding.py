@@ -6,7 +6,10 @@ applies only while it is still a weld; that choosing time pricing takes the
 welding stage out of stage pricing so it is never charged twice; that a timed
 stage with nothing timed is refused rather than priced at zero; that only a
 timeable stage may be timed; and that sending no pricing choice is exactly the
-stage-rate behaviour it always was.
+stage-rate behaviour it always was. And that butt-weld edge preparation and
+weld finishing are timed from the weld's length, and that weld finishing is
+charged once: inside the welds' time or by its stage rate, never both, never
+neither.
 """
 
 from __future__ import annotations
@@ -166,7 +169,9 @@ def test_a_weld_time_does_not_follow_the_line_into_another_process():
 
 
 def test_only_welding_can_be_timed():
-    assert TIMEABLE_STAGES == {"welding": "welding"}
+    # Weld finishing is timeable too, but only as part of the welds' own time
+    # (section 7), so its operations are welding operations.
+    assert TIMEABLE_STAGES == {"welding": "welding", "weld_finishing": "welding"}
     with pytest.raises(ValueError, match="only welding has a time model"):
         timed_stages({"fit_up": {"pricing": "timed"}}, ["cutting", "fit_up", "welding"])
     with pytest.raises(ValueError, match="must be 'stage_rate' or 'timed'"):
@@ -517,3 +522,285 @@ def test_the_illustrative_profile_keeps_its_first_version_and_adds_handling_in_a
 def test_the_seeded_baseline_still_times_no_weld():
     baseline = client.get("/time-profiles/poc-baseline-time").json()["assumptions"]
     assert all(baseline[name] is None for name in (*WELDING, REPOSITION, TACK))
+
+
+# --- 7. edge preparation and weld finishing from the weld's length -----------
+
+PREP = "welding_butt_prep_mm_per_min"
+FINISHING = "welding_finishing_mm_per_min"
+PREP_AND_FINISHING = {PREP: 100.0, FINISHING: 200.0}
+BUTT = WeldSpec(weld_type="butt", process="mig", length_mm=600.0, size_mm=8.0)
+
+
+def timed(weld, **extra):
+    return estimate_operation_time(
+        operation_type="welding", weld=weld, assumptions=TimeAssumptions(**WELDING, **extra)
+    )
+
+
+def test_prep_and_finishing_are_absent_by_default_like_every_welding_figure():
+    assert TimeAssumptions().model_dump()[PREP] is None
+    assert TimeAssumptions().model_dump()[FINISHING] is None
+
+
+def test_a_butt_weld_is_charged_edge_preparation_and_finishing_from_its_length():
+    estimate = timed(BUTT, **PREP_AND_FINISHING)
+    # arc: ceil(8 / 6) = 2 passes; 600 x 2 / 300 = 4 min; / 0.5 = 8 min.
+    # prep: 600 / 100 = 6 min. finishing: 600 / 200 = 3 min. cycle = 17 min.
+    assert estimate.cycle_time_minutes == 17.0
+    assert estimate.setup_time_minutes == 15.0
+    assert estimate.parameters["weld_arc_cycle_minutes"] == 8.0
+    assert estimate.parameters["weld_prep_minutes"] == 6.0
+    assert estimate.parameters["weld_finishing_minutes"] == 3.0
+    assert estimate.parameters[PREP] == 100.0 and estimate.parameters[FINISHING] == 200.0
+    assert any(line.startswith("edge preparation 6.00 min = 600 mm / 100 mm/min")
+               for line in estimate.assumptions)
+    assert any(line.startswith("finishing 3.00 min = 600 mm / 200 mm/min")
+               for line in estimate.assumptions)
+    assert "cycle 17.00 min = 4.00 / 0.5 + 6.00 + 3.00" in estimate.assumptions
+
+
+def test_a_fillet_weld_is_never_charged_edge_preparation():
+    estimate = timed(WELD, **PREP_AND_FINISHING)
+    # 8 min of arc-derived time + 600 / 200 = 3 min finishing; no preparation.
+    assert estimate.cycle_time_minutes == 11.0
+    assert "weld_prep_minutes" not in estimate.parameters and PREP not in estimate.parameters
+    assert estimate.parameters["weld_finishing_minutes"] == 3.0
+    assert any("no edge preparation" in line and "butt welds only" in line
+               for line in estimate.assumptions)
+    assert "cycle 11.00 min = 4.00 / 0.5 + 3.00" in estimate.assumptions
+    # A prep rate alone changes no fillet weld's time.
+    assert timed(WELD, **{PREP: 100.0}).cycle_time_minutes == 8.0
+
+
+def test_every_component_is_named_with_its_parameters_in_the_explanation():
+    estimate = timed(BUTT, **HANDLING, **PREP_AND_FINISHING)
+    # 8 (arc / factor) + 0.5 + 1.25 (handling) + 6 (prep) + 3 (finishing) = 18.75.
+    assert estimate.cycle_time_minutes == 18.75
+    assert "cycle 18.75 min = 4.00 / 0.5 + 0.5 + 1.25 + 6.00 + 3.00" in estimate.assumptions
+    joined = " | ".join(estimate.assumptions)
+    for phrase in ("arc time 4.00 min = 600 × 2 / 300", "arc-on factor 0.5",
+                   "repositioning 0.5 min", "clamping and tacking 1.25 min",
+                   "edge preparation 6.00 min", "finishing 3.00 min"):
+        assert phrase in joined
+
+
+def test_prep_and_finishing_scale_with_length_not_with_passes():
+    thick = WeldSpec(weld_type="butt", process="mig", length_mm=600.0, size_mm=20.0)
+    estimate = timed(thick, **PREP_AND_FINISHING)
+    # ceil(20 / 6) = 4 passes; 600 x 4 / 300 = 8 min arc; / 0.5 = 16. + 6 + 3 = 25.
+    assert estimate.cycle_time_minutes == 25.0
+    assert estimate.parameters["weld_prep_minutes"] == 6.0
+
+
+def test_absent_prep_and_finishing_give_exactly_the_earlier_estimate():
+    """None is not zero minutes added: the whole serialized estimate is unchanged."""
+    for weld in (WELD, BUTT):
+        for extra in ({}, HANDLING):
+            before = timed(weld, **extra)
+            explicit = timed(weld, **extra, **{PREP: None, FINISHING: None})
+            assert before.model_dump_json() == explicit.model_dump_json()
+            assert "weld_prep_minutes" not in before.parameters
+            assert "weld_finishing_minutes" not in before.parameters
+    # And still the figures pinned before these parameters existed.
+    assert timed(WELD).cycle_time_minutes == 8.0
+    assert timed(WELD, **HANDLING).cycle_time_minutes == 9.75
+    assert "cycle 9.75 min = 4.00 / 0.5 + 0.5 + 1.25" in timed(WELD, **HANDLING).assumptions
+
+
+def test_prep_and_finishing_alone_do_not_make_a_profile_time_a_weld():
+    estimate = estimate_operation_time(
+        operation_type="welding", weld=BUTT, assumptions=TimeAssumptions(**PREP_AND_FINISHING)
+    )
+    assert estimate.time_status is TimeStatus.NEEDS_USER_INPUT
+    assert estimate.cycle_time_minutes is None
+    assert PREP not in estimate.missing and FINISHING not in estimate.missing
+
+
+def test_a_zero_or_negative_rate_is_refused():
+    for value in (0.0, -1.0):
+        with pytest.raises(ValueError):
+            TimeAssumptions(**WELDING, **{PREP: value})
+        with pytest.raises(ValueError):
+            TimeAssumptions(**WELDING, **{FINISHING: value})
+
+
+def finishing_weld_line(weld=WELD, *, accepted=True, extra=PREP_AND_FINISHING):
+    estimate = timed(weld, **extra)
+    line = manual_operation(
+        operation_id="OP-WELD-1", sequence_position=1, operation_type="welding",
+        operation_name=f"{weld.weld_type} weld",
+    ).with_weld(weld, estimate)
+    return line.accepted(use_estimated_time=True) if accepted else line
+
+
+def test_prep_and_finishing_change_no_acceptance_rule():
+    line = finishing_weld_line(BUTT, accepted=False)
+    assert line.system_time_accepted is False
+    assert line.final_cycle_time is None and not line.costable
+    assert line.system_suggested_cycle_time == 17.0
+    assert line.system_time_parameters["weld_finishing_minutes"] == 3.0
+    accepted = line.accepted(use_estimated_time=True)
+    assert accepted.final_cycle_time == 17.0 and accepted.final_setup_time == 15.0
+    again = accepted.with_weld(BUTT, timed(BUTT, **PREP_AND_FINISHING))
+    assert again.system_time_accepted is False and again.final_cycle_time is None
+
+
+def test_weld_finishing_is_timed_only_together_with_welding():
+    route = ["cutting", "fit_up", "welding", "weld_finishing"]
+    both = {"welding": {"pricing": "timed"}, "weld_finishing": {"pricing": "timed"}}
+    assert timed_stages(both, route) == {"welding": "welding", "weld_finishing": "welding"}
+    with pytest.raises(ValueError, match="only when 'welding' is too"):
+        timed_stages({"weld_finishing": {"pricing": "timed"}}, route)
+
+
+def cost_with(line, stage_inputs):
+    plan = committed_plan(NAME)
+    plan = plan.model_copy(update={"operations": [*plan.operations, line]})
+    return client.post(
+        "/cost/cad-part",
+        files={"file": (f"{NAME}.step", step(NAME), "application/octet-stream")},
+        data={**FORM, "rate_set_id": "weld-shop",
+              "process_classification": json.dumps(classification_for("cutting_welding")),
+              "manufacturing_plan": plan.model_dump_json(),
+              "stage_inputs": json.dumps(stage_inputs)},
+    )
+
+
+WELDING_TIMED = {"welding": {"pricing": "timed"}}
+BOTH_TIMED = {"welding": {"pricing": "timed"}, "weld_finishing": {"pricing": "timed"}}
+
+
+def test_a_weld_carrying_finishing_beside_a_priced_finishing_stage_is_refused_not_charged_twice():
+    publish_weld_shop()
+    before = client.get("/estimates").json()["total"]
+    response = cost_with(finishing_weld_line(), WELDING_TIMED)
+    assert response.status_code == 422, response.text
+    detail = response.json()["detail"]
+    assert detail["error"] == "weld_finishing_charged_twice"
+    assert detail["stage"] == "weld_finishing"
+    assert detail["operations"] == ["OP-WELD-1"]
+    assert "charged twice" in detail["message"]
+    assert client.get("/estimates").json()["total"] == before
+
+
+def test_weld_finishing_timed_is_charged_once_inside_the_welds_time():
+    publish_weld_shop()
+    response = cost_with(finishing_weld_line(), BOTH_TIMED)
+    assert response.status_code == 200, response.text
+    part_cost = response.json()["part_cost"]
+    # The finishing stage rate is gone; its work is in the weld's 11 min.
+    assert [line["stage"] for line in part_cost["stage_costs"]] == ["cutting", "fit_up"]
+    assert part_cost["total_stage_cost"] == pytest.approx(5 * (25 + 40))
+    weld = [o for o in part_cost["operations"] if o["process_type"] == "welding"][0]
+    assert weld["cycle_time_minutes"] == 11.0
+    run_hours = 11.0 * 5 / 60
+    expected = 400 * run_hours + 400 * weld["setup_time_minutes"] / 60 + 150 * run_hours
+    assert weld["total_operation_cost"] == pytest.approx(expected, abs=0.01)
+
+
+def test_weld_finishing_timed_with_a_weld_that_carries_no_finishing_is_refused_not_dropped():
+    publish_weld_shop()
+    response = cost_with(weld_line(), BOTH_TIMED)  # timed by a profile with no finishing rate
+    assert response.status_code == 422, response.text
+    detail = response.json()["detail"]
+    assert detail["error"] == "timed_stage_not_costed"
+    assert detail["stages"] == ["weld_finishing"]
+    assert detail["operations"] == ["OP-WELD-1"]
+
+
+def test_weld_finishing_timed_without_welding_timed_is_refused():
+    publish_weld_shop()
+    response = cost_with(finishing_weld_line(), {"weld_finishing": {"pricing": "timed"}})
+    assert response.status_code == 400
+    assert "only when 'welding' is too" in response.json()["detail"]
+
+
+def test_a_typed_weld_time_is_the_engineers_whole_figure_under_either_choice():
+    publish_weld_shop()
+    typed = finishing_weld_line().model_copy(update={"user_cycle_time": 14.0})
+    for stage_inputs in (WELDING_TIMED, BOTH_TIMED):
+        response = cost_with(typed, stage_inputs)
+        assert response.status_code == 200, response.text
+        weld = [o for o in response.json()["part_cost"]["operations"]
+                if o["process_type"] == "welding"][0]
+        assert weld["cycle_time_minutes"] == 14.0
+
+
+def test_a_weld_without_finishing_on_the_stage_rate_route_is_costed_exactly_as_before():
+    publish_weld_shop()
+    response = cost_with(weld_line(), WELDING_TIMED)
+    assert response.status_code == 200, response.text
+    part_cost = response.json()["part_cost"]
+    assert [line["stage"] for line in part_cost["stage_costs"]] == [
+        "cutting", "fit_up", "weld_finishing"
+    ]
+    assert part_cost["total_stage_cost"] == pytest.approx(5 * (25 + 40 + 50))
+
+
+def test_the_snapshot_records_the_prep_and_finishing_rates():
+    publish_weld_shop()
+    baseline = client.get("/time-profiles/poc-baseline-time").json()["assumptions"]
+    published = client.post("/time-profiles", json={
+        "time_profile_id": "weld-finishing-time", "name": "Weld prep and finishing",
+        "version": "1.0.0", "description": "test", "is_illustrative": True,
+        "assumptions": {**baseline, **WELDING, **PREP_AND_FINISHING},
+    })
+    assert published.status_code == 201, published.text
+    response = client.post(
+        "/operations/estimate-time?time_profile_id=weld-finishing-time",
+        json={"operations": [{"operation_id": "W1", "operation_type": "welding",
+                              "weld": BUTT.model_dump()}]},
+    )
+    estimate = response.json()["estimates"][0]["estimate"]
+    assert estimate["cycle_time_minutes"] == 17.0
+    assert estimate["time_profile_id"] == "weld-finishing-time"
+    line = manual_operation(
+        operation_id="OP-WELD-1", sequence_position=1, operation_type="welding",
+        operation_name="Butt weld",
+    ).with_weld(BUTT, OperationTimeEstimate.model_validate(estimate)).accepted(
+        use_estimated_time=True
+    )
+    costed = cost_with(line, BOTH_TIMED)
+    assert costed.status_code == 200, costed.text
+    stored = client.get(f"/estimates/{costed.json()['estimate_id']}").json()
+    snapshot = stored["time_profile_snapshot"]["profiles"]["weld-finishing-time@1.0.0"]
+    assert snapshot["assumptions"][PREP] == 100.0
+    assert snapshot["assumptions"][FINISHING] == 200.0
+    assert stored["request_snapshot"]["stage_inputs"] == BOTH_TIMED
+
+
+def test_the_illustrative_profile_adds_prep_and_finishing_in_a_third_version():
+    script = _publish_script()
+    baseline = client.get("/time-profiles/poc-baseline-time").json()["assumptions"]
+    second = script.build_profile(baseline, "1.1.0")
+    third = script.build_profile(baseline, "1.2.0")
+    assert list(script.VERSIONS) == ["1.0.0", "1.1.0", "1.2.0"]
+    differing = {k for k in third["assumptions"] if third["assumptions"][k] != second["assumptions"][k]}
+    assert differing == {PREP, FINISHING}
+    assert third["is_illustrative"] is True
+    assert "ESTIMATED" in third["description"] and "no published source" in third["description"]
+    for version in script.VERSIONS:
+        assert client.post("/time-profiles", json=script.build_profile(baseline, version)).status_code == 201
+
+    def cycle(version, weld):
+        response = client.post(
+            f"/operations/estimate-time?time_profile_id={script.PROFILE_ID}"
+            f"&time_profile_version={version}",
+            json={"operations": [{"operation_id": "W1", "operation_type": "welding",
+                                  "weld": weld.model_dump()}]},
+        )
+        return response.json()["estimates"][0]["estimate"]["cycle_time_minutes"]
+
+    # Fillet: 600 x 2 / 300 = 4 min arc; / 0.45 = 8.889; + 0.5 + 1.0 = 10.389;
+    # + 600 / 200 = 3 min finishing = 13.389. No preparation.
+    assert cycle("1.1.0", WELD) == 10.39
+    assert cycle("1.2.0", WELD) == 13.39
+    # Butt, same length and size: + 600 / 100 = 6 min preparation = 19.389.
+    assert cycle("1.1.0", BUTT) == 10.39
+    assert cycle("1.2.0", BUTT) == 19.39
+
+
+def test_the_seeded_baseline_has_no_prep_or_finishing_rate():
+    baseline = client.get("/time-profiles/poc-baseline-time").json()["assumptions"]
+    assert baseline[PREP] is None and baseline[FINISHING] is None

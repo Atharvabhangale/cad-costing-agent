@@ -19,6 +19,11 @@ Versions (a published version is immutable, so a change is always a new one):
   1.0.0  the five arc-time parameters: travel speeds, size per pass, arc-on factor, setup.
   1.1.0  the same five, unchanged, plus two per-weld handling times (reposition, clamp and
          tack) that are added to each weld's cycle time.
+  1.2.0  1.1.0 unchanged, plus two length-driven rates: butt-weld edge preparation and weld
+         finishing (grinding and cleaning), each turned into minutes from the typed weld length.
+         Weld finishing is also a route stage: a weld timed under 1.2.0 carries its own
+         finishing time, so /cost/cad-part refuses it while that stage is priced by its stage
+         rate; price weld finishing by weld time instead (it is then charged once, there).
 
 Running it is idempotent. Every version above that the server does not have is published, in
 order; one it already has is left exactly as it is and reported, after checking that its
@@ -79,6 +84,19 @@ HANDLING_PARAMETERS = {
     "welding_tack_minutes_per_weld": 1.0,
 }
 
+# The two length-driven rates added in 1.2.0. Both ESTIMATED (assistant, demo only): no
+# published source was found or used for either number. Each becomes minutes as weld length /
+# rate and is added to the weld's cycle time.
+PREP_AND_FINISHING_PARAMETERS = {
+    # ESTIMATED: bevelling a butt joint before welding, both plate edges together, by hand
+    # grinder or bevelling tool on mild steel; 100 mm of joint per minute. Fillet welds are
+    # never charged it.
+    "welding_butt_prep_mm_per_min": 100.0,
+    # ESTIMATED: grinding and cleaning the finished weld (spatter, cap dressing), once along its
+    # length; 200 mm of weld per minute.
+    "welding_finishing_mm_per_min": 200.0,
+}
+
 DESCRIPTION_1_0_0 = (
     "ILLUSTRATIVE, not client data. The machining parameters are the seeded poc-baseline-time "
     "values copied unchanged; the five welding parameters are ESTIMATED typical manual MIG/TIG "
@@ -92,10 +110,24 @@ DESCRIPTION_1_1_0 = (
     "own values before treating any time as usable."
 )
 
+DESCRIPTION_1_2_0 = (
+    "ILLUSTRATIVE, not client data. Version 1.1.0 unchanged, plus butt-weld edge preparation "
+    "(100 mm of joint per minute) and weld finishing (200 mm of weld per minute), each turned "
+    "into minutes from the weld's typed length. Both are ESTIMATED for demo use only, with no "
+    "published source behind them. Welds timed with this version carry their own finishing "
+    "time: price a route's weld-finishing stage by weld time, or it would be charged twice "
+    "(the estimate is refused). Replace with a shop's own values before treating any time as "
+    "usable."
+)
+
 # Every version this script knows, oldest first: (welding parameters, description).
 VERSIONS = {
     "1.0.0": (WELDING_PARAMETERS, DESCRIPTION_1_0_0),
     "1.1.0": ({**WELDING_PARAMETERS, **HANDLING_PARAMETERS}, DESCRIPTION_1_1_0),
+    "1.2.0": (
+        {**WELDING_PARAMETERS, **HANDLING_PARAMETERS, **PREP_AND_FINISHING_PARAMETERS},
+        DESCRIPTION_1_2_0,
+    ),
 }
 PROFILE_VERSION = list(VERSIONS)[-1]
 ALL_WELDING_KEYS = tuple(VERSIONS[PROFILE_VERSION][0])

@@ -71,11 +71,16 @@ finished by following it.
     arc    = length · passes / travel_speed    (travel speed for the weld process)
     cycle  = arc / arc_on_factor               (handling, cleaning between passes)
            + reposition_per_weld + tack_per_weld   (each only if the profile gives it)
+           + length / butt_prep_rate           (butt welds only, if the profile gives it)
+           + length / finishing_rate           (if the profile gives it)
 
-The two per-weld handling figures are optional on their own: a profile that
-times welds without them gives exactly the arc-derived time above. They are
-added once per weld line, per part, to the *cycle* — never to the setup, which
-belongs to a fixturing and is charged once however many welds it holds.
+The per-weld handling figures and the length-driven preparation and finishing
+are each optional on their own: a profile that times welds without them gives
+exactly the arc-derived time above. They are added once per weld line, per
+part, to the *cycle* — never to the setup, which belongs to a fixturing and is
+charged once however many welds it holds. Each is recorded as its own named
+component (`weld_prep_minutes`, `weld_finishing_minutes`), so the costing can
+tell a weld that carries its own grinding from one that does not.
 
 Its parameters default to *absent*: a profile with none says so and the time is
 entered by hand, rather than a built-in figure pretending to be a welding shop.
@@ -268,6 +273,29 @@ class TimeAssumptions(BaseModel):
         description=(
             "Time to clamp and tack the joint before a weld is run, added once to each weld's "
             "cycle time."
+        ),
+    )
+    # Length-driven preparation and finishing. Optional on their own, like the
+    # handling above: absent, a weld's time is exactly what it was. Expressed as
+    # a rate along the joint, in the unit the travel speeds use.
+    welding_butt_prep_mm_per_min: float | None = Field(
+        default=None,
+        gt=0,
+        le=5000.0,
+        description=(
+            "Joint length edge-prepared (bevelled) per minute before a BUTT weld, both edges "
+            "together. A fillet weld needs no edge preparation and is never charged it."
+        ),
+    )
+    welding_finishing_mm_per_min: float | None = Field(
+        default=None,
+        gt=0,
+        le=5000.0,
+        description=(
+            "Weld length ground and cleaned per minute after welding, once along the finished "
+            "weld. Cleaning between passes is in the arc-on factor, not here. On a route whose "
+            "weld-finishing stage is priced by its stage rate, a weld carrying this time is "
+            "refused: the same grinding would be charged twice."
         ),
     )
 
@@ -993,16 +1021,53 @@ def _welding(weld: WeldSpec | None, a: TimeAssumptions):
         for field, label in _WELDING_HANDLING
         if getattr(a, field) is not None
     ]
-    if handling:
-        for field, label, minutes in handling:
-            cycle += minutes
-            parameters[field] = minutes
+    # Each addition is (minutes, how the cycle line writes it).
+    added: list[tuple[float, str]] = []
+    for field, label, minutes in handling:
+        added.append((minutes, f"{minutes:g}"))
+        parameters[field] = minutes
+        assumptions.append(
+            f"{label} {minutes:g} min per weld, added to the cycle time (per part, not setup)"
+        )
+    # Edge preparation: a butt joint is bevelled before it is welded; a fillet
+    # is welded on square edges, so it is never charged preparation.
+    prep_rate = a.welding_butt_prep_mm_per_min
+    if prep_rate is not None:
+        if weld.weld_type == "butt":
+            prep = weld.length_mm / prep_rate
+            added.append((prep, f"{prep:.2f}"))
+            parameters["welding_butt_prep_mm_per_min"] = prep_rate
+            parameters["weld_prep_minutes"] = round(prep, 6)
             assumptions.append(
-                f"{label} {minutes:g} min per weld, added to the cycle time (per part, not setup)"
+                f"edge preparation {prep:.2f} min = {weld.length_mm:g} mm / {prep_rate:g} mm/min "
+                "(butt joint bevelled before welding), added to the cycle time. No route stage "
+                "prices bevelling — 'Cutting stock to size' cuts to size — so if a shop's cutting "
+                "rate already includes it, leave this parameter out of the profile"
             )
+        else:
+            assumptions.append(
+                "no edge preparation: the profile's preparation rate applies to butt welds only, "
+                "and a fillet weld is welded on square edges"
+            )
+    # Finishing: grinding and cleaning the finished weld, once along its length.
+    finish_rate = a.welding_finishing_mm_per_min
+    if finish_rate is not None:
+        finishing = weld.length_mm / finish_rate
+        added.append((finishing, f"{finishing:.2f}"))
+        parameters["welding_finishing_mm_per_min"] = finish_rate
+        parameters["weld_finishing_minutes"] = round(finishing, 6)
+        assumptions.append(
+            f"finishing {finishing:.2f} min = {weld.length_mm:g} mm / {finish_rate:g} mm/min "
+            "(grinding and cleaning the finished weld), added to the cycle time. This is the "
+            "work a route's weld-finishing stage prices, so it is charged here only when that "
+            "stage is priced by weld time"
+        )
+    if added:
+        for minutes, _ in added:
+            cycle += minutes
         assumptions.append(
             f"cycle {cycle:.2f} min = {arc:.2f} / {a.welding_arc_on_factor:g}"
-            + "".join(f" + {minutes:g}" for _, _, minutes in handling)
+            + "".join(f" + {text}" for _, text in added)
         )
         parameters["weld_arc_cycle_minutes"] = round(arc / a.welding_arc_on_factor, 6)
     return cycle, "welding_time_baseline_v1", evidence, assumptions, parameters
