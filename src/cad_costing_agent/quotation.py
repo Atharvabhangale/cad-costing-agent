@@ -756,7 +756,18 @@ def _part_totals(detail: EstimateDetail, assumptions: EstimateAssumptions) -> Qu
                 "route_stages",
                 "Route stages (" + ", ".join(str(s.get("label")) for s in stage_costs) + ")",
                 part_cost.get("total_stage_cost"),
-                "Priced from the rate set's stage rates.",
+                # A stage whose tool charge was amortised carries only a share
+                # of it; the line says so in the estimate's own stored words.
+                " ".join(
+                    [
+                        "Priced from the rate set's stage rates.",
+                        *(
+                            f"{s.get('label')}: {s.get('batch_charge_note')}"
+                            for s in stage_costs
+                            if s.get("batch_charge_note")
+                        ),
+                    ]
+                ),
             )
         ]
         if stage_costs

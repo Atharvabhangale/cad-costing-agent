@@ -774,3 +774,296 @@ def test_the_page_sends_a_blank_yield_as_absent_and_works_nothing_out():
         code = _js_without_comments(name)
         assert "yield_percent /" not in code and "/ yield" not in code.lower(), name
         assert "enteredYield /" not in code and "/ enteredYield" not in code, name
+
+
+# --- 8. a tool's one-off charge amortised over the pieces it will make ----------
+#
+# The engineer states how many pieces the pattern or die is expected to make; the
+# estimate then carries only its own share of the one-off charge. No tool life is
+# ever assumed: absent, the whole charge falls on the batch, as it always has.
+
+AMORTISATION_KEYS = {
+    "full_batch_charge", "amortisation_quantity", "batch_charge_basis", "batch_charge_note",
+}
+
+
+def test_an_amortised_charge_is_the_full_charge_times_this_quantity_over_the_tool_life():
+    line = casting_line(mass_kg=3.0, amortisation_quantity=100)
+    # 15,000 pattern x 5 off / 100 pieces = 750; 120/kg x 3.0 kg x 5 = 1,800.
+    assert line.full_batch_charge == 15000.0
+    assert line.amortisation_quantity == 100
+    assert line.batch_charge == pytest.approx(750.0)
+    assert line.run_cost == pytest.approx(1800.0)
+    assert line.total_cost == pytest.approx(2550.0)
+    assert line.batch_charge_basis == "amortised_share"
+    assert "full_batch_charge x quantity / amortisation_quantity" in line.formula
+    note = line.batch_charge_note
+    assert "750.00" in note and "15,000.00" in note and "14,250.00" in note
+    assert "5 of the 100 pieces" in note
+    assert "outside this estimate" in note and "No tool life is assumed" in note
+
+
+def test_the_share_is_not_rounded_before_it_is_added():
+    line = casting_line(mass_kg=3.0, amortisation_quantity=7)
+    assert line.batch_charge == 15000.0 * 5 / 7
+    assert line.total_cost == 1800.0 + 15000.0 * 5 / 7
+    # Rounded once, on the way out.
+    assert line.model_dump()["total_cost"] == 12514.29
+    assert line.model_dump()["batch_charge"] == 10714.29
+
+
+def test_no_amortisation_quantity_is_the_whole_charge_and_the_line_keeps_its_old_keys():
+    line = casting_line(mass_kg=3.0)
+    assert line.batch_charge == 15000.0 and line.total_cost == pytest.approx(16800.0)
+    assert set(line.model_dump()) == LINE_KEYS_WITHOUT_A_YIELD
+    assert set(line.model_dump(mode="json")) == LINE_KEYS_WITHOUT_A_YIELD
+    assert set(casting_line(amortisation_quantity=100).model_dump()) == (
+        LINE_KEYS_WITHOUT_A_YIELD | AMORTISATION_KEYS
+    )
+    assert set(casting_line(yield_percent=60.0, amortisation_quantity=100).model_dump()) == (
+        LINE_KEYS_WITHOUT_A_YIELD | YIELD_KEYS | AMORTISATION_KEYS
+    )
+
+
+def test_a_tool_life_equal_to_the_quantity_charges_the_whole_tool_and_says_so():
+    without, equal = casting_line(mass_kg=3.0), casting_line(mass_kg=3.0, amortisation_quantity=5)
+    assert equal.total_cost == without.total_cost
+    assert equal.amortisation_quantity == 5 and equal.batch_charge_basis == "amortised_share"
+
+
+def test_a_yield_and_an_amortisation_quantity_combine_in_one_formula():
+    line = casting_line(mass_kg=3.0, yield_percent=75.0, amortisation_quantity=100)
+    # 120 x 4.0 kg x 5 + 750.
+    assert line.total_cost == pytest.approx(3150.0)
+    assert line.formula == (
+        "total_cost = unit_rate x (base_mass_kg / (yield_percent / 100)) x quantity"
+        " + full_batch_charge x quantity / amortisation_quantity"
+    )
+
+
+@pytest.mark.parametrize("bad", [0, -3])
+def test_an_amortisation_quantity_must_be_at_least_one(bad):
+    with pytest.raises(ValidationError):
+        StageInput(stage="casting", label="Casting", amortisation_quantity=bad)
+
+
+def test_a_tool_life_shorter_than_the_quantity_is_refused_not_a_second_tool():
+    with pytest.raises(ValueError, match="fewer than the 5 this estimate is for"):
+        casting_line(mass_kg=3.0, amortisation_quantity=4)
+
+
+def test_an_amortisation_quantity_on_a_stage_with_no_one_off_charge_is_refused():
+    with pytest.raises(ValueError, match="no one-off batch charge"):
+        price_stages(
+            [StageInput(stage="purchase", label="Purchased complete", amortisation_quantity=100)],
+            rate_set(purchase={"unit_basis": "per_piece", "unit_rate": 900.0}),
+            quantity=5,
+        )
+
+
+def test_a_batch_only_stage_can_be_amortised():
+    line = price_stages(
+        [StageInput(stage="casting", label="Casting", amortisation_quantity=1000)],
+        rate_set(casting={"batch_charge": 2500.0}),
+        quantity=40,
+    ).lines[0]
+    # 2,500 x 40 / 1,000.
+    assert line.total_cost == pytest.approx(100.0)
+    assert line.unit_basis is None and line.full_batch_charge == 2500.0
+
+
+def test_the_endpoint_charges_the_share_and_records_the_tool_life(client_rates):
+    inputs = {"casting": {"mass_kg": 3.0, "amortisation_quantity": 100}}
+    body = cost(classification=classification_for("casting_machining"), stage_inputs=inputs).json()
+    line, fettling = body["part_cost"]["stage_costs"]
+    assert (line["full_batch_charge"], line["amortisation_quantity"]) == (15000.0, 100)
+    assert line["batch_charge"] == 750.0 and line["total_cost"] == 2550.0
+    assert set(fettling) == LINE_KEYS_WITHOUT_A_YIELD
+    # 2,550 casting + 150 fettling on the same blank.
+    assert body["part_cost"]["total_stage_cost"] == 2700.0
+    stored = client.get(f"/estimates/{body['estimate_id']}").json()
+    assert stored["request_snapshot"]["stage_inputs"] == inputs
+    assert stored["result_snapshot"]["part_cost"]["stage_costs"][0] == line
+
+
+def test_no_amortisation_quantity_leaves_the_response_and_the_stored_estimate_as_they_were(
+    client_rates,
+):
+    classification = classification_for("casting_machining")
+    absent = cost(classification=classification, stage_inputs={"casting": {"mass_kg": 3.0}}).json()
+    null = cost(classification=classification,
+                stage_inputs={"casting": {"mass_kg": 3.0, "amortisation_quantity": None}}).json()
+    stored = client.get(f"/estimates/{absent['estimate_id']}").json()
+    snapshot_text = json.dumps(stored["result_snapshot"])
+    assert "amortisation_quantity" not in snapshot_text and "full_batch_charge" not in snapshot_text
+    for line in stored["result_snapshot"]["part_cost"]["stage_costs"]:
+        assert set(line) == LINE_KEYS_WITHOUT_A_YIELD
+    for body in (absent, null):
+        body["part_cost"].pop("estimate_id")
+    assert null["part_cost"] == absent["part_cost"]
+    assert absent["part_cost"]["stage_costs"][0]["batch_charge"] == 15000.0
+
+
+@pytest.mark.parametrize("bad", [0, -10, 2.5, "100", True, [100]])
+def test_a_tool_life_that_is_not_a_whole_number_of_pieces_is_refused(client_rates, bad):
+    before = estimate_count()
+    response = cost(classification=classification_for("casting_machining"),
+                    stage_inputs={"casting": {"amortisation_quantity": bad}})
+    assert response.status_code == 400
+    assert "whole number of pieces" in response.json()["detail"]
+    assert estimate_count() == before
+
+
+def test_a_whole_float_tool_life_is_read_as_that_many_pieces(client_rates):
+    line = cost(classification=classification_for("casting_machining"),
+                stage_inputs={"casting": {"mass_kg": 3.0, "amortisation_quantity": 100.0}}
+                ).json()["part_cost"]["stage_costs"][0]
+    assert line["amortisation_quantity"] == 100 and line["batch_charge"] == 750.0
+
+
+def test_a_tool_life_below_the_quantity_is_refused_at_the_endpoint_and_nothing_stored(client_rates):
+    before = estimate_count()
+    response = cost(classification=classification_for("casting_machining"),
+                    stage_inputs={"casting": {"amortisation_quantity": 4}})
+    assert response.status_code == 400
+    assert "fewer than the 5 this estimate is for" in response.json()["detail"]
+    assert estimate_count() == before
+
+
+def test_a_tool_life_on_a_stage_with_no_one_off_charge_is_refused_at_the_endpoint(client_rates):
+    response = cost(classification=classification_for("purchased"),
+                    stage_inputs={"purchase": {"amortisation_quantity": 100}})
+    assert response.status_code == 400
+    assert "no one-off batch charge" in response.json()["detail"]
+
+
+def test_a_tool_life_for_a_stage_the_route_does_not_have_changes_nothing(client_rates):
+    # Stage inputs are shared across the routes a comparison prices.
+    classification = classification_for("sheet_cutting_bending")
+    plain = cost(classification=classification).json()["part_cost"]
+    other = cost(classification=classification,
+                 stage_inputs={"casting": {"amortisation_quantity": 100}}).json()["part_cost"]
+    plain.pop("estimate_id"), other.pop("estimate_id")
+    assert other == plain
+
+
+def test_the_quotation_partitions_the_total_and_says_the_charge_is_a_share(client_rates):
+    body = cost(classification=classification_for("casting_machining"),
+                stage_inputs={"casting": {"mass_kg": 3.0, "amortisation_quantity": 100}}).json()
+    for view in ("customer", "engineering"):
+        totals = client.get(
+            f"/estimates/{body['estimate_id']}/quotation?view={view}"
+        ).json()["totals"]
+        lines = {line["category"]: line for line in totals["lines"]}
+        assert lines["route_stages"]["amount"] == pytest.approx(2700.0)
+        assert "Casting: Amortised share of the tool" in lines["route_stages"]["detail"]
+        assert "outside this estimate" in lines["route_stages"]["detail"]
+        assert not totals["reconciliation"]
+
+
+def test_a_quotation_without_a_tool_life_keeps_its_stage_line_wording(client_rates):
+    body = cost(classification=classification_for("casting_machining"),
+                stage_inputs={"casting": {"mass_kg": 3.0}}).json()
+    lines = client.get(f"/estimates/{body['estimate_id']}/quotation").json()["totals"]["lines"]
+    route_stages = next(line for line in lines if line["category"] == "route_stages")
+    assert route_stages["detail"] == "Priced from the rate set's stage rates."
+
+
+def test_a_comparison_attributes_a_tool_life_change_and_leaves_nothing_unexplained(client_rates):
+    classification = classification_for("casting_machining")
+    whole = cost(classification=classification,
+                 stage_inputs={"casting": {"mass_kg": 3.0}}).json()["estimate_id"]
+    shared = cost(classification=classification,
+                  stage_inputs={"casting": {"mass_kg": 3.0, "amortisation_quantity": 100}}
+                  ).json()["estimate_id"]
+    comparison = client.get(f"/estimates/compare?baseline={whole}&comparison={shared}").json()
+    categories = {impact["category"] for impact in comparison["impacts"]}
+    moved = [i for i in comparison["impacts"] if i["category"] == "route_stage" and i["delta"]]
+    # Only the casting moves: 750 - 15,000.
+    assert len(moved) == 1
+    assert moved[0]["delta"] == pytest.approx(-14250.0)
+    assert "tool charge amortised over this batch only → 100 pieces" in json.dumps(
+        moved[0], ensure_ascii=False
+    )
+    assert "unexplained" not in categories
+
+
+def test_a_timed_stage_cannot_carry_a_tool_life():
+    from tests.test_timed_welding import cost as timed_cost, publish_weld_shop
+
+    publish_weld_shop()
+    before = estimate_count()
+    response = timed_cost(stage_inputs={"welding": {"pricing": "timed", "amortisation_quantity": 100}})
+    assert response.status_code == 400
+    assert "priced by time" in response.json()["detail"]
+    assert "nothing to amortise" in response.json()["detail"]
+    assert estimate_count() == before
+
+
+def test_route_comparison_previews_the_share_exactly_as_the_estimate_charges_it(client_rates):
+    inputs = {"casting": {"mass_kg": 3.0, "amortisation_quantity": 100}}
+    data = {**FORM, "rate_set_id": "client-shop",
+            "process_classification": json.dumps(suggested(NAME)["process_classification"]),
+            "manufacturing_plan": committed_plan(NAME).model_dump_json(),
+            "stage_inputs": json.dumps(inputs)}
+    response = client.post(
+        "/cost/route-comparison",
+        files={"file": (f"{NAME}.step", step(NAME), "application/octet-stream")},
+        data=data,
+    )
+    rows = {row["route_id"]: row for row in response.json()["routes"]}
+    for route_id in ("casting", "casting_machining"):
+        part = cost(classification=classification_for(route_id),
+                    stage_inputs=inputs).json()["part_cost"]
+        assert rows[route_id]["status"] == "priced", route_id
+        assert rows[route_id]["total_stage_cost"] == part["total_stage_cost"], route_id
+        assert rows[route_id]["total_part_cost"] == part["total_part_cost"], route_id
+    assert rows["casting_machining"]["total_stage_cost"] == pytest.approx(2700.0)
+
+
+def test_the_matrix_share_follows_each_cells_quantity_and_refuses_beyond_the_tool_life(
+    client_rates,
+):
+    inputs = {"casting": {"mass_kg": 3.0, "amortisation_quantity": 100}}
+    classification = json.dumps(classification_for("casting_machining"))
+    plan = committed_plan(NAME).model_dump_json()
+    upload = {"file": (f"{NAME}.step", step(NAME), "application/octet-stream")}
+    base = {key: value for key, value in FORM.items() if key not in ("quantity", "rate_set_id")}
+    base.update({"process_classification": classification, "manufacturing_plan": plan,
+                 "stage_inputs": json.dumps(inputs)})
+    response = client.post("/cost/matrix-preview", files=upload, data={
+        **base,
+        "rate_sets": json.dumps([{"rate_set_id": "client-shop"}]),
+        "quantities": json.dumps([5, 40, 150]),
+    })
+    assert response.status_code == 200, response.text
+    q5, q40, q150 = response.json()["rows"][0]["cells"]
+    # Casting 120 x 3.0 x q + 15,000 x q / 100, and fettling 10 x 3.0 x q.
+    assert q5["total_stage_cost"] == pytest.approx(1800 + 750 + 150)
+    assert q40["total_stage_cost"] == pytest.approx(14400 + 6000 + 1200)
+    # The stated tool makes 100: a 150-off cell is refused in the endpoint's words.
+    assert q150["status"] == "refused" and q150["total_part_cost"] is None
+    assert "fewer than the 150 this estimate is for" in q150["refusal"]["message"]
+    # Each priced cell is the figure /cost/cad-part gives at that quantity.
+    for cell, quantity in ((q5, 5), (q40, 40)):
+        part = client.post("/cost/cad-part", files=upload, data={
+            **base, "quantity": str(quantity), "rate_set_id": "client-shop",
+        }).json()["part_cost"]
+        assert cell["total_part_cost"] == part["total_part_cost"], quantity
+        assert cell["total_stage_cost"] == part["total_stage_cost"], quantity
+
+
+def test_the_page_offers_a_tool_life_from_the_rate_set_and_works_nothing_out():
+    process = _js_without_comments("process.js")
+    assert (
+        'setStageInput(input.dataset.stage, "amortisation_quantity", raw === "" ? null : Number(raw))'
+        in process
+    )
+    # Offered where the published rate has a one-off charge (the rate set says
+    # which) and never for a stage priced by time.
+    assert "rate.batch_charge && !timed" in process
+    for name in ("process.js", "plan.js", "routecompare.js", "app.js"):
+        code = _js_without_comments(name)
+        assert "/ amortisation_quantity" not in code and "amortisation_quantity /" not in code, name
+        assert "/ enteredToolLife" not in code and "enteredToolLife /" not in code, name
+        assert "batch_charge *" not in code and "* line.quantity" not in code, name

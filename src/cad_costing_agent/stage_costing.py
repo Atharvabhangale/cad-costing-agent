@@ -45,6 +45,21 @@ works on the blank, not on the metal poured. A yield on anything but the per-kg
 stage that supplies the material is refused rather than ignored: a per-piece or
 per-batch price has no mass to divide, and a finishing step pours nothing.
 
+Tool amortisation
+-----------------
+
+A stage's one-off `batch_charge` (a pattern, a die) is charged whole to the
+batch being estimated, unless a person states how many pieces the tool is
+expected to make (`amortisation_quantity`). Then only this estimate's share is
+charged: `batch_charge x quantity / amortisation_quantity`, unrounded. The line
+states the full charge, the quantity it is spread over, the share charged, and
+a note that the rest of the tool's cost is carried by pieces outside this
+estimate. There is no default tool life and no annual volume is guessed:
+absent, the line is exactly what it was, down to its keys. A quantity smaller
+than this estimate's is refused — the stated tool would not make the pieces
+being quoted, and a second tool is not assumed — and so is one on a stage whose
+rate has no one-off charge to share.
+
 Material
 --------
 
@@ -62,9 +77,11 @@ Formulas, per stage
     mass_kg            = base_mass_kg / (yield_percent / 100)   (only with a yield)
     run_cost           = unit_cost_per_part x quantity
     total_cost         = run_cost + batch_charge
+    batch_charge       = full_batch_charge x quantity / amortisation_quantity
+                                                 (only with an amortisation quantity)
 
 `batch_charge` is one-off for the batch, like tooling, and is never multiplied
-by quantity.
+by quantity — except as the share of a tool amortised over a stated quantity.
 
 This module imports `money` and `rate_sets` and nothing else from the package.
 It does not know what a route is; the caller hands it stage ids in route order.
@@ -74,7 +91,7 @@ import math
 
 from pydantic import BaseModel, Field, model_serializer
 
-from cad_costing_agent.money import Money
+from cad_costing_agent.money import Money, round_money
 from cad_costing_agent.rate_sets import PER_KG, RateSet
 
 # Stages whose rate includes the part's material. When a route starts with one,
@@ -134,6 +151,20 @@ YIELD_APPLIED = "yield_applied"
 # serializes exactly as it did before yields existed.
 _YIELD_ONLY_KEYS = ("yield_percent", "base_mass_kg", "base_mass_source")
 
+# `batch_charge_basis` of a line whose one-off charge is a share of a tool
+# amortised over a quantity a person stated.
+AMORTISED_SHARE = "amortised_share"
+AMORTISED_BATCH_CHARGE = "full_batch_charge x quantity / amortisation_quantity"
+
+# Present on a line only when an amortisation quantity was entered, so a line
+# without one serializes exactly as it did before.
+_AMORTISATION_ONLY_KEYS = (
+    "full_batch_charge",
+    "amortisation_quantity",
+    "batch_charge_basis",
+    "batch_charge_note",
+)
+
 
 class StageInput(BaseModel):
     """One stage to price, in route order, with anything a person entered for it."""
@@ -158,6 +189,16 @@ class StageInput(BaseModel):
             "Entered by a person, never defaulted: the blank's mass as a percentage of the metal "
             "poured or billet bought. The per-kg rate is then charged on mass / (yield / 100). "
             "Only the per-kg stage that supplies the material takes one."
+        ),
+    )
+    amortisation_quantity: int | None = Field(
+        default=None,
+        ge=1,
+        description=(
+            "Entered by a person, never defaulted: how many pieces the pattern or die is expected "
+            "to make. The stage's one-off charge is then charged as batch_charge x quantity / "
+            "amortisation_quantity. Only a stage whose rate has a one-off charge takes one, and "
+            "never one smaller than the quantity being estimated."
         ),
     )
 
@@ -187,12 +228,22 @@ class StageCostLine(BaseModel):
     yield_percent: float | None = None
     base_mass_kg: float | None = None
     base_mass_source: str | None = None
+    # With an amortisation quantity: `batch_charge` is the share charged to this
+    # estimate, `full_batch_charge` the one-off charge as published, and the note
+    # says the rest is carried by pieces outside this estimate.
+    full_batch_charge: Money | None = None
+    amortisation_quantity: int | None = None
+    batch_charge_basis: str | None = None
+    batch_charge_note: str | None = None
 
     @model_serializer(mode="wrap")
     def _without_an_absent_yield(self, handler):
         data = handler(self)
         if self.yield_percent is None:
             for key in _YIELD_ONLY_KEYS:
+                data.pop(key, None)
+        if self.amortisation_quantity is None:
+            for key in _AMORTISATION_ONLY_KEYS:
                 data.pop(key, None)
         return data
 
@@ -243,6 +294,8 @@ def price_stages(
 
     A `yield_percent` on a stage that cannot take one raises `ValueError`: it is
     a contradiction in what was entered, not a stage waiting for a rate or a mass.
+    So does an `amortisation_quantity` on a stage with no one-off charge, or one
+    smaller than `quantity`.
     """
     if quantity < 1:
         raise ValueError(f"quantity must be at least 1, got {quantity}.")
@@ -302,6 +355,23 @@ def price_stages(
                 f"A yield of {stage.yield_percent:g}% was entered for {stage.label}, but "
                 f"{reason}. Remove the yield."
             )
+
+        if stage.amortisation_quantity is not None:
+            if not rate.batch_charge:
+                raise ValueError(
+                    f"An amortisation quantity of {stage.amortisation_quantity} pieces was "
+                    f"entered for {stage.label}, but rate set '{rate_set.rate_set_id}' "
+                    f"v{rate_set.version} has no one-off batch charge for it, so there is no tool "
+                    "charge to share. Remove the amortisation quantity."
+                )
+            if stage.amortisation_quantity < quantity:
+                raise ValueError(
+                    f"The {stage.label} one-off charge was to be amortised over "
+                    f"{stage.amortisation_quantity} pieces, fewer than the {quantity} this "
+                    "estimate is for: the stated tool would not make them all, and a second tool "
+                    f"is not assumed. Enter at least {quantity}, or leave it blank to charge the "
+                    "whole tool to this batch."
+                )
 
         unit_cost: float | None = None
         yield_percent: float | None = None
@@ -395,6 +465,28 @@ def price_stages(
                 unit_cost = rate.unit_rate
 
         run_cost = (unit_cost or 0.0) * quantity
+        batch_charge = rate.batch_charge
+        amortisation: dict = {}
+        if stage.amortisation_quantity is not None:
+            # The share, unrounded: rounding happens only when the line is
+            # serialized, so the total is the rounded exact value.
+            batch_charge = rate.batch_charge * quantity / stage.amortisation_quantity
+            currency = rate_set.currency
+            amortisation = dict(
+                full_batch_charge=rate.batch_charge,
+                amortisation_quantity=stage.amortisation_quantity,
+                batch_charge_basis=AMORTISED_SHARE,
+                batch_charge_note=(
+                    f"Amortised share of the tool: {currency} {round_money(batch_charge):,.2f} of "
+                    f"the {currency} {round_money(rate.batch_charge):,.2f} one-off charge — this "
+                    f"estimate's {quantity} of the {stage.amortisation_quantity} pieces the "
+                    "engineer stated the pattern or die will make. The remaining "
+                    f"{currency} {round_money(rate.batch_charge - batch_charge):,.2f} is carried "
+                    "by pieces outside this estimate. No tool life is assumed when none is "
+                    "entered."
+                ),
+            )
+            formula = formula.replace("+ batch_charge", "+ " + AMORTISED_BATCH_CHARGE)
         lines.append(
             StageCostLine(
                 stage=stage.stage,
@@ -411,10 +503,11 @@ def price_stages(
                 quantity=quantity,
                 unit_cost_per_part=unit_cost,
                 run_cost=run_cost,
-                batch_charge=rate.batch_charge,
-                total_cost=run_cost + rate.batch_charge,
+                batch_charge=batch_charge,
+                total_cost=run_cost + batch_charge,
                 supplies_material=supplies_material,
                 rate_note=rate.note,
+                **amortisation,
             )
         )
 
