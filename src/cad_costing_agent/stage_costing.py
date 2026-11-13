@@ -88,7 +88,14 @@ MATERIAL_SUPPLYING_STAGES = frozenset(
 # the one stage with a time model (`operation_time`'s weld formula). A timed
 # stage is left out of `price_stages` — its cost comes from its operations —
 # so it can never be charged twice.
-TIMEABLE_STAGES = {"welding": "welding"}
+#
+# Weld finishing (grinding and cleaning) is timed by the same weld operations:
+# each weld's `weld_finishing_minutes`, when its profile states a finishing
+# rate. It may be timed only together with welding — timing it alone would put
+# the welds' whole time, arc included, beside a welding stage rate. Whether the
+# welds actually carry finishing time is checked where the plan is costed.
+TIMEABLE_STAGES = {"welding": "welding", "weld_finishing": "welding"}
+TIMED_ONLY_WITH = {"weld_finishing": "welding"}
 STAGE_RATE_PRICING = "stage_rate"
 TIMED_PRICING = "timed"
 
@@ -111,12 +118,19 @@ def timed_stages(stage_input_values: dict, route_stage_ids: list[str]) -> dict[s
             continue
         if stage_id not in TIMEABLE_STAGES:
             raise ValueError(
-                f"Stage '{stage_id}' cannot be priced by time: only "
-                + ", ".join(sorted(TIMEABLE_STAGES))
-                + " has a time model. It is priced from its stage rate."
+                f"Stage '{stage_id}' cannot be priced by time: only welding has a time model "
+                "(weld finishing may be timed with it, from each weld's finishing time). It is "
+                "priced from its stage rate."
             )
         if stage_id in route_stage_ids:
             timed[stage_id] = TIMEABLE_STAGES[stage_id]
+    for stage_id, needs in TIMED_ONLY_WITH.items():
+        if stage_id in timed and needs not in timed:
+            raise ValueError(
+                f"Stage '{stage_id}' can be priced by time only when '{needs}' is too: its time "
+                f"is part of each weld's time, and with '{needs}' on its stage rate the welds' "
+                "arc time would be charged beside that rate."
+            )
     return timed
 
 

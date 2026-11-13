@@ -455,8 +455,9 @@ function asFormedLabel() {
 // single part's route.
 // Stages an engineer may price by time instead of by stage rate, and the hourly
 // process their operations are costed as. Mirrors `stage_costing.TIMEABLE_STAGES`
-// (a test holds the two equal); the server refuses any other stage anyway.
-const TIMED_STAGE_PROCESSES = { welding: "welding" };
+// (a test holds the two equal); the server refuses any other stage anyway. Weld
+// finishing is timed by the same welds (their finishing time), never on its own.
+const TIMED_STAGE_PROCESSES = { welding: "welding", weld_finishing: "welding" };
 
 function stagePricing(stageId) {
   return ((state.stageInputs || {})[stageId] || {}).pricing === "timed" ? "timed" : "stage_rate";
@@ -759,7 +760,9 @@ function routeStageRows() {
   const firstOperations = stages.findIndex((stage) => stage.process_type || timed(stage));
   const row = (stage) => {
     const position = stages.indexOf(stage) + 1;
-    const band = timed(stage)
+    const band = timed(stage) && stage.stage === "weld_finishing"
+      ? `<span class="pill pill-ok">priced by time — each weld's finishing time, in the welds above</span>`
+      : timed(stage)
       ? `<span class="pill pill-ok">priced by time — its welds are operations below</span>` +
         `<button type="button" class="secondary tiny add-weld">+ Add weld</button>`
       : `<span class="pill pill-off">route stage — stage rate, no time</span>${stageRateText(stage)}`;
