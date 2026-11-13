@@ -8,9 +8,11 @@ each recognizer queried the shape itself, the model would be traversed five or
 six times and every recognizer would carry its own OpenCASCADE imports.
 
 So the shape is scanned **once** into plain dataclasses, and the recognizers are
-pure functions over those. This is the only module in the feature layer that
-imports OCP, which is also what keeps `model.py` — and therefore the API and the
-UI — free of B-Rep concepts.
+pure functions over those. This is the only module the *recognizers* get their
+geometry from, and no recognizer imports OCP, which is what keeps `model.py` — and
+therefore the API and the UI — free of B-Rep concepts. (`wall_thickness.py` is the
+one other OCP importer in the feature layer: it casts rays through the solid,
+which a descriptor cannot do, and returns plain models too.)
 
 Stable identity
 ---------------
