@@ -472,6 +472,16 @@
             <p id="r-provenance" class="provenance"></p>
           </div>
 
+          <!-- What makes up this estimate's cost, each figure with its share of
+               the stored total. drivers.js renders the server's table; it adds
+               nothing up and ranks nothing. -->
+          <div class="card hidden" id="drivers-card">
+            <h2>Cost drivers</h2>
+            <p class="hint">Where this estimate's money is: each stored figure with its share of the
+              stored total.</p>
+            <div id="drivers-body"></div>
+          </div>
+
           <div class="card" id="assumptions-card">
             <h2>Assumptions behind this estimate</h2>
             <p class="hint">Read back from what this estimate stored, not recomputed — so it shows what
@@ -626,6 +636,10 @@
             exactly once, on the server.
           </p>
           <div id="assembly-cost-body"></div>
+          <details class="detail-toggle" id="assembly-drivers-toggle">
+            <summary>Cost drivers of this roll-up</summary>
+            <div id="assembly-drivers"></div>
+          </details>
         </div>
 
       </div>
@@ -1055,6 +1069,7 @@
 <script src="matrix.js"></script>
 <script src="bulk.js"></script>
 <script src="dfm.js"></script>
+<script src="drivers.js"></script>
 <script src="estimateflow.js"></script>
 <script type="module" src="viewer.js"></script>
 </body>

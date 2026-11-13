@@ -1346,6 +1346,10 @@ $("cost-assembly").addEventListener("click", async () => {
     state.assemblyCost = await api("/cost/assembly", { method: "POST", body });
     state.assemblyCostStale = false;
     renderAssemblyCost(state.assemblyCost);
+    // The roll-up is its own stored estimate; its drivers are read by that id.
+    if (typeof renderCostDriversInto === "function") {
+      renderCostDriversInto("assembly-drivers", state.assemblyCost.estimate_id);
+    }
     // The roll-up is this assembly's estimate, so the sections that name an
     // estimate — the context bar, Cost and Quote — are re-read here rather
     // than waiting for the next tab click.

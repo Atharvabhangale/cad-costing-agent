@@ -804,3 +804,16 @@ table.matrix-grid thead th { font-size: 12px; color: var(--muted); font-weight: 
 .matrix-total { white-space: nowrap; }
 .matrix-refused { max-width: 260px; }
 .matrix-split summary { cursor: pointer; font-size: 12px; color: var(--muted); }
+
+/* Cost drivers (drivers.js). The bar's width is the server's share, printed
+   beside it; the bar is a reading aid, never the only statement of the figure. */
+table.mini.drivers-table th { width: auto; }
+table.mini.drivers-table th:first-child { width: 46%; }
+table.mini.drivers-table td { vertical-align: top; border-bottom: 1px solid var(--line); padding: 5px 0; }
+table.mini.drivers-table td.num, table.mini.drivers-table th.num { text-align: right; padding-left: 12px; white-space: nowrap; font-variant-numeric: tabular-nums; }
+table.mini.drivers-table .driver-bar-cell { width: 22%; padding-left: 12px; }
+.driver-track { display: block; height: 10px; margin-top: 5px; background: #eef1f4; border-radius: 3px; overflow: hidden; }
+.driver-bar { display: block; height: 100%; max-width: 100%; background: var(--accent); }
+.driver-bar.driver-bar-recon { background: var(--muted); }
+tr.driver-unrecorded td { color: var(--muted); font-style: italic; }
+.sr-only { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }

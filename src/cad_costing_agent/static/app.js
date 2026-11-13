@@ -805,6 +805,9 @@ $("calculate").addEventListener("click", async () => {
     if (typeof renderAssumptionsFor === "function") {
       await renderAssumptionsFor(state.result.estimate_id);
     }
+    if (typeof renderCostDriversFor === "function") {
+      await renderCostDriversFor(state.result.estimate_id);
+    }
     if (typeof renderImpactAgainstPrevious === "function") {
       await renderImpactAgainstPrevious(state.result.estimate_id);
     }
@@ -1027,10 +1030,18 @@ async function showEstimateDetail(estimateId) {
     created, so it reflects the rates in force at that moment. The quotation is rendered from
     that same snapshot and recalculates nothing, so it keeps saying what this estimate said
     however the rates change later.</p>
+    <details class="detail-toggle" id="history-drivers-toggle">
+      <summary>Cost drivers</summary>
+      <div id="history-drivers"></div>
+    </details>
     <div id="history-actuals"></div>`;
   panel.scrollIntoView({ behavior: "smooth", block: "nearest" });
   // Guarded forward: actuals.js is loaded after this file.
   if (typeof renderActualsPanel === "function") renderActualsPanel(estimate);
+  // Guarded forward: drivers.js is loaded after this file.
+  if (typeof renderCostDriversInto === "function") {
+    renderCostDriversInto("history-drivers", estimate.estimate_id);
+  }
 }
 
 $("refresh-history").addEventListener("click", loadHistory);

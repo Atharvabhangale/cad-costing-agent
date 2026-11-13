@@ -4347,3 +4347,26 @@ async def cad_dfm(
     report = evaluate_dfm(recognition.features, profile, file.filename or "")
     report.warnings.extend(recognition.warnings)
     return report
+
+
+# ---------------------------------------------------------------- cost drivers
+#
+# What makes up one stored estimate's cost, each figure with its share of the
+# stored total. Read from the result snapshot by `cost_drivers`, which imports
+# `money` only: nothing is recalculated, looked up, ranked or stored.
+
+from cad_costing_agent import cost_drivers  # noqa: E402
+
+
+@app.get(
+    "/estimates/{estimate_id}/cost-drivers", response_model=cost_drivers.CostDriverBreakdown
+)
+def estimate_cost_drivers(
+    estimate_id: str, session: Session = Depends(get_session)
+) -> cost_drivers.CostDriverBreakdown:
+    """The stored total broken into the figures that built it, in build-up order."""
+    try:
+        stored = EstimateRepository(session).get(estimate_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    return cost_drivers.cost_drivers(stored.estimate_id, stored.result_snapshot)
