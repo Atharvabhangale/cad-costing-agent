@@ -1036,11 +1036,11 @@ async function showEstimateDetail(estimateId) {
       <tr><th>Estimate ID</th><td class="mono">${estimate.estimate_id}</td></tr>
     </table>
     <div class="row">
-      <a class="button" id="open-quotation" target="_blank"
+      <a class="button" id="open-quotation" target="_blank" rel="opener"
          href="quotation.html?estimate=${encodeURIComponent(estimate.estimate_id)}">
         Generate quotation
       </a>
-      <a class="button secondary" target="_blank"
+      <a class="button secondary" target="_blank" rel="opener"
          href="quotation.html?estimate=${encodeURIComponent(
            estimate.estimate_id
          )}&view=engineering">
