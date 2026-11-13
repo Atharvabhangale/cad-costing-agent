@@ -69,6 +69,27 @@ and a purchased part's price is the whole part. The material line is then not
 charged separately, and the estimate says which stage carries it. Routes that
 start any other way are unchanged.
 
+Moulding priced by time
+-----------------------
+
+Injection moulding is the one material-supplying stage with a time model. A
+moulding stage rate per kg is the material and the press together; priced by
+time, the press is charged by the moulding operation's shot time at the rate
+set's hourly `injection_moulding` rate, and this module charges what is left —
+on the same stage line, so the material still stops the material line from
+charging it again (`material_supplied_by`):
+
+- the material, per kg, at the rate set's own price for the part's material
+  (`unit_rate_source: "material_rate"`), on the finished CAD mass or the mass
+  entered, divided by the engineer's yield when one is entered — the runner and
+  sprue, which a cold-runner shot carries and the CAD part does not;
+- the mould: the moulding stage rate's one-off charge, if the rate set has one,
+  amortised over a tool life exactly as for a stage-rate line. A mould is bought
+  for the part however its cycle is priced, so it is not dropped with the rate.
+  With no moulding stage rate, no mould is charged and the line says so.
+
+The stage rate's own per-kg or per-piece rate is never charged on this path.
+
 Formulas, per stage
 -------------------
 
@@ -92,7 +113,7 @@ import math
 from pydantic import BaseModel, Field, model_serializer
 
 from cad_costing_agent.money import Money, round_money
-from cad_costing_agent.rate_sets import PER_KG, RateSet
+from cad_costing_agent.rate_sets import PER_KG, RateSet, StageRate
 
 # Stages whose rate includes the part's material. When a route starts with one,
 # the material line is not charged on top of it.
@@ -119,7 +140,12 @@ TIMEABLE_STAGES = {
     "weld_finishing": "welding",
     "sheet_cutting": "sheet_cutting",
     "bending": "bending",
+    "moulding": "injection_moulding",
 }
+# Timeable stages whose stage line stays when they are timed, carrying the
+# material (at the rate set's material price) and the one-off tool charge: the
+# time prices only the press. See "Moulding priced by time" above.
+TIMED_KEEPS_MATERIAL_AND_TOOL = frozenset({"moulding"})
 TIMED_ONLY_WITH = {"fit_up": "welding", "weld_finishing": "welding"}
 STAGE_RATE_PRICING = "stage_rate"
 TIMED_PRICING = "timed"
@@ -143,9 +169,10 @@ def timed_stages(stage_input_values: dict, route_stage_ids: list[str]) -> dict[s
             continue
         if stage_id not in TIMEABLE_STAGES:
             raise ValueError(
-                f"Stage '{stage_id}' cannot be priced by time: only welding, sheet cutting and "
-                "bending have a time model (fit-up and weld finishing may be timed with welding, "
-                "from each weld's tack and finishing time). It is priced from its stage rate."
+                f"Stage '{stage_id}' cannot be priced by time: only welding, sheet cutting, "
+                "bending and injection moulding have a time model (fit-up and weld finishing may "
+                "be timed with welding, from each weld's tack and finishing time). It is priced "
+                "from its stage rate."
             )
         if stage_id in route_stage_ids:
             timed[stage_id] = TIMEABLE_STAGES[stage_id]
@@ -177,6 +204,11 @@ _YIELD_ONLY_KEYS = ("yield_percent", "base_mass_kg", "base_mass_source")
 # amortised over a quantity a person stated.
 AMORTISED_SHARE = "amortised_share"
 AMORTISED_BATCH_CHARGE = "full_batch_charge x quantity / amortisation_quantity"
+
+# `unit_rate_source` of a timed moulding line: its per-kg rate is the rate
+# set's material price, not a stage rate. Absent on every other line.
+MATERIAL_RATE_SOURCE = "material_rate"
+_TIMED_ONLY_KEYS = ("unit_rate_source",)
 
 # Present on a line only when an amortisation quantity was entered, so a line
 # without one serializes exactly as it did before.
@@ -223,6 +255,16 @@ class StageInput(BaseModel):
             "never one smaller than the quantity being estimated."
         ),
     )
+    timed: bool = Field(
+        default=False,
+        description=(
+            "Priced by time. Only a stage in TIMED_KEEPS_MATERIAL_AND_TOOL is priced here when "
+            "timed: its line carries the material and the one-off tool charge, never its rate."
+        ),
+    )
+    material_name: str | None = Field(
+        default=None, description="The part's material, whose rate-set price a timed line charges."
+    )
 
 
 class StageCostLine(BaseModel):
@@ -257,6 +299,8 @@ class StageCostLine(BaseModel):
     amortisation_quantity: int | None = None
     batch_charge_basis: str | None = None
     batch_charge_note: str | None = None
+    # A timed moulding line: `unit_rate` is the rate set's material price.
+    unit_rate_source: str | None = None
 
     @model_serializer(mode="wrap")
     def _without_an_absent_yield(self, handler):
@@ -267,13 +311,18 @@ class StageCostLine(BaseModel):
         if self.amortisation_quantity is None:
             for key in _AMORTISATION_ONLY_KEYS:
                 data.pop(key, None)
+        if self.unit_rate_source is None:
+            for key in _TIMED_ONLY_KEYS:
+                data.pop(key, None)
         return data
 
 
 class StageProblem(BaseModel):
     stage: str
     label: str
-    code: str = Field(description="'no_rate_set', 'no_stage_rate' or 'needs_mass'.")
+    code: str = Field(
+        description="'no_rate_set', 'no_stage_rate', 'no_material_rate' or 'needs_mass'."
+    )
     detail: str
 
 
@@ -295,6 +344,53 @@ def material_supplying_stage(route_stage_ids: list[str]) -> str | None:
     if route_stage_ids and route_stage_ids[0] in MATERIAL_SUPPLYING_STAGES:
         return route_stage_ids[0]
     return None
+
+
+def _timed_material_and_tool_rate(stage: StageInput, rate_set: RateSet):
+    """The rate a timed moulding line charges: material price per kg, plus the mould.
+
+    Built from the rate set's own figures — its price for the part's material and
+    the stage rate's one-off charge — and never from the stage's unit rate, which
+    the moulding operation's time replaces.
+    """
+    if stage.stage not in TIMED_KEEPS_MATERIAL_AND_TOOL:
+        raise ValueError(
+            f"{stage.label} is priced by time and has no stage line: its time is its whole charge."
+        )
+    name = (stage.material_name or "").strip().lower()
+    material = rate_set.materials.get(name)
+    if material is None:
+        return StageProblem(
+            stage=stage.stage,
+            label=stage.label,
+            code="no_material_rate",
+            detail=(
+                f"{stage.label} is priced by time, so its material is charged at the rate set's "
+                f"material price, and rate set '{rate_set.rate_set_id}' v{rate_set.version} has "
+                f"none for '{stage.material_name}'. Publish a version with one."
+            ),
+        )
+    tool = rate_set.stage_rates.get(stage.stage)
+    currency = rate_set.currency
+    mould = (
+        f"the mould is the {stage.label.lower()} stage rate's one-off charge, "
+        f"{currency} {round_money(tool.batch_charge):,.2f}"
+        if tool is not None and tool.batch_charge
+        else f"no mould is charged: rate set '{rate_set.rate_set_id}' v{rate_set.version} has no "
+        f"one-off charge for {stage.label.lower()} — publish one, or this estimate leaves the mould "
+        "to be paid for separately"
+    )
+    return StageRate(
+        unit_basis=PER_KG,
+        unit_rate=material.cost_per_kg,
+        batch_charge=tool.batch_charge if tool is not None else 0.0,
+        note=(
+            f"{stage.label} is priced by time: the press is charged by its moulding operation at "
+            f"the hourly 'injection_moulding' rate. This line carries the material — "
+            f"{material.name} at {currency} {material.cost_per_kg:g}/kg, the rate set's material "
+            f"price — and {mould}. The stage's own rate is not charged."
+        ),
+    )
 
 
 def price_stages(
@@ -343,7 +439,16 @@ def price_stages(
                 )
             )
             continue
-        rate = rate_set.stage_rates.get(stage.stage)
+        unit_rate_source: str | None = None
+        if stage.timed:
+            timed_rate = _timed_material_and_tool_rate(stage, rate_set)
+            if isinstance(timed_rate, StageProblem):
+                problems.append(timed_rate)
+                continue
+            rate = timed_rate
+            unit_rate_source = MATERIAL_RATE_SOURCE
+        else:
+            rate = rate_set.stage_rates.get(stage.stage)
         if rate is None:
             problems.append(
                 StageProblem(
@@ -478,8 +583,12 @@ def price_stages(
                     mass_note += (
                         f" Charged on {mass_kg:.4g} kg per part: that {base_mass_kg:.4g} kg "
                         f"divided by a yield of {yield_percent:g}%, entered by the engineer — the "
-                        "share of the metal poured or billet bought that ends up in it. No yield "
-                        "is assumed when none is entered."
+                        + (
+                            "share of each shot that is parts, the rest being runner and sprue. "
+                            if stage.timed
+                            else "share of the metal poured or billet bought that ends up in it. "
+                        )
+                        + "No yield is assumed when none is entered."
                     )
                     formula = STAGE_COST_FORMULA_WITH_YIELD
                 unit_cost = rate.unit_rate * mass_kg
@@ -529,6 +638,7 @@ def price_stages(
                 total_cost=run_cost + batch_charge,
                 supplies_material=supplies_material,
                 rate_note=rate.note,
+                unit_rate_source=unit_rate_source,
                 **amortisation,
             )
         )

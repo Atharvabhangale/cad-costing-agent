@@ -359,3 +359,38 @@ WALL_FIXTURES = {
     "plate_with_centre_hole": (plate_with_centre_hole, 10.0),
     "thin_rib_part": (thin_rib_part, 0.6),
 }
+
+
+# --- shapes for the moulding governing wall ----------------------------------
+# The governing wall is the diameter of the largest ball found inside the
+# material at the middle of a sampled wall (`measure_governing_wall`). Each
+# expected value below was worked out by hand and is what the sampler reports.
+
+
+# A moulded box: 60 x 40 x 30 outside, open at the top, every wall and the floor
+# 2.0 mm. Expected governing wall 2.0 — the corners, where an inscribed ball
+# grows to about 1.17 x the wall, are not where any sampled wall's middle lies.
+def moulded_box_2mm() -> bytes:
+    return to_step(_cut(_box(60.0, 40.0, 30.0), _box(56.0, 36.0, 40.0, at=(2.0, 2.0, 2.0))))
+
+
+# An 80 x 60 x 2 plate with a solid Ø6 boss, 10 tall, standing on it. Expected
+# governing wall 6.0: the boss's top face casts a ray down its axis, through the
+# plate, and the ball at that span's middle (6 mm below the top) is limited by
+# the boss's radius, 3 mm. The plate alone would be 2.0.
+def plate_2mm_with_6mm_boss() -> bytes:
+    return to_step(_fuse(_box(80.0, 60.0, 2.0), _cylinder(3.0, 10.0, (40.0, 30.0, 2.0))))
+
+
+# A plain 100 x 60 x 4 plate. Expected governing wall 4.0: a ray from a side
+# face runs 60 or 100 mm across the plate, and the ball at its middle is
+# limited by the top and bottom faces, 2 mm away — a length is not a thickness.
+def plate_4mm() -> bytes:
+    return to_step(_box(100.0, 60.0, 4.0))
+
+
+GOVERNING_WALL_FIXTURES = {
+    "moulded_box_2mm": (moulded_box_2mm, 2.0),
+    "plate_2mm_with_6mm_boss": (plate_2mm_with_6mm_boss, 6.0),
+    "plate_4mm": (plate_4mm, 4.0),
+}

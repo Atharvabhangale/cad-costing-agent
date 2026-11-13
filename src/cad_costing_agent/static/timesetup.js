@@ -186,6 +186,37 @@ function writeTimeDraftToForm() {
   $("t-sheet-table").value = Array.isArray(rows)
     ? rows.map((row) => `${row.thickness_mm}, ${row.cut_speed_mm_per_min}, ${row.pierce_seconds}`).join("\n")
     : "";
+  // The moulding thermal table, one "material, diffusivity, melt, mould, eject" row per line.
+  const materials = timeDraft.assumptions.moulding_materials;
+  $("t-mould-table").value = Array.isArray(materials)
+    ? materials
+        .map((row) =>
+          [row.material, row.thermal_diffusivity_mm2_per_s, row.melt_temperature_c,
+            row.mould_temperature_c, row.eject_temperature_c].join(", ")
+        )
+        .join("\n")
+    : "";
+}
+
+// The moulding table as the server's rows, split as typed; the server validates
+// (temperatures in order, each material once) and says what is wrong. A row's
+// source note is not editable here and is kept from the copied version.
+function readMouldingMaterials() {
+  const lines = $("t-mould-table").value.split("\n").map((line) => line.trim()).filter(Boolean);
+  if (!lines.length) return null;
+  const previous = (timeDraft.assumptions && timeDraft.assumptions.moulding_materials) || [];
+  return lines.map((line) => {
+    const [material, alpha, melt, mould, eject] = line.split(/\s*[,;]\s*/);
+    const kept = previous.find((row) => row.material === material);
+    return {
+      material,
+      thermal_diffusivity_mm2_per_s: Number(alpha),
+      melt_temperature_c: Number(melt),
+      mould_temperature_c: Number(mould),
+      eject_temperature_c: Number(eject),
+      note: kept ? kept.note : "",
+    };
+  });
 }
 
 // The table as the server's rows. Each line is split into its three numbers as
@@ -216,6 +247,8 @@ function readTimeFormIntoDraft() {
   });
   const table = readSheetCuttingTable();
   if (table) assumptions.sheet_cutting_table = table;
+  const materials = readMouldingMaterials();
+  if (materials) assumptions.moulding_materials = materials;
   timeDraft.assumptions = assumptions;
 }
 

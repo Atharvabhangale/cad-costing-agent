@@ -383,4 +383,5 @@ def test_the_route_rows_offer_the_flat_pattern_lines_for_a_timed_sheet_stage():
     code = _js_code("plan.js")
     work = code.split("const TIMED_STAGE_WORK = ", 1)[1].split("\n};", 1)[0]
     assert "add-sheet-lines" in work and "add-weld" in work
-    assert set(re.findall(r"^  (\w+): \{", work, re.M)) == {"welding", "sheet_cutting", "bending"}
+    # Moulding's line comes from the measured governing wall (tests/test_moulding_times.py).
+    assert set(re.findall(r"^  (\w+): \{", work, re.M)) == {"welding", "sheet_cutting", "bending", "moulding"}

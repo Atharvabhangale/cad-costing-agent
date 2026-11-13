@@ -1060,8 +1060,9 @@ def test_the_page_offers_a_tool_life_from_the_rate_set_and_works_nothing_out():
         in process
     )
     # Offered where the published rate has a one-off charge (the rate set says
-    # which) and never for a stage priced by time.
-    assert "rate.batch_charge && !timed" in process
+    # which) and never for a stage priced by time — except moulding, whose timed
+    # line still carries the mould (tests/test_moulding_times.py).
+    assert "rate.batch_charge && (!timed || materialLine)" in process
     for name in ("process.js", "plan.js", "routecompare.js", "app.js"):
         code = _js_without_comments(name)
         assert "/ amortisation_quantity" not in code and "amortisation_quantity /" not in code, name

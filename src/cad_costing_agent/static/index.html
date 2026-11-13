@@ -999,6 +999,24 @@
         </div>
       </div>
       <div class="card">
+        <h3>Injection moulding</h3>
+        <p class="hint">Blank by default: no press or material figure is assumed. The cooling time
+          is worked out from the part's measured governing wall (its thickest region found) and
+          the material's thermal row below; the cavity count is entered on the moulding stage.</p>
+        <label>Material thermal data — one row per material:
+          <span class="mono">material, diffusivity mm²/s, melt °C, mould °C, eject °C</span>
+          <textarea id="t-mould-table" data-param="moulding_materials" rows="3"
+            placeholder="abs, 0.1, 230, 60, 90"></textarea></label>
+        <p class="hint">A material not listed gets no moulding time; nothing is borrowed from
+          another material.</p>
+        <div class="grid3">
+          <label>Fill (s) <input id="t-mould-fill" data-param="moulding_fill_seconds" type="number" step="any"></label>
+          <label>Pack and hold (s) <input id="t-mould-pack" data-param="moulding_pack_seconds" type="number" step="any"></label>
+          <label>Open, eject, close (s) <input id="t-mould-open" data-param="moulding_open_eject_seconds" type="number" step="any"></label>
+          <label>Moulding setup (min) <input id="t-mould-setup" data-param="moulding_setup_minutes" type="number" step="any"></label>
+        </div>
+      </div>
+      <div class="card">
         <h3>Spindle limits — shared by every process</h3>
         <div class="grid3">
           <label>Minimum spindle (rpm) <input id="t-rpm-min" data-param="min_spindle_rpm" type="number" step="any"></label>

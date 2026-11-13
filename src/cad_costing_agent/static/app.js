@@ -856,7 +856,10 @@ function renderResult(response) {
               ? ` (${money(line.unit_rate, currency)} × ${line.quantity}` +
                 `${line.batch_charge ? ` + ${batchText(line)}` : ""})`
               : ` (${batchText(line)})`) +
-          (line.batch_charge_note ? ` — ${escapeHtml(line.batch_charge_note)}` : "")
+          (line.batch_charge_note ? ` — ${escapeHtml(line.batch_charge_note)}` : "") +
+          // A timed moulding line: its per-kg rate is the material price, and
+          // the server's note says what carries the press and the mould.
+          (line.unit_rate_source === "material_rate" ? ` — ${escapeHtml(line.rate_note)}` : "")
     ),
     ...(cost.material_note ? [escapeHtml(cost.material_note)] : []),
   ].join("<br>");
