@@ -181,6 +181,23 @@ function writeTimeDraftToForm() {
     const value = timeDraft.assumptions[input.dataset.param];
     input.value = value === undefined || value === null ? "" : String(value);
   });
+  // The sheet-cutting table, one "thickness, speed, pierce" row per line.
+  const rows = timeDraft.assumptions.sheet_cutting_table;
+  $("t-sheet-table").value = Array.isArray(rows)
+    ? rows.map((row) => `${row.thickness_mm}, ${row.cut_speed_mm_per_min}, ${row.pierce_seconds}`).join("\n")
+    : "";
+}
+
+// The table as the server's rows. Each line is split into its three numbers as
+// typed; the server validates them (order, ranges) and says what is wrong.
+// Blank is omitted, like every other parameter: no table, no cutting time.
+function readSheetCuttingTable() {
+  const lines = $("t-sheet-table").value.split("\n").map((line) => line.trim()).filter(Boolean);
+  if (!lines.length) return null;
+  return lines.map((line) => {
+    const [thickness, speed, pierce] = line.split(/[,;\s]+/).map(Number);
+    return { thickness_mm: thickness, cut_speed_mm_per_min: speed, pierce_seconds: pierce };
+  });
 }
 
 function readTimeFormIntoDraft() {
@@ -197,6 +214,8 @@ function readTimeFormIntoDraft() {
     // than a zero being sent — a feed of 0 would divide by zero downstream.
     if (raw !== "") assumptions[input.dataset.param] = Number(raw);
   });
+  const table = readSheetCuttingTable();
+  if (table) assumptions.sheet_cutting_table = table;
   timeDraft.assumptions = assumptions;
 }
 

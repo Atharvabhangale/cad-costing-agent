@@ -3332,8 +3332,9 @@ def price_cad_part(
                     "error": "timed_stage_not_costed",
                     "message": (
                         f"No estimate was produced: {labels} is priced by time, and the plan has "
-                        "no operation of it with a committed time. Add the welds and accept or "
-                        "enter their times, or price it from its stage rate."
+                        "no operation of it with a committed time. Add its operations — the "
+                        "welds, or the cut and bend lines from the measured flat pattern — and "
+                        "accept or enter their times, or price it from its stage rate."
                     ),
                     "stages": untimed,
                 },
@@ -4751,3 +4752,105 @@ async def cad_setups_apply_proposal(
         return setup_proposal.apply_setup_proposal(plan, proposal)
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
+# ----------------------------------------------------------------- sheet metal
+#
+# Whether an uploaded part is a constant-thickness sheet, its bends, and its flat
+# pattern for a K-factor the engineer enters. Read-only: nothing is stored, no
+# rate is read, and nothing here reaches a cost. The measurement lives in
+# `features.sheet_metal`; the route classifier's own rule for what sheet cannot
+# produce is handed to it from here, so the two cannot disagree.
+
+from cad_costing_agent.features import analyse_sheet_metal_from_bytes  # noqa: E402
+from cad_costing_agent.features.sheet_metal import SheetMetalAnalysis  # noqa: E402
+from cad_costing_agent.process_classification import sheet_excluding_features  # noqa: E402
+
+
+@app.post("/cad/sheet-metal", response_model=SheetMetalAnalysis)
+async def cad_sheet_metal(
+    file: UploadFile = File(...),
+    k_factor: float | None = Form(
+        None,
+        description=(
+            "The K-factor that places the neutral axis, 0 < K <= 0.5 — the engineer's, for this "
+            "material, tooling and bend radius. Omit it and the flat size is not worked out; no "
+            "default is assumed."
+        ),
+    ),
+) -> SheetMetalAnalysis:
+    """Measure a part as sheet metal: thickness, bends, cut contours and flat pattern.
+
+    Exact B-Rep only — a faceted export, an IGES surface model or an STL is
+    refused with the reason. A part that is not a constant-thickness sheet, or
+    one this measurement cannot unfold, is answered 200 with `status` saying
+    so and the reasons. Changes no cost, time, suggestion or classification
+    and persists nothing.
+    """
+    data = await file.read()
+    if len(data) > MAX_UPLOAD_BYTES:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"CAD file is {len(data) / 1024 / 1024:.1f} MB, above the "
+                f"{MAX_UPLOAD_BYTES // 1024 // 1024} MB limit for this POC."
+            ),
+        )
+    _import(data, file.filename or "", CAPABILITY_FEATURES, with_geometry=False)
+    try:
+        return analyse_sheet_metal_from_bytes(
+            data,
+            file.filename or "",
+            k_factor=k_factor,
+            sheet_excluders=sheet_excluding_features,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:  # noqa: BLE001 - a bad model must not take the app down
+        raise HTTPException(
+            status_code=500,
+            detail=(
+                "Sheet-metal measurement failed unexpectedly on this model "
+                f"({type(exc).__name__}). Geometry, the 3D preview and costing are unaffected."
+            ),
+        ) from exc
+
+
+from cad_costing_agent.sheet_operations import SheetPlanLines, sheet_plan_lines  # noqa: E402
+
+
+class SheetPlanLinesRequest(BaseModel):
+    analysis: SheetMetalAnalysis = Field(
+        description="The /cad/sheet-metal measurement the lines are proposed from, as returned."
+    )
+
+
+@app.post("/operations/sheet-metal-lines", response_model=SheetPlanLines)
+def operations_sheet_metal_lines(
+    request: SheetPlanLinesRequest,
+    time_profile_id: str | None = Query(
+        None, description="Published profile to estimate under. Omit for the built-in baseline."
+    ),
+    time_profile_version: str | None = Query(
+        None, description="Exact profile version to pin. Omit to use the latest."
+    ),
+    session: Session = Depends(get_session),
+) -> SheetPlanLines:
+    """The cut and bend operations a measured sheet part adds to its plan, with estimated times.
+
+    Takes the measurement rather than the file, as `/operations/estimate-time`
+    takes normalized operations. Each line is a system proposal: its time is
+    estimated under the selected profile and **not accepted** — it reaches a
+    cost only once someone accepts it or enters a time, and only on a route
+    whose sheet stage is priced by time. Nothing is stored and nothing priced.
+    """
+    profile = None
+    if time_profile_id:
+        try:
+            profile = TimeProfileRepository(session).get(time_profile_id, time_profile_version)
+        except ValueError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+    try:
+        return sheet_plan_lines(request.analysis, profile=profile)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc

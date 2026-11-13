@@ -330,6 +330,29 @@
           </details>
         </div>
 
+        <!-- Sheet metal: thickness, bends and the flat pattern, measured from the
+             B-Rep for a K-factor the engineer enters. Shown when the route is a
+             sheet-metal one. Filled by sheet.js from /cad/sheet-metal. -->
+        <div class="card hidden" id="sheet-card">
+          <div class="panel-head">
+            <h2>Sheet metal <span class="muted">— thickness, bends and flat pattern</span></h2>
+          </div>
+          <div class="grid2">
+            <label>K-factor (0–0.5) <input id="sheet-k" type="number" min="0" max="0.5" step="any"
+              placeholder="yours to enter — no default"></label>
+            <div class="viewer-tools">
+              <button type="button" id="sheet-measure" class="secondary tiny">Measure as sheet metal</button>
+              <button type="button" id="sheet-add-lines" class="secondary tiny" disabled>Add cut and bend lines to the plan</button>
+            </div>
+          </div>
+          <p id="sheet-status" class="hint"></p>
+          <div id="sheet-result"></div>
+          <details class="detail-toggle" id="sheet-checks-toggle">
+            <summary>What was checked, and what is not</summary>
+            <div id="sheet-checks"></div>
+          </details>
+        </div>
+
         <div class="card">
           <div class="panel-head">
             <h2>Manufacturing plan</h2>
@@ -956,6 +979,26 @@
           time — once per weld, per part — and never to the setup, which is charged once.</p>
       </div>
       <div class="card">
+        <h3>Sheet cutting and bending</h3>
+        <p class="hint">Blank by default: no laser, plasma or press-brake figure is assumed. The
+          cut perimeter, pierces, thickness and bend count come from the part's measured flat
+          pattern; these say how fast your machines work through them.</p>
+        <label>Cutting table — one row per thickness, thinnest first:
+          <span class="mono">thickness mm, cut speed mm/min, pierce s</span>
+          <textarea id="t-sheet-table" data-param="sheet_cutting_table" rows="4"
+            placeholder="1, 6000, 0.5&#10;2, 4000, 1&#10;3, 2800, 1.5"></textarea></label>
+        <p class="hint">Between two rows both figures are read on a straight line between them;
+          a sheet thinner or thicker than the table gets no time — a speed is never extrapolated.</p>
+        <div class="grid3">
+          <label>Cutting setup (min) <input id="t-sheet-setup" data-param="sheet_cutting_setup_minutes" type="number" step="any"></label>
+          <label>Unload per cut part (min) <input id="t-sheet-handling" data-param="sheet_cutting_handling_minutes_per_part" type="number" step="any"></label>
+          <label>Per bend (min) <input id="t-bend-per" data-param="bending_minutes_per_bend" type="number" step="any"></label>
+          <label>Bending setup (min) <input id="t-bend-setup" data-param="bending_setup_minutes" type="number" step="any"></label>
+          <label>Reposition between bends (min) <input id="t-bend-reposition" data-param="bending_reposition_minutes_per_bend" type="number" step="any"></label>
+          <label>Load and unload at the brake (min) <input id="t-bend-handling" data-param="bending_handling_minutes_per_part" type="number" step="any"></label>
+        </div>
+      </div>
+      <div class="card">
         <h3>Spindle limits — shared by every process</h3>
         <div class="grid3">
           <label>Minimum spindle (rpm) <input id="t-rpm-min" data-param="min_spindle_rpm" type="number" step="any"></label>
@@ -1082,6 +1125,7 @@
 <script src="plan.js"></script>
 <script src="process.js"></script>
 <script src="stock.js"></script>
+<script src="sheet.js"></script>
 <script src="setup.js"></script>
 <script src="timesetup.js"></script>
 <script src="impact.js"></script>

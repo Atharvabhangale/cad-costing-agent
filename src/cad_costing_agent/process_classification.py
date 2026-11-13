@@ -642,6 +642,15 @@ def _excludes_sheet(feature: Feature) -> bool:
     )
 
 
+def sheet_excluding_features(features: Iterable[Feature]) -> list[Feature]:
+    """The features cutting and bending sheet cannot produce, by `_excludes_sheet`.
+
+    Public so the sheet-metal measurement applies exactly this rule, handed in
+    by `main.py`, rather than a copy of it.
+    """
+    return [feature for feature in features if _excludes_sheet(feature)]
+
+
 def _ids(features: Iterable[Feature]) -> str:
     return ", ".join(feature.feature_id for feature in features)
 

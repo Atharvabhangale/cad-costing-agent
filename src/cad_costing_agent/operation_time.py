@@ -85,6 +85,24 @@ tell a weld that carries its own grinding from one that does not.
 Its parameters default to *absent*: a profile with none says so and the time is
 entered by hand, rather than a built-in figure pretending to be a welding shop.
 
+**Sheet cutting** — one flat blank, from its measured flat pattern::
+
+    speed, pierce = the profile's cutting table at the sheet thickness
+                    (a row, or linear between the two rows either side;
+                     outside the table: no time — never extrapolated)
+    cycle = cut_perimeter / speed + pierces · pierce_seconds / 60
+          + handling_per_part                    (only if the profile gives it)
+
+**Bending** — one part on a press brake, from its measured bend count::
+
+    cycle = bends · minutes_per_bend
+          + (bends − 1) · reposition_per_bend    (only if the profile gives it)
+          + handling_per_part                    (only if the profile gives it)
+
+Both default to *absent* exactly as welding does, and the cut perimeter, pierce
+count, thickness and bend count are read from `features.sheet_metal`'s
+measurement — a K-factor the engineer entered decides the perimeter.
+
 Setup time is a flat per-process figure, and is per *operation line* rather than
 per physical setup — six drilled holes listed separately carry six setups. That
 is stated in the assumptions rather than being quietly consolidated, because
@@ -147,6 +165,16 @@ class WeldSpec(BaseModel):
         allow_inf_nan=False,
         description="Fillet leg length, or the plate thickness of a butt weld.",
     )
+
+
+class SheetCuttingPoint(BaseModel):
+    """One row of a profile's sheet-cutting table: at this thickness, this speed and pierce."""
+
+    model_config = ConfigDict(frozen=True)
+
+    thickness_mm: float = Field(gt=0, le=200.0, allow_inf_nan=False)
+    cut_speed_mm_per_min: float = Field(gt=0, le=100_000.0, allow_inf_nan=False)
+    pierce_seconds: float = Field(ge=0, le=600.0, allow_inf_nan=False)
 
 
 class TimeAssumptions(BaseModel):
@@ -300,6 +328,47 @@ class TimeAssumptions(BaseModel):
         ),
     )
 
+    # --- sheet cutting and bending ---
+    #
+    # None by default, like welding: the built-in baseline describes a
+    # machining shop, and no laser, plasma or press-brake figure is assumed on
+    # its behalf. The cut and bend operations they time are measured from the
+    # flat pattern (`features.sheet_metal`), never typed.
+    sheet_cutting_table: tuple[SheetCuttingPoint, ...] | None = Field(
+        default=None,
+        description=(
+            "Cut speed and pierce time by sheet thickness, thinnest first. Between two rows both "
+            "are interpolated linearly; outside the table no time is given — a cut speed is never "
+            "extrapolated."
+        ),
+    )
+    sheet_cutting_setup_minutes: float | None = Field(default=None, ge=0, le=10000.0)
+    sheet_cutting_handling_minutes_per_part: float | None = Field(
+        default=None,
+        ge=0,
+        le=1000.0,
+        description="Unloading and sorting one cut part, added to its cycle time. Optional.",
+    )
+    bending_minutes_per_bend: float | None = Field(
+        default=None, gt=0, le=1000.0, description="One press-brake stroke, with its gauging."
+    )
+    bending_setup_minutes: float | None = Field(default=None, ge=0, le=10000.0)
+    bending_reposition_minutes_per_bend: float | None = Field(
+        default=None,
+        ge=0,
+        le=1000.0,
+        description=(
+            "Turning or flipping the part between bends, added once for every bend after the "
+            "first. Optional."
+        ),
+    )
+    bending_handling_minutes_per_part: float | None = Field(
+        default=None,
+        ge=0,
+        le=1000.0,
+        description="Loading and unloading the part at the brake, added once per part. Optional.",
+    )
+
     # --- shared spindle limits ---
     #
     # These two are the one place the model deliberately *clamps* rather than
@@ -310,6 +379,24 @@ class TimeAssumptions(BaseModel):
     # and none of them silently changes a value the user did enter.
     min_spindle_rpm: float = Field(default=50.0, gt=0, le=200_000.0)
     max_spindle_rpm: float = Field(default=6000.0, gt=0, le=200_000.0)
+
+    @model_validator(mode="after")
+    def _check_cutting_table(self) -> "TimeAssumptions":
+        table = self.sheet_cutting_table
+        if table is None:
+            return self
+        if not table:
+            raise ValueError(
+                "sheet_cutting_table must have at least one row, or be left out for a profile "
+                "that times no sheet cutting."
+            )
+        thicknesses = [row.thickness_mm for row in table]
+        if any(later <= earlier for earlier, later in zip(thicknesses, thicknesses[1:])):
+            raise ValueError(
+                "sheet_cutting_table rows must be listed thinnest first, each thickness once — "
+                f"got {', '.join(f'{t:g}' for t in thicknesses)} mm."
+            )
+        return self
 
     @model_validator(mode="after")
     def _check_spindle_range(self) -> "TimeAssumptions":
@@ -1087,11 +1174,191 @@ def _welding(weld: WeldSpec | None, a: TimeAssumptions):
     return cycle, "welding_time_baseline_v1", evidence, assumptions, parameters
 
 
+def _count(dimensions: dict[str, float], key: str) -> int | None:
+    """A whole, positive count from the dimensions, or None."""
+    value = _positive(dimensions, key)
+    if value is None or value != int(value):
+        return None
+    return int(value)
+
+
+def _cutting_point(a: TimeAssumptions, thickness: float):
+    """(cut speed, pierce seconds, how they were read) at this thickness, or None outside the table.
+
+    Exactly on a row, that row. Between two rows, each figure is interpolated
+    linearly between them, and both rows are named. Outside the table there is
+    no answer: past the thickest row the machine may not cut at all, and below
+    the thinnest a speed is not a straight-line guess either.
+    """
+    rows = a.sheet_cutting_table
+    for row in rows:
+        if abs(row.thickness_mm - thickness) <= 1e-9:
+            return row.cut_speed_mm_per_min, row.pierce_seconds, f"the {row.thickness_mm:g} mm row", (row, row)
+    for low, high in zip(rows, rows[1:]):
+        if low.thickness_mm < thickness < high.thickness_mm:
+            share = (thickness - low.thickness_mm) / (high.thickness_mm - low.thickness_mm)
+            speed = low.cut_speed_mm_per_min + share * (high.cut_speed_mm_per_min - low.cut_speed_mm_per_min)
+            pierce = low.pierce_seconds + share * (high.pierce_seconds - low.pierce_seconds)
+            how = (
+                f"interpolated linearly between the {low.thickness_mm:g} mm row "
+                f"({low.cut_speed_mm_per_min:g} mm/min, {low.pierce_seconds:g} s) and the "
+                f"{high.thickness_mm:g} mm row ({high.cut_speed_mm_per_min:g} mm/min, "
+                f"{high.pierce_seconds:g} s)"
+            )
+            return speed, pierce, how, (low, high)
+    return None
+
+
+def _sheet_cutting(dimensions: dict[str, float], a: TimeAssumptions):
+    """Cutting one flat blank: its whole cut perimeter, plus a pierce per contour."""
+    absent = [
+        name
+        for name in ("sheet_cutting_table", "sheet_cutting_setup_minutes")
+        if getattr(a, name) is None
+    ]
+    if absent:
+        return _needs_input(
+            "This time profile has no sheet-cutting parameters (" + ", ".join(absent) + "), so no "
+            "cutting time is estimated. Select a profile that publishes them, or enter the time.",
+            absent,
+            a.is_illustrative,
+        )
+    perimeter = _positive(dimensions, "cut_perimeter_mm")
+    pierces = _count(dimensions, "pierce_count")
+    thickness = _positive(dimensions, "thickness_mm")
+    missing = [
+        name
+        for name, value in (
+            ("cut_perimeter_mm", perimeter),
+            ("pierce_count", pierces),
+            ("thickness_mm", thickness),
+        )
+        if value is None
+    ]
+    if missing:
+        return _needs_input(
+            "A cutting time needs the flat pattern's cut perimeter, its pierce count and the sheet "
+            "thickness. Measure the part as sheet metal with a K-factor to get them.",
+            missing,
+            a.is_illustrative,
+        )
+    point = _cutting_point(a, thickness)
+    if point is None:
+        table = a.sheet_cutting_table
+        return _needs_input(
+            f"The sheet is {thickness:g} mm thick, outside this profile's cutting table "
+            f"({table[0].thickness_mm:g}–{table[-1].thickness_mm:g} mm). A cut speed is not "
+            "extrapolated: enter the time, or publish a table that covers this thickness.",
+            ["sheet_cutting_table"],
+            a.is_illustrative,
+        )
+    speed, pierce_seconds, how, (low, high) = point
+    cut = perimeter / speed
+    pierce = pierces * pierce_seconds / 60.0
+    cycle = cut + pierce
+    evidence = [
+        f"flat pattern: cut perimeter {perimeter:g} mm, {pierces} pierce(s), sheet {thickness:g} mm "
+        "— measured from the unfolded CAD model",
+    ]
+    assumptions = [
+        f"cut speed {speed:g} mm/min and pierce {pierce_seconds:g} s at {thickness:g} mm: {how}",
+        f"cut {cut:.2f} min = {perimeter:g} mm / {speed:g} mm/min",
+        f"pierces {pierce:.2f} min = {pierces} × {pierce_seconds:g} s / 60",
+    ]
+    parameters = {
+        "sheet_cutting_setup_minutes": a.sheet_cutting_setup_minutes,
+        "sheet_cut_speed_mm_per_min": round(speed, 6),
+        "sheet_pierce_seconds": round(pierce_seconds, 6),
+        "sheet_cut_table_lower_thickness_mm": low.thickness_mm,
+        "sheet_cut_table_upper_thickness_mm": high.thickness_mm,
+        "thickness_mm": thickness,
+        "cut_perimeter_mm": perimeter,
+        "pierce_count": float(pierces),
+        "sheet_cut_minutes": round(cut, 6),
+        "sheet_pierce_minutes": round(pierce, 6),
+    }
+    cycle_line = f"cycle {{cycle:.2f}} min = {cut:.2f} + {pierce:.2f}"
+    handling = a.sheet_cutting_handling_minutes_per_part
+    if handling is not None:
+        cycle += handling
+        cycle_line += f" + {handling:g}"
+        parameters["sheet_cutting_handling_minutes_per_part"] = handling
+        assumptions.append(f"unloading and sorting {handling:g} min per part, added to the cycle time")
+    assumptions.append(cycle_line.format(cycle=cycle))
+    return cycle, "sheet_cutting_time_v1", evidence, assumptions, parameters
+
+
+def _bending(dimensions: dict[str, float], a: TimeAssumptions):
+    """Bending one part on a press brake: a stroke per measured bend."""
+    absent = [
+        name for name in ("bending_minutes_per_bend", "bending_setup_minutes") if getattr(a, name) is None
+    ]
+    if absent:
+        return _needs_input(
+            "This time profile has no bending parameters (" + ", ".join(absent) + "), so no "
+            "bending time is estimated. Select a profile that publishes them, or enter the time.",
+            absent,
+            a.is_illustrative,
+        )
+    bends = _count(dimensions, "bend_count")
+    if bends is None:
+        return _needs_input(
+            "A bending time needs the part's bend count. Measure the part as sheet metal to get it.",
+            ["bend_count"],
+            a.is_illustrative,
+        )
+    per_bend = a.bending_minutes_per_bend
+    strokes = bends * per_bend
+    cycle = strokes
+    evidence = [f"{bends} bend(s) — measured from the CAD model's bend faces"]
+    assumptions = [f"strokes {strokes:.2f} min = {bends} × {per_bend:g} min per bend"]
+    parameters = {
+        "bending_minutes_per_bend": per_bend,
+        "bending_setup_minutes": a.bending_setup_minutes,
+        "bend_count": float(bends),
+    }
+    added = []
+    reposition = a.bending_reposition_minutes_per_bend
+    if reposition is not None:
+        turns = (bends - 1) * reposition
+        cycle += turns
+        added.append(f"{turns:.2f}")
+        parameters["bending_reposition_minutes_per_bend"] = reposition
+        assumptions.append(
+            f"repositioning {turns:.2f} min = {bends - 1} × {reposition:g} min, between bends "
+            "(none before the first)"
+        )
+    handling = a.bending_handling_minutes_per_part
+    if handling is not None:
+        cycle += handling
+        added.append(f"{handling:g}")
+        parameters["bending_handling_minutes_per_part"] = handling
+        assumptions.append(f"loading and unloading {handling:g} min per part, added to the cycle time")
+    if added:
+        assumptions.append(f"cycle {cycle:.2f} min = {strokes:.2f} + " + " + ".join(added))
+    return cycle, "bending_time_v1", evidence, assumptions, parameters
+
+
 _SETUP_MINUTES = {
     "drilling": lambda a: a.drilling_setup_minutes,
     "milling": lambda a: a.milling_setup_minutes,
     "turning": lambda a: a.turning_setup_minutes,
     "welding": lambda a: a.welding_setup_minutes,
+    "sheet_cutting": lambda a: a.sheet_cutting_setup_minutes,
+    "bending": lambda a: a.bending_setup_minutes,
+}
+
+# The one-line reason an estimate gives, by process. Machining's is generic.
+_TIME_REASONS = {
+    "welding": (
+        "Welding time derived from the weld the engineer described and the profile's welding "
+        "parameters."
+    ),
+    "sheet_cutting": (
+        "Sheet cutting time derived from the flat pattern's cut perimeter and pierces and the "
+        "profile's cutting table."
+    ),
+    "bending": "Bending time derived from the measured bend count and the profile's bending parameters.",
 }
 
 
@@ -1180,6 +1447,10 @@ def estimate_operation_time(
         drilling_fields = {"drilling_steps": chosen, "drilling_options": options}
     elif process == "welding":
         outcome = _welding(weld, a)
+    elif process == "sheet_cutting":
+        outcome = _sheet_cutting(dimensions, a)
+    elif process == "bending":
+        outcome = _bending(dimensions, a)
     elif process == "turning" and (feature_type or "").lower() == "plane":
         outcome = _facing(dimensions, a)
     elif process == "turning":
@@ -1210,12 +1481,10 @@ def estimate_operation_time(
         total_time_minutes=_round(setup + cycle),
         confidence=confidence,
         method=method,
-        reason=(
-            "Welding time derived from the weld the engineer described and the profile's welding "
-            "parameters."
-            if process == "welding"
-            else f"{process.capitalize()} time derived from the feature's own dimensions and the "
-            "configured cutting parameters."
+        reason=_TIME_REASONS.get(
+            process,
+            f"{process.capitalize()} time derived from the feature's own dimensions and the "
+            "configured cutting parameters.",
         ),
         evidence=evidence,
         assumptions=[
@@ -1263,6 +1532,7 @@ __all__ = [
     "METHOD_CONFIDENCE_CEILING",
     "NEEDS_INPUT_NOTE",
     "OperationTimeEstimate",
+    "SheetCuttingPoint",
     "TimeAssumptions",
     "TimeStatus",
     "WeldSpec",

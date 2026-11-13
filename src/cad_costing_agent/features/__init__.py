@@ -156,15 +156,18 @@ def recognize_features(
     filename: str = "",
     source_format: str = "step",
     recognizers=DEFAULT_RECOGNIZERS,
+    topology: TopologyModel | None = None,
 ) -> FeatureRecognitionResult:
     """Run the recognizers over an already-parsed B-Rep shape.
 
     A recognizer that raises is recorded as a warning and skipped rather than
     aborting the run: a model the pocket rule chokes on should still report its
-    holes.
+    holes. `topology` is the shape's scan when the caller already made one, so
+    the shape is not traversed twice.
     """
     started = time.perf_counter()
-    topology: TopologyModel = build_topology(shape)
+    if topology is None:
+        topology = build_topology(shape)
     warnings = list(topology.warnings)
 
     if not topology.faces:
@@ -520,7 +523,95 @@ def recognize_features_with_shape(data: bytes, filename: str) -> RecognizedShape
     return RecognizedShape(recognize_features(shape, filename=filename, source_format="step"), shape)
 
 
+def analyse_sheet_metal_from_bytes(
+    data: bytes,
+    filename: str,
+    *,
+    k_factor: float | None = None,
+    sheet_excluders=None,
+):
+    """Measure an uploaded part as sheet metal: thickness, bends, flat pattern.
+
+    Exact B-Rep only. The shape is read by the one STEP or IGES reader and
+    scanned once; that scan feeds both the recognizers and the sheet
+    measurement. A faceted export, an IGES surface model and an STL carry no
+    exact cylinders to measure a bend radius from, so each is refused with the
+    reason rather than approximated.
+
+    `sheet_excluders` is a function from the recognized features to those that
+    cutting and bending sheet cannot produce. The caller hands in the route
+    classifier's own rule, so the two cannot disagree and this package imports
+    nothing above it.
+    """
+    from cad_costing_agent.features.sheet_metal import analyse_sheet_metal, validate_k_factor
+
+    k = validate_k_factor(k_factor)
+    file_format = Path(filename or "").suffix.strip().lower().lstrip(".")
+    if not data:
+        raise ValueError("CAD file is empty.")
+
+    if file_format in STEP_FORMATS:
+        representation = classify_step_bytes(data)
+        if representation.is_faceted:
+            raise ValueError(
+                "This STEP file is a faceted export: flat polygons, with no exact cylinders to "
+                "measure a bend radius from or unfold. Sheet-metal measurement needs analytic "
+                "B-Rep; re-export the part as solid geometry. "
+                + " ".join(representation.notes)
+            )
+        if representation.representation == WIREFRAME:
+            raise ValueError(
+                "This STEP file contains no surface geometry to analyse — "
+                + " ".join(representation.notes)
+            )
+        shape = read_step_shape(data)
+        source_format = "step"
+    elif file_format in IGES_FORMATS:
+        from cad_costing_agent.cad_iges import analyse_iges_shape, ensure_readable, read_iges_shape
+
+        ensure_readable(data)
+        iges = analyse_iges_shape(read_iges_shape(data))
+        if iges.shape is None or iges.sewing_applied:
+            raise ValueError(
+                "This IGES file stores loose trimmed surfaces rather than a solid. Such an export "
+                "rewrites cylinders as generic surfaces, so a bend radius cannot be measured from "
+                "it. Re-export with solid/B-Rep geometry, or export STEP."
+            )
+        shape = iges.shape
+        source_format = "iges"
+    elif file_format in STL_FORMATS:
+        raise ValueError(
+            f"Sheet-metal measurement needs the exact faces of a B-Rep model, and '{file_format}' "
+            "is a triangle mesh: a bend in a mesh is a run of flat facets with no radius. Upload "
+            "the STEP version of this part."
+        )
+    else:
+        supported = ", ".join(sorted(STEP_FORMATS | IGES_FORMATS))
+        raise ValueError(
+            f"Unsupported CAD file format '{file_format or filename}' for sheet-metal "
+            f"measurement. Supported formats: {supported}"
+        )
+
+    topology = build_topology(shape)
+    recognition = recognize_features(
+        shape, filename=filename, source_format=source_format, topology=topology
+    )
+    excluders = (
+        [(feature.feature_id, describe_feature(feature)) for feature in sheet_excluders(recognition.features)]
+        if sheet_excluders is not None
+        else []
+    )
+    return analyse_sheet_metal(
+        topology,
+        k_factor=k,
+        sheet_excluders=excluders,
+        filename=filename,
+        source_format=source_format,
+    )
+
+
 __all__ = [
+    "analyse_sheet_metal_from_bytes",
     "FeatureRecognitionResult",
     "MAX_FACES",
     "NO_SOLID_WARNING",

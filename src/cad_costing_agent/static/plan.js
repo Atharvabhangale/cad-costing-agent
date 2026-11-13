@@ -462,8 +462,27 @@ function asFormedLabel() {
 // process their operations are costed as. Mirrors `stage_costing.TIMEABLE_STAGES`
 // (a test holds the two equal); the server refuses any other stage anyway. Fit-up
 // and weld finishing are timed by the same welds (their tack and finishing
-// time), never on their own.
-const TIMED_STAGE_PROCESSES = { welding: "welding", fit_up: "welding", weld_finishing: "welding" };
+// time), never on their own. Sheet cutting and bending are timed by the cut and
+// bend lines the sheet-metal measurement proposes (sheet.js).
+const TIMED_STAGE_PROCESSES = {
+  welding: "welding", fit_up: "welding", weld_finishing: "welding", sheet_cutting: "sheet_cutting", bending: "bending",
+};
+// What a timed stage's own operations are called and how they get into the plan.
+// Display words only: welds are typed by the engineer, cut and bend lines come
+// from the measured flat pattern.
+const TIMED_STAGE_WORK = {
+  welding: { many: "welds", add: `<button type="button" class="secondary tiny add-weld">+ Add weld</button>`, how: "use + Add weld" },
+  sheet_cutting: {
+    many: "cutting lines",
+    add: `<button type="button" class="secondary tiny add-sheet-lines">+ Add from flat pattern</button>`,
+    how: "measure the part as sheet metal and add its lines",
+  },
+  bending: {
+    many: "bending lines",
+    add: `<button type="button" class="secondary tiny add-sheet-lines">+ Add from flat pattern</button>`,
+    how: "measure the part as sheet metal and add its lines",
+  },
+};
 // The timed stages whose time is a part of each weld's time rather than welds of
 // their own, and what that part is called. Display words only; the keys mirror
 // `stage_costing.TIMED_ONLY_WITH` (a test holds them equal).
@@ -787,8 +806,10 @@ function routeStageRows() {
       ? `<span class="pill pill-ok">priced by time — ${escapeHtml(TIMED_IN_WELDS[stage.stage])}, ` +
         `in the welds ${position - 1 < cut ? "below" : "above"}</span>`
       : timed(stage)
-      ? `<span class="pill pill-ok">priced by time — its welds are operations below</span>` +
-        `<button type="button" class="secondary tiny add-weld">+ Add weld</button>`
+      ? `<span class="pill pill-ok">priced by time — its ${
+          escapeHtml((TIMED_STAGE_WORK[stage.stage] || TIMED_STAGE_WORK.welding).many)
+        } are operations ${position - 1 < cut ? "below" : "above"}</span>` +
+        (TIMED_STAGE_WORK[stage.stage] || TIMED_STAGE_WORK.welding).add
       : `<span class="pill pill-off">route stage — stage rate, no time</span>${stageRateText(stage)}`;
     return (
       `<tr class="setup-empty route-stage-row" data-stage="${escapeHtml(stage.stage)}"><td colspan="8">` +
@@ -823,6 +844,13 @@ function renderPlanRoute() {
     if (!stage.process_type && TIMED_STAGE_PROCESSES[stage.stage] && stagePricing(stage.stage) === "timed") {
       const process = TIMED_STAGE_PROCESSES[stage.stage];
       const count = counted.filter((operation) => effectiveType(operation) === process).length;
+      const work = TIMED_STAGE_WORK[stage.stage];
+      if (work && process !== "welding") {
+        return (
+          `<li>${escapeHtml(stage.label)} <span class="pill pill-ok">priced by time — hourly rate</span> ` +
+          `<span class="muted">${count ? `${count} of its ${escapeHtml(work.many)} below` : `none yet — ${escapeHtml(work.how)}`}</span></li>`
+        );
+      }
       const welds = `${count} weld${count === 1 ? "" : "s"}`;
       if (TIMED_IN_WELDS[stage.stage]) {
         return (
