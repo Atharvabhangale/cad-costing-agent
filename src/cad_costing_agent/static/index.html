@@ -363,6 +363,22 @@
           <button type="button" id="add-op" class="secondary">+ Add operation</button>
           <p id="ops-note" class="hint"></p>
           <p id="ops-uncosted" class="warning-inline hidden"></p>
+          <!-- Setups proposed by the server from the directions a tool must
+               approach each feature from. plan.js renders the server's
+               proposal and sends "Apply" back to the server; nothing is
+               grouped in the browser. -->
+          <details class="detail-toggle" id="approach-toggle">
+            <summary>Proposed setups by approach direction</summary>
+            <p class="hint">Reads, from the CAD's exact faces, which way a tool has to come from to
+            reach each milled or drilled feature, and checks each direction with straight rays. On a
+            3-axis mill every direction is its own setup. A proposal only: the plan changes when you
+            apply it, and the system's own grouping is kept beside yours.</p>
+            <div class="viewer-tools">
+              <button type="button" id="propose-setups" class="secondary tiny">Propose setups from the CAD</button>
+              <button type="button" id="apply-approach" class="secondary tiny hidden">Apply this grouping</button>
+            </div>
+            <div id="approach-proposal"></div>
+          </details>
         </div>
 
         <!-- ---------------- suggested operations (review) ---------------- -->

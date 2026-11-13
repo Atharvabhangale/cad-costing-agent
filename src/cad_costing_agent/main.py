@@ -4513,3 +4513,120 @@ def estimate_cost_drivers(
     except ValueError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     return cost_drivers.cost_drivers(stored.estimate_id, stored.result_snapshot)
+
+
+# ------------------------------------------------------- setups by approach
+#
+# Setups proposed from the directions a tool must approach each feature from,
+# with a straight-ray access check on the B-Rep. `/cad/setups/propose` returns
+# the proposal beside the plan and changes nothing; `/cad/setups/apply-proposal`
+# recomputes it from the same file and plan and applies it, because a person
+# asked to. Neither stores anything: the plan comes back to the browser, which
+# owns it until it is costed. The proposal is recomputed rather than accepted
+# from the request so a grouping recorded as "from the approach proposal" can
+# only ever be the one the geometry produced.
+
+from cad_costing_agent import setup_proposal  # noqa: E402
+from cad_costing_agent.features.approach import (  # noqa: E402
+    ApproachUnavailable,
+    approach_directions,
+    shape_and_features,
+)
+
+
+def _plan_from_form(manufacturing_plan: str) -> ManufacturingPlan:
+    try:
+        return ManufacturingPlan.model_validate_json(manufacturing_plan)
+    except ValidationError as exc:
+        raise HTTPException(status_code=400, detail=exc.errors(include_url=False)) from exc
+
+
+def _setup_proposal_for(
+    data: bytes, filename: str, plan: ManufacturingPlan, component_id: str | None
+) -> setup_proposal.SetupProposal:
+    if len(data) > MAX_UPLOAD_BYTES:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"CAD file is {len(data) / 1024 / 1024:.1f} MB, above the "
+                f"{MAX_UPLOAD_BYTES // 1024 // 1024} MB limit for this POC."
+            ),
+        )
+    document = _import(data, filename, CAPABILITY_FEATURES, with_geometry=False)
+    try:
+        shape, recognition = shape_and_features(
+            data, document.source_format, component_id=component_id or None
+        )
+    except ApproachUnavailable as exc:
+        return setup_proposal.unavailable(str(exc), component_id=component_id or None)
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    if recognition.representation != "brep":
+        return setup_proposal.unavailable(
+            "Approach directions need exact B-Rep faces, and this file's features were "
+            f"recovered from a {recognition.representation} representation.",
+            component_id=component_id or None,
+        )
+    try:
+        approaches = approach_directions(
+            shape, setup_proposal.features_to_analyse(plan, list(recognition.features))
+        )
+    except ApproachUnavailable as exc:
+        return setup_proposal.unavailable(str(exc), component_id=component_id or None)
+    return setup_proposal.propose_setups(plan, approaches, component_id=component_id or None)
+
+
+@app.post("/cad/setups/propose", response_model=setup_proposal.SetupProposal)
+async def cad_setups_propose(
+    file: UploadFile = File(...),
+    manufacturing_plan: str = Form(..., description="JSON-encoded ManufacturingPlan, as the operations table holds it."),
+    component_id: str | None = Form(
+        None,
+        description=(
+            "For an assembly component's plan: its definition id. The proposal is made on that "
+            "component's own shape only — never across components."
+        ),
+    ),
+) -> setup_proposal.SetupProposal:
+    """Propose setups from the directions a tool must approach each feature from.
+
+    For every milled or drilled operation linked to a recognized feature, the
+    candidate approach directions are read from the B-Rep (a blind hole's open
+    end, a through hole's two ends, a floor or face normal) and checked with
+    straight rays: a direction is reachable only if every ray leaves the part
+    without meeting material. Operations are then grouped greedily by
+    reachable direction, one setup per direction on a 3-axis mill.
+
+    **A proposal only.** The plan is not changed, nothing is stored, and no
+    time is committed. Unreachable features and lines with no approach are
+    listed with the reason and left where they are. A faceted, STL or
+    surface-only IGES file gets `available: false` with the reason.
+    """
+    data = await file.read()
+    plan = _plan_from_form(manufacturing_plan)
+    return _setup_proposal_for(data, file.filename or "", plan, component_id)
+
+
+@app.post("/cad/setups/apply-proposal", response_model=setup_proposal.AppliedProposal)
+async def cad_setups_apply_proposal(
+    file: UploadFile = File(...),
+    manufacturing_plan: str = Form(...),
+    component_id: str | None = Form(None),
+) -> setup_proposal.AppliedProposal:
+    """Apply the approach-direction proposal to this plan, because a person asked.
+
+    The proposal is recomputed from the file and plan sent, then applied
+    through the plan's own regrouping: one new setup per direction, each
+    operation moved by `user_setup_id` with `system_setup_id` untouched. The
+    new setups carry the time profile's setup estimate, uncommitted until
+    accepted. Returns the new plan; nothing is stored.
+    """
+    data = await file.read()
+    plan = _plan_from_form(manufacturing_plan)
+    proposal = _setup_proposal_for(data, file.filename or "", plan, component_id)
+    try:
+        return setup_proposal.apply_setup_proposal(plan, proposal)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
