@@ -671,72 +671,72 @@ def shape_and_features(data: bytes, source_format: str, *, component_id: str | N
     """The exact shape and the features recognized from it, or why there is none.
 
     `source_format` is the canonical name `cad_import` already identified — this
-    reads no file extension. The shape comes from the same single readers and the
-    features from the same `recognize_features` every other path uses, so the
-    feature ids here are the ids the plan's operations link to.
+    reads no file extension. The shape comes from `load_exact_shape`, the feature
+    layer's one route to the single readers, and the features from the same
+    `recognize_features` every other path uses, so the feature ids here are the
+    ids the plan's operations link to. Only the sentences are this module's.
     """
-    from cad_costing_agent.features import recognize_component_features, recognize_features
+    from cad_costing_agent.features import (
+        NotExact,
+        load_exact_shape,
+        recognize_component_features,
+        recognize_features,
+    )
+
+    # A surface-model IGES is no use here, so it is refused from the Directory
+    # scan, before the parse.
+    loaded = load_exact_shape(
+        data, source_format, component_id=component_id, analytic_solid_only=True
+    )
+    reason = loaded.reason
 
     if component_id is not None:
-        from cad_costing_agent.cad_assembly import read_step_assembly
-
-        structure = read_step_assembly(data)
-        definition = structure.definitions.get(component_id)
-        if definition is None:
+        if reason is NotExact.UNKNOWN_COMPONENT:
             raise LookupError(f"No component '{component_id}' in this file.")
-        if not definition.has_geometry:
+        definition = loaded.component
+        if reason is NotExact.COMPONENT_WITHOUT_GEOMETRY:
             raise ApproachUnavailable(
                 f"Component '{definition.name}' carries no geometry the reader could transfer, "
                 "so there is nothing to cast rays against."
             )
         recognition = recognize_component_features(
-            definition.shape,
+            loaded.shape,
             component_id=definition.name or component_id,
             component_name=definition.name,
         )
-        return definition.shape, recognition
+        return loaded.shape, recognition
 
-    if source_format == "step":
-        from cad_costing_agent.cad_geometry import read_step_shape
-        from cad_costing_agent.features.step_text import classify_step_bytes
-
-        representation = classify_step_bytes(data)
-        if representation.is_faceted:
-            raise ApproachUnavailable(
-                "This STEP file is a faceted export: it describes the part as loose polygons, with "
-                "no exact faces to cast rays from or read a hole's open end off. Setups stay as "
-                "grouped; regroup them by hand. " + " ".join(representation.notes)
-            )
-        shape = read_step_shape(data)
-        return shape, recognize_features(shape, filename="", source_format="step")
-
-    if source_format == "iges":
-        from cad_costing_agent.cad_iges import (
-            analyse_iges_shape,
-            carries_a_solid,
-            ensure_readable,
-            read_iges_shape,
+    if reason is NotExact.FACETED_STEP:
+        raise ApproachUnavailable(
+            "This STEP file is a faceted export: it describes the part as loose polygons, with "
+            "no exact faces to cast rays from or read a hole's open end off. Setups stay as "
+            "grouped; regroup them by hand. " + " ".join(loaded.step_representation.notes)
+        )
+    if reason is NotExact.WIREFRAME_STEP:
+        raise ValueError(
+            "This STEP file contains no surface geometry to analyse — "
+            + " ".join(loaded.step_representation.notes)
+        )
+    if reason is NotExact.IGES_SURFACE_MODEL:
+        raise ApproachUnavailable(
+            "This IGES file stores loose surfaces rather than a solid. Its cylinders come back "
+            "as generic surfaces, so holes are not recognized and there is no inside or outside "
+            "to cast rays through. Re-export with solid geometry, or as STEP."
+        )
+    if reason in (NotExact.IGES_NO_SHAPE, NotExact.IGES_SEWN):
+        raise ApproachUnavailable(
+            "This IGES file's geometry had to be sewn from loose surfaces, so it carries no "
+            "exact solid to cast rays against."
+        )
+    if reason is NotExact.NOT_A_BREP_FORMAT:
+        raise ApproachUnavailable(
+            "Approach directions need an analytic B-Rep (STEP, or IGES carrying a solid). This file "
+            "does not carry one."
         )
 
-        if not carries_a_solid(data):
-            raise ApproachUnavailable(
-                "This IGES file stores loose surfaces rather than a solid. Its cylinders come back "
-                "as generic surfaces, so holes are not recognized and there is no inside or outside "
-                "to cast rays through. Re-export with solid geometry, or as STEP."
-            )
-        ensure_readable(data)
-        topology = analyse_iges_shape(read_iges_shape(data))
-        if topology.shape is None or topology.sewing_applied:
-            raise ApproachUnavailable(
-                "This IGES file's geometry had to be sewn from loose surfaces, so it carries no "
-                "exact solid to cast rays against."
-            )
-        return topology.shape, recognize_features(topology.shape, filename="", source_format="iges")
-
-    raise ApproachUnavailable(
-        "Approach directions need an analytic B-Rep (STEP, or IGES carrying a solid). This file "
-        "does not carry one."
-    )
+    # `IGES_NO_FACES` is left to recognition, which words a shape with no faces
+    # the way it always has.
+    return loaded.shape, recognize_features(loaded.shape, filename="", source_format=source_format)
 
 
 __all__ = [
