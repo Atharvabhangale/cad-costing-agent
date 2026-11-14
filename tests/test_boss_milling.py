@@ -289,7 +289,7 @@ def test_the_route_text_and_the_suggested_operations_never_disagree(name):
     assert "suggested for turning" not in text
 
     # A machining route carries a turning stage exactly when turning is suggested.
-    if classification.system_family is not None and "milling" in stages or "turning" in stages:
+    if "milling" in stages or "turning" in stages:
         assert ("turning" in stages) == bool(turned), (name, sorted(stages), sorted(turned))
 
     # And the boss rule is the only way a shaft becomes milling.

@@ -1044,10 +1044,13 @@ def classify_process(
             for index, form in solid_forms.items()
             if form.observed is True
         ]
+        shown = "; ".join(turned_solids[:3]) + (
+            f"; … and {len(turned_solids) - 3} more solid(s)" if len(turned_solids) > 3 else ""
+        )
         stage_ids.append("turning")
         basis["turning"] = [
             "the file as a whole is not one body of revolution (" + rotational_detail + "), "
-            "but tested by itself a solid in it is — " + "; ".join(turned_solids),
+            f"but tested by itself {len(turned_solids)} solid(s) in it are — " + shown,
             *_basis(TURNING, processes[TURNING]),
         ]
         part_form = "prismatic"
