@@ -1264,8 +1264,10 @@ def test_the_iges_unit_guard_cannot_be_bypassed():
     checks, in the same order — the undeclared-unit case is a 25.4x error, and
     one path that skipped the check would be enough to ship it."""
     import cad_costing_agent.cad_geometry as geometry_module
-    import cad_costing_agent.features as features_module
+    import cad_costing_agent.features.shape_loading as features_module
 
+    # The feature layer reads IGES in one module, `features.shape_loading`;
+    # `test_shape_loading` holds that no other feature module reads a file.
     for module in (geometry_module, features_module):
         code = code_without_prose(module)
         assert "ensure_readable" in code

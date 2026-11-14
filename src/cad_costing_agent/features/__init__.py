@@ -35,7 +35,6 @@ from cad_costing_agent.cad_geometry import (
     STEP_FORMATS,
     STL_FORMATS,
     SUPPORTED_FORMATS,
-    read_step_shape,
 )
 from cad_costing_agent.cad_faceted import parse_faceted_step
 from cad_costing_agent.features.mesh_recognition import recognize_mesh_features
@@ -46,11 +45,11 @@ from cad_costing_agent.features.model import (
     SolidFeatures,
 )
 from cad_costing_agent.features.recognizers import DEFAULT_RECOGNIZERS, RecognitionContext
+from cad_costing_agent.features.shape_loading import LoadedShape, NotExact, load_exact_shape
 from cad_costing_agent.features.step_text import (
     EMPTY,
     WIREFRAME,
     StepRepresentation,
-    classify_step_bytes,
 )
 from cad_costing_agent.features.topology import TopologyModel, build_topology
 
@@ -346,7 +345,7 @@ NO_SOLID_WARNING = (
 )
 
 
-def _recognize_iges_features(data: bytes, filename: str) -> "RecognizedShape":
+def _recognize_iges_features(loaded: LoadedShape, filename: str) -> "RecognizedShape":
     """Recognize features in an IGES file, from the shape that was measured.
 
     Recognition runs on whatever `analyse_iges_shape` established: the solid,
@@ -358,29 +357,20 @@ def _recognize_iges_features(data: bytes, filename: str) -> "RecognizedShape":
     therefore *reported* as degraded rather than left looking like a part with
     no holes in it.
     """
-    from cad_costing_agent.cad_iges import (
-        analyse_iges_shape,
-        ensure_readable,
-        read_iges_shape,
-    )
-
-    # The same two guards, in the same order, as geometry extraction applies.
-    ensure_readable(data)
-
-    topology = analyse_iges_shape(read_iges_shape(data))
-    if topology.shape is None or topology.face_count == 0:
+    topology = loaded.iges
+    if loaded.reason in (NotExact.IGES_NO_SHAPE, NotExact.IGES_NO_FACES):
         raise ValueError(
             "This IGES file was read but contains no surfaces to analyse. "
             + " ".join(topology.notes)
         )
 
-    result = recognize_features(topology.shape, filename=filename, source_format="iges")
+    result = recognize_features(loaded.shape, filename=filename, source_format="iges")
 
     # A file that brought its own solid keeps every analytic surface, and
     # recognition matches STEP exactly. Anything else came in as loose
     # surfaces, and the warning goes first — whether or not sewing managed to
     # close them, because closing them does not bring a cylinder back.
-    if not topology.sewing_applied:
+    if loaded.reason is not NotExact.IGES_SEWN:
         return RecognizedShape(
             result.model_copy(
                 update={
@@ -388,7 +378,7 @@ def _recognize_iges_features(data: bytes, filename: str) -> "RecognizedShape":
                     "warnings": list(result.warnings) + list(topology.notes),
                 }
             ),
-            topology.shape,
+            loaded.shape,
         )
 
     warnings = [SURFACE_MODEL_WARNING]
@@ -402,7 +392,7 @@ def _recognize_iges_features(data: bytes, filename: str) -> "RecognizedShape":
                 "warnings": warnings + list(result.warnings) + list(topology.notes),
             }
         ),
-        topology.shape,
+        loaded.shape,
     )
 
 
@@ -470,24 +460,35 @@ def recognize_features_from_bytes(data: bytes, filename: str) -> FeatureRecognit
     return recognize_features_with_shape(data, filename).recognition
 
 
+def _canonical_format(file_format: str) -> str:
+    """The loader's name for a file suffix: `step`, `iges`, or the suffix itself."""
+    if file_format in STEP_FORMATS:
+        return "step"
+    if file_format in IGES_FORMATS:
+        return "iges"
+    return file_format
+
+
 def recognize_features_with_shape(data: bytes, filename: str) -> RecognizedShape:
     """Recognize features in an uploaded STEP or IGES file, keeping the shape read.
 
-    A STEP file is classified before anything heavy is attempted, because what
-    it contains decides which rules can apply — and because a 200 MB export
-    that cannot be used takes a second to rule out this way and twenty to rule
-    out by loading it.
+    The shape comes from `load_exact_shape`, which classifies a STEP file
+    before anything heavy is attempted, because what it contains decides which
+    rules can apply — and because a 200 MB export that cannot be used takes a
+    second to rule out this way and twenty to rule out by loading it.
 
     Raises ValueError for an unsupported format, empty input, or content that
     its own format's reader cannot read.
     """
     file_format = Path(filename or "").suffix.strip().lower().lstrip(".")
+    source_format = _canonical_format(file_format)
 
-    if file_format not in STEP_FORMATS:
-        if file_format in IGES_FORMATS:
-            if not data:
-                raise ValueError("CAD file is empty.")
-            return _recognize_iges_features(data, filename)
+    if source_format in ("step", "iges") and not data:
+        raise ValueError("CAD file is empty.")
+
+    loaded = load_exact_shape(data, source_format)
+
+    if loaded.reason is NotExact.NOT_A_BREP_FORMAT:
         if file_format in STL_FORMATS:
             raise ValueError(
                 f"Feature recognition needs the exact faces and edges of a B-Rep model, and "
@@ -501,26 +502,23 @@ def recognize_features_with_shape(data: bytes, filename: str) -> RecognizedShape
             f"recognition. Supported formats: {supported}"
         )
 
-    if not data:
-        raise ValueError("CAD file is empty.")
+    if source_format == "iges":
+        return _recognize_iges_features(loaded, filename)
 
-    representation = classify_step_bytes(data)
-
-    if representation.is_faceted:
-        return RecognizedShape(recognize_faceted_features(data, filename, representation), None)
-
-    if representation.representation == WIREFRAME:
-        raise ValueError(
-            "This STEP file contains no surface geometry to analyse — "
-            + " ".join(representation.notes)
+    if loaded.reason is NotExact.FACETED_STEP:
+        return RecognizedShape(
+            recognize_faceted_features(data, filename, loaded.step_representation), None
         )
 
-    # An `empty` classification is not decided here: content that is not STEP
-    # at all also has no entities, and the reader gives a better message for
-    # that than a keyword count can.
+    if loaded.reason is NotExact.WIREFRAME_STEP:
+        raise ValueError(
+            "This STEP file contains no surface geometry to analyse — "
+            + " ".join(loaded.step_representation.notes)
+        )
 
-    shape = read_step_shape(data)
-    return RecognizedShape(recognize_features(shape, filename=filename, source_format="step"), shape)
+    return RecognizedShape(
+        recognize_features(loaded.shape, filename=filename, source_format="step"), loaded.shape
+    )
 
 
 def analyse_sheet_metal_from_bytes(
@@ -532,7 +530,7 @@ def analyse_sheet_metal_from_bytes(
 ):
     """Measure an uploaded part as sheet metal: thickness, bends, flat pattern.
 
-    Exact B-Rep only. The shape is read by the one STEP or IGES reader and
+    Exact B-Rep only. The shape is read once, by `load_exact_shape`, and
     scanned once; that scan feeds both the recognizers and the sheet
     measurement. A faceted export, an IGES surface model and an STL carry no
     exact cylinders to measure a bend radius from, so each is refused with the
@@ -550,48 +548,43 @@ def analyse_sheet_metal_from_bytes(
     if not data:
         raise ValueError("CAD file is empty.")
 
-    if file_format in STEP_FORMATS:
-        representation = classify_step_bytes(data)
-        if representation.is_faceted:
-            raise ValueError(
-                "This STEP file is a faceted export: flat polygons, with no exact cylinders to "
-                "measure a bend radius from or unfold. Sheet-metal measurement needs analytic "
-                "B-Rep; re-export the part as solid geometry. "
-                + " ".join(representation.notes)
-            )
-        if representation.representation == WIREFRAME:
-            raise ValueError(
-                "This STEP file contains no surface geometry to analyse — "
-                + " ".join(representation.notes)
-            )
-        shape = read_step_shape(data)
-        source_format = "step"
-    elif file_format in IGES_FORMATS:
-        from cad_costing_agent.cad_iges import analyse_iges_shape, ensure_readable, read_iges_shape
+    source_format = _canonical_format(file_format)
+    loaded = load_exact_shape(data, source_format)
 
-        ensure_readable(data)
-        iges = analyse_iges_shape(read_iges_shape(data))
-        if iges.shape is None or iges.sewing_applied:
-            raise ValueError(
-                "This IGES file stores loose trimmed surfaces rather than a solid. Such an export "
-                "rewrites cylinders as generic surfaces, so a bend radius cannot be measured from "
-                "it. Re-export with solid/B-Rep geometry, or export STEP."
-            )
-        shape = iges.shape
-        source_format = "iges"
-    elif file_format in STL_FORMATS:
+    if loaded.reason is NotExact.FACETED_STEP:
         raise ValueError(
-            f"Sheet-metal measurement needs the exact faces of a B-Rep model, and '{file_format}' "
-            "is a triangle mesh: a bend in a mesh is a run of flat facets with no radius. Upload "
-            "the STEP version of this part."
+            "This STEP file is a faceted export: flat polygons, with no exact cylinders to "
+            "measure a bend radius from or unfold. Sheet-metal measurement needs analytic "
+            "B-Rep; re-export the part as solid geometry. "
+            + " ".join(loaded.step_representation.notes)
         )
-    else:
+    if loaded.reason is NotExact.WIREFRAME_STEP:
+        raise ValueError(
+            "This STEP file contains no surface geometry to analyse — "
+            + " ".join(loaded.step_representation.notes)
+        )
+    if loaded.reason in (NotExact.IGES_NO_SHAPE, NotExact.IGES_SEWN):
+        raise ValueError(
+            "This IGES file stores loose trimmed surfaces rather than a solid. Such an export "
+            "rewrites cylinders as generic surfaces, so a bend radius cannot be measured from "
+            "it. Re-export with solid/B-Rep geometry, or export STEP."
+        )
+    if loaded.reason is NotExact.NOT_A_BREP_FORMAT:
+        if file_format in STL_FORMATS:
+            raise ValueError(
+                f"Sheet-metal measurement needs the exact faces of a B-Rep model, and '{file_format}' "
+                "is a triangle mesh: a bend in a mesh is a run of flat facets with no radius. Upload "
+                "the STEP version of this part."
+            )
         supported = ", ".join(sorted(STEP_FORMATS | IGES_FORMATS))
         raise ValueError(
             f"Unsupported CAD file format '{file_format or filename}' for sheet-metal "
             f"measurement. Supported formats: {supported}"
         )
 
+    # `IGES_NO_FACES` is left to the scan below, which words a shape with no
+    # faces the way it always has.
+    shape = loaded.shape
     topology = build_topology(shape)
     recognition = recognize_features(
         shape, filename=filename, source_format=source_format, topology=topology
@@ -611,6 +604,8 @@ def analyse_sheet_metal_from_bytes(
 
 
 __all__ = [
+    "LoadedShape",
+    "NotExact",
     "analyse_sheet_metal_from_bytes",
     "FeatureRecognitionResult",
     "MAX_FACES",
@@ -618,6 +613,7 @@ __all__ = [
     "RecognizedShape",
     "SURFACE_MODEL_WARNING",
     "describe_feature",
+    "load_exact_shape",
     "recognize_component_features",
     "recognize_features",
     "recognize_features_from_bytes",
