@@ -969,6 +969,22 @@ not SSO or OIDC and not production-grade**: no token expiry or rotation, no rate
 best-effort (non-transactional) audit write, no user-management UI (API only), and no
 simultaneous-request test of the approval sequence.
 
+### Shape-loading debt closed (refactor, no behaviour change)
+
+Recognition, the sheet-metal measurement and the setup proposal each used to gate faceted STEP,
+IGES surface models and STL for themselves before calling the single readers (the debt recorded
+under Iteration 7). `features/shape_loading.load_exact_shape` now decides that once and returns
+the shape or a typed reason (`NotExact`); each consumer keeps its own refusal sentence. Tests:
+**2757 passed, 8 skipped** on the merged code (17 new; one existing test now reads the loader
+module for the IGES unit guard, with its assertion unchanged). Live, by the agent before the
+merge: 116 endpoint x file cases byte-compared against the previous commit across the nine
+feature-layer endpoints (analytic and faceted STEP, IGES solid and surface, STL, plus unitless,
+wireframe, empty and assembly files), 0 differing apart from timing fields. Not folded in, on
+purpose: the geometry and viewer branches and `/cad/casting-modulus`, which treat the same files
+differently. One function-level change no endpoint can reach: `shape_and_features` called
+directly on a wireframe STEP now refuses before parsing. Still open: sheet metal parses an IGES
+surface model before refusing it, and no `/cost/*` endpoint was byte-compared.
+
 ### Iteration 8 — pull direction and draft, moulding cycle time, sheet nesting
 
 Three agents, each in its own worktree from the pushed branch, reviewed and merged into
@@ -1106,7 +1122,7 @@ the measurement, each in its own setup. Live: L-bracket x 10, both stages timed:
 calculation. Material is still the finished part's CAD mass: the blank is reported, not charged,
 and there is no nesting or utilisation.
 
-**Debt this iteration left.** Three paths now obtain "the exact shape plus its recognized
+**Debt this iteration left (closed since — see *Shape-loading debt closed*).** Three paths obtained "the exact shape plus its recognized
 features" — `recognize_features_with_shape` (walls), `features.approach.shape_and_features`
 (setups) and `analyse_sheet_metal_from_bytes` (sheet). Each calls the single STEP/IGES readers, so
 none is a second parser, but they repeat the faceted/IGES gating and should become one function.

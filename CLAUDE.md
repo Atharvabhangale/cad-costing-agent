@@ -18,7 +18,7 @@ uvicorn cad_costing_agent.main:app --reload
 # whatever it is pointed at.
 CAD_COSTING_DATABASE_URL=sqlite:///./scratch.db uvicorn cad_costing_agent.main:app --port 8710
 
-# Tests (2747 collected; measured without cadmodels/: 2739 pass, 8 skip; full run about 3.5-12 min)
+# Tests (2765 collected; measured without cadmodels/: 2757 pass, 8 skip; full run about 3.5-12 min)
 # cadquery-ocp must stay below 8 (pinned): 8.x drops names this code imports.
 # A git worktree has no cadmodels/ (git-ignored), so tests needing real models
 # skip there (8 skips instead of 1). Judge a branch by a run in the main tree.
@@ -102,6 +102,13 @@ CAD file ──→ cad_import                                    format detectio
 - `read_step_shape` and `read_iges_shape` are the single places STEP and IGES are parsed, so there
   is one definition of "readable" per format and one set of failure messages. `read_step_assembly`
   is the single place STEP's *product structure* is read, through OpenCASCADE's other reader.
+- **The feature layer reaches the readers through `features/shape_loading.load_exact_shape`,
+  and nowhere else.** It decides (a `NotExact` reason plus the evidence) and never words;
+  recognition, sheet metal and the setup proposal each keep their own sentence. Do not call
+  `read_step_shape`, `read_iges_shape`, `ensure_readable`, `carries_a_solid`,
+  `analyse_iges_shape` or `classify_step_bytes` from any other feature module or from
+  `main.py` — `test_shape_loading.py` fails by name. `analytic_solid_only` is the setup
+  proposal's pre-parse refusal of an IGES surface model; recognition must not pass it.
 - `measure_brep_shape` is the one implementation of "measure exact geometry", shared by whole-file
   extraction and by a single assembly component, so a component cannot disagree with the part it is.
 - Costing modules must not import `mesh_simplify`, `operation_suggestions`, `operation_time`,
