@@ -166,18 +166,20 @@ def test_a_stepped_shaft_is_recommended_for_turning():
 
 
 def test_an_external_cylinder_on_a_prismatic_part_does_not_make_a_turning_route():
-    # The per-feature rule still suggests turning for the Ø18 boss; the route
-    # does not, because the plate's side faces are not square to the boss axis.
+    # Neither the per-feature rule nor the route proposes turning for the Ø18
+    # boss: the plate's side faces are not square to the boss axis, and both
+    # read that from the one rotational test. (The rule used to say turning
+    # while the route said "milled bosses" about the same face.)
     recognition = recognize_features_from_bytes(step("plate_with_boss_and_bores"), "boss.step")
     suggestions = suggest_operations(recognition)
-    assert "turning" in suggestions.suggestion_counts
+    assert "turning" not in suggestions.suggestion_counts
 
     c = classify_process(recognition, suggestions)
     assert c.part_form == "prismatic"
     assert "turning" not in stage_ids(c.system_route)
     assert signal(c, "rotational_form").observed is False
     milling = next(s for s in c.system_route.stages if s.stage == "milling")
-    assert any("not rotational" in line for line in milling.basis)
+    assert any("not rotational" in line and "milled bosses" in line for line in milling.basis)
 
 
 def test_a_block_with_no_cylinder_cannot_be_assessed_for_rotation():
@@ -603,8 +605,11 @@ def test_a_surface_mode_iges_export_is_weaker_evidence_and_says_why_in_its_own_t
 
 # --- 11. a decided route regroups the plan -----------------------------------
 #
-# The plan_with_boss_and_bores part suggests milling, turning (the boss) and
-# drilling, so a route that leaves one process out has something to leave out.
+# The plan_with_boss_and_bores part suggests milling (its faces and its boss)
+# and drilling, so a route that leaves one process out has something to leave
+# out. Its boss was a turning suggestion until the suggestions and the route
+# were made to agree, so these tests leave drilling out where they once left
+# turning out.
 
 BOSS = "plate_with_boss_and_bores"
 
@@ -641,21 +646,21 @@ def _types(requirements) -> set[str]:
 def test_with_no_route_every_operation_counts_exactly_as_before():
     plan = committed_plan(BOSS)
     assert plan.route_processes is None
-    assert _types(plan.to_operation_requirements(1)) == {"milling", "turning", "drilling"}
+    assert _types(plan.to_operation_requirements(1)) == {"milling", "drilling"}
     assert plan.out_of_route_operations() == []
     assert plan.time_summary().out_of_route_operation_ids == []
 
 
 def test_operations_outside_the_route_are_kept_but_not_costed_or_called_missing():
     plan = committed_plan(BOSS)
-    routed = plan.model_copy(update={"route_processes": ["milling", "drilling"]})
+    routed = plan.model_copy(update={"route_processes": ["milling"]})
 
-    turning = [o.operation_id for o in plan.active if o.operation_type == "turning"]
-    assert turning
-    assert _types(routed.to_operation_requirements(1)) == {"milling", "drilling"}
-    assert [o.operation_id for o in routed.out_of_route_operations()] == turning
+    drilling = [o.operation_id for o in plan.active if o.operation_type == "drilling"]
+    assert drilling
+    assert _types(routed.to_operation_requirements(1)) == {"milling"}
+    assert [o.operation_id for o in routed.out_of_route_operations()] == drilling
     assert routed.uncosted_operations() == []
-    assert routed.time_summary().out_of_route_operation_ids == turning
+    assert routed.time_summary().out_of_route_operation_ids == drilling
     # Kept whole: nothing about the operation itself changed.
     assert [o.model_dump() for o in routed.operations] == [o.model_dump() for o in plan.operations]
 
@@ -671,11 +676,17 @@ def test_an_empty_route_costs_no_operation_and_switching_back_restores_all():
 
 
 def test_changing_an_operations_process_into_the_route_brings_it_back():
-    plan = committed_plan(BOSS).model_copy(update={"route_processes": ["milling", "drilling"]})
-    turning = next(o for o in plan.active if o.operation_type == "turning")
-    moved = plan.replacing(turning.with_operation_type("milling").with_times(cycle_time_minutes=3.0))
+    plan = committed_plan(BOSS).model_copy(update={"route_processes": ["milling"]})
+    drilled = [o for o in plan.active if o.operation_type == "drilling"]
+    assert drilled
+    moved = plan
+    for operation in drilled:
+        moved = moved.replacing(
+            operation.with_operation_type("milling").with_times(cycle_time_minutes=3.0)
+        )
     assert moved.out_of_route_operations() == []
-    assert turning.operation_id in {r.operation_id for r in moved.to_operation_requirements(1)}
+    costed = {r.operation_id for r in moved.to_operation_requirements(1)}
+    assert all(operation.operation_id in costed for operation in drilled)
 
 
 def test_a_setups_time_is_still_charged_once_when_its_first_operation_is_out_of_route():
@@ -692,6 +703,10 @@ def test_a_setups_time_is_still_charged_once_when_its_first_operation_is_out_of_
 
 def test_a_decided_route_decides_which_operations_are_costed_through_the_api():
     plan = committed_plan(BOSS)
+    # The system proposes the boss as milled; here the engineer chose to turn it,
+    # which is what gives the accepted milling + drilling route a line to leave out.
+    boss = next(o for o in plan.active if o.feature_subtype == "shaft")
+    plan = plan.replacing(boss.with_operation_type("turning").with_times(cycle_time_minutes=2.0))
     accepted = decide(suggested(BOSS)["process_classification"], "accepted").json()
     assert accepted["plan_processes"] == ["milling", "drilling"]
 
@@ -822,7 +837,7 @@ def test_the_preview_reports_what_was_left_as_formed():
 
 def test_feedback_records_what_the_plan_actually_costed():
     """It used to say `costed: true` for operations the route or the blank left out."""
-    route_out = committed_plan(BOSS).model_copy(update={"route_processes": ["milling", "drilling"]})
+    route_out = committed_plan(BOSS).model_copy(update={"route_processes": ["milling"]})
     for record in feedback_from_plan(route_out):
         operation = route_out.get(record.operation_id)
         assert record.costed == route_out.counts_toward_cost(operation)

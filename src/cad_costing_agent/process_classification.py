@@ -73,7 +73,7 @@ from enum import Enum
 
 from pydantic import BaseModel, ConfigDict, Field, computed_field
 
-from cad_costing_agent.features.rotational import rotational_form
+from cad_costing_agent.features.rotational import rotational_form, rotational_form_by_solid
 from cad_costing_agent.features.model import (
     Confidence,
     Feature,
@@ -81,6 +81,7 @@ from cad_costing_agent.features.model import (
     FeatureType,
 )
 from cad_costing_agent.operation_suggestions import (
+    BOSS_MILLING_RULE,
     DRILLING,
     KNOWN_OPERATION_TYPES,
     MILLING,
@@ -829,6 +830,7 @@ def classify_process(
     processes = _suggested_processes(suggestions)
 
     rotational, rotational_detail = _rotational_form(features)
+    solid_forms = rotational_form_by_solid(features)
     thin, thin_detail, thickness, wall_directions = _constant_thickness(features, volume)
 
     signals = [
@@ -1031,6 +1033,24 @@ def classify_process(
         stage_ids.append("turning")
         basis["turning"] = [rotational_detail, *_basis(TURNING, processes[TURNING])]
         part_form = "rotational"
+    elif TURNING in processes:
+        # The suggestions propose turning only where the rotational test passed.
+        # The file as a whole did not pass it, so these come from a solid that is
+        # a body of revolution by itself (a tube modelled beside a bracket). The
+        # route carries the stage the operations carry; the form of the whole
+        # stays prismatic.
+        turned_solids = [
+            f"solid {index + 1} of {max(recognition.solid_count, len(solid_forms))}: {form.detail}"
+            for index, form in solid_forms.items()
+            if form.observed is True
+        ]
+        stage_ids.append("turning")
+        basis["turning"] = [
+            "the file as a whole is not one body of revolution (" + rotational_detail + "), "
+            "but tested by itself a solid in it is — " + "; ".join(turned_solids),
+            *_basis(TURNING, processes[TURNING]),
+        ]
+        part_form = "prismatic"
     else:
         part_form = "prismatic"
     if MILLING in processes and part_form == "rotational":
@@ -1045,17 +1065,22 @@ def classify_process(
     elif MILLING in processes:
         stage_ids.append("milling")
         basis["milling"] = _basis(MILLING, processes[MILLING])
-    if TURNING in processes and rotational is not True:
-        # Per-feature, the shaft suggestion stands. At route level, a boss on a
-        # prismatic part is milled; turning it would need the part on a lathe.
-        if "milling" not in stage_ids:
-            stage_ids.append("milling")
-            basis["milling"] = []
+    # The same features the suggestions proposed milling for, by their rule: the
+    # route and the operations name one set of bosses, never two. One line per
+    # solid, each with that solid's own answer from the rotational test.
+    solid_of = {f.feature_id: f.solid_index for f in features}
+    bosses_by_solid: dict[int, list[str]] = {}
+    for suggestion in suggestions.suggestions:
+        if suggestion.rule_id == BOSS_MILLING_RULE and "milling" in stage_ids:
+            bosses_by_solid.setdefault(solid_of.get(suggestion.feature_id, 0), []).append(
+                suggestion.feature_id
+            )
+    for index, bosses in sorted(bosses_by_solid.items()):
+        form = solid_forms.get(index)
+        detail = form.detail if form is not None and form.observed is False else rotational_detail
         basis["milling"].append(
-            f"external cylinder(s) {', '.join(processes[TURNING])} were suggested for turning "
-            "feature by feature, but the part's form is not rotational ("
-            + rotational_detail
-            + "), so at route level they are treated as milled bosses"
+            f"external cylinder(s) {', '.join(bosses)} are suggested as milled bosses, not "
+            "turned: the body they stand on is not rotational (" + detail + ")"
         )
     if DRILLING in processes:
         stage_ids.append("drilling")

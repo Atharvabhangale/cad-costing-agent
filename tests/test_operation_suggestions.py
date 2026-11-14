@@ -35,6 +35,7 @@ from cad_costing_agent.features.model import (
 )
 from cad_costing_agent.main import STATIC_PATH, app
 from cad_costing_agent.operation_suggestions import (
+    BOSS_MILLING_RULE,
     DRILLING,
     MILLING,
     MIN_PLANE_AREA_SHARE,
@@ -777,12 +778,15 @@ def test_a_pocket_model_suggests_milling_for_the_pocket():
     assert pocket[0].operation_type == MILLING
 
 
-def test_a_boss_model_suggests_turning_for_its_external_cylinder():
+def test_a_boss_model_suggests_milling_for_its_external_cylinder():
+    """A plate does not turn about its boss, so the boss is milled — never turned."""
     result = suggestions_for_step("plate_with_boss_and_bores")
 
-    turning = [s for s in result.suggestions if s.operation_type == TURNING]
-    assert turning, [s.feature_label for s in result.suggestions]
-    assert all(s.feature_subtype == "shaft" for s in turning)
+    assert [s for s in result.suggestions if s.operation_type == TURNING] == []
+    bosses = [s for s in result.suggestions if s.feature_subtype == "shaft"]
+    assert bosses, [s.feature_label for s in result.suggestions]
+    assert all(s.operation_type == MILLING for s in bosses)
+    assert all(s.rule_id == BOSS_MILLING_RULE for s in bosses)
 
 
 def test_a_plain_block_suggests_only_facing_and_never_a_hole():
@@ -805,14 +809,17 @@ def test_a_faceted_model_produces_suggestions_capped_at_medium():
     assert any("faceted export" in warning for warning in result.warnings)
 
 
-def test_a_faceted_boss_still_suggests_turning():
+def test_a_faceted_boss_is_a_milled_boss_too():
+    """The same rule on reconstructed features: a block does not turn about its boss."""
     recognition = recognize_features_from_bytes(faceted_block_with_boss(), "faceted_boss.step")
     result = suggest_operations(recognition)
 
-    turning = [s for s in result.suggestions if s.operation_type == TURNING]
-    assert turning
-    assert all(s.source_type == "faceted" for s in turning)
-    assert all(s.confidence is Confidence.MEDIUM for s in turning)
+    assert [s for s in result.suggestions if s.operation_type == TURNING] == []
+    bosses = [s for s in result.suggestions if s.feature_subtype == "shaft"]
+    assert bosses
+    assert all(s.operation_type == MILLING and s.rule_id == BOSS_MILLING_RULE for s in bosses)
+    assert all(s.source_type == "faceted" for s in bosses)
+    assert all(s.confidence is not Confidence.HIGH for s in bosses)
 
 
 # --- the quarantine: costing and rate sets are untouched ---------------------
