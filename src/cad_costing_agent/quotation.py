@@ -688,7 +688,7 @@ def _warnings(detail: EstimateDetail, kind: str, assumptions: EstimateAssumption
             )
         )
 
-    uncosted = (detail.plan_snapshot or {}).get("uncosted_operation_ids") or []
+    uncosted = _uncosted_operation_ids(detail)
     if uncosted:
         found.append(
             QuoteWarning(
@@ -1106,9 +1106,27 @@ def _setup_count(detail: EstimateDetail, assumptions: EstimateAssumptions, rows)
     return sum(1 for row in rows if (row.setup_time_minutes or 0.0) > 0.0)
 
 
+def _uncosted_operation_ids(detail: EstimateDetail) -> list[str]:
+    """The operations a stored estimate left out for want of a committed time.
+
+    A part estimate stores a list of ids. An assembly roll-up stores one list
+    per component definition, so that mapping is flattened here: reading it as
+    a list counted the components, and warned about operations left out when
+    every list was empty.
+    """
+    stored = (detail.plan_snapshot or {}).get("uncosted_operation_ids") or []
+    if isinstance(stored, dict):
+        return [
+            str(operation_id)
+            for operation_ids in stored.values()
+            for operation_id in (operation_ids or [])
+        ]
+    return [str(operation_id) for operation_id in stored]
+
+
 def _manufacturing(detail: EstimateDetail, assumptions: EstimateAssumptions) -> QuoteManufacturing:
     rows = _operation_rows(detail)
-    uncosted = (detail.plan_snapshot or {}).get("uncosted_operation_ids") or []
+    uncosted = _uncosted_operation_ids(detail)
     return QuoteManufacturing(
         setup_count=_setup_count(detail, assumptions, rows),
         operation_count=len(rows),

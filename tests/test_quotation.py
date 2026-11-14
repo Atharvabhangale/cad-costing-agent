@@ -1347,3 +1347,25 @@ def test_the_blocked_page_says_unavailable_once():
     assert code.count("Quotation unavailable") == 1
     assert "blocker.title" not in code
     assert "blocker.detail" in code
+
+
+def test_an_assembly_quote_counts_left_out_operations_not_components():
+    """An assembly stores its uncosted operation ids per component definition.
+    Read as a flat list, that mapping counted the components and named their
+    definition ids as omitted operations — on a roll-up that omitted nothing."""
+    from cad_costing_agent import quotation as quotation_module
+    from types import SimpleNamespace
+
+    nothing_left_out = SimpleNamespace(
+        plan_snapshot={"uncosted_operation_ids": {"DEF-1": [], "DEF-2": []}}
+    )
+    assert quotation_module._uncosted_operation_ids(nothing_left_out) == []
+
+    two_left_out = SimpleNamespace(
+        plan_snapshot={"uncosted_operation_ids": {"DEF-1": ["A/OP-1"], "DEF-2": ["B/OP-4"]}}
+    )
+    assert quotation_module._uncosted_operation_ids(two_left_out) == ["A/OP-1", "B/OP-4"]
+
+    part = SimpleNamespace(plan_snapshot={"uncosted_operation_ids": ["OP-2"]})
+    assert quotation_module._uncosted_operation_ids(part) == ["OP-2"]
+    assert quotation_module._uncosted_operation_ids(SimpleNamespace(plan_snapshot=None)) == []

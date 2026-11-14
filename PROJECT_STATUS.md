@@ -1,11 +1,16 @@
 # Project Status
 
-Last updated: 2026-11-13 (Iteration 9 — die casting and cores, regional factories and CO2e, opt-in roles/approvals/audit)
+Last updated: 2026-11-14 (first trial on real CAD files, and the four defects it found)
 
 `CHECKPOINT.md` is a point-in-time handoff written at the Step 30 pause and is not
 updated in place; this file is the step-by-step record.
 
 ## Current stage
+
+**First trial on real CAD files.** Three user-supplied STEP files (a single part, a two-solid
+part and a needle-roller-bearing assembly) were run through every analysis and a costed
+estimate. Nothing crashed; the run found three defects and a review of the fixes found a
+fourth, all fixed. Details in *Real-file trial* below.
 
 **Iteration 9: the last rows of `APRIORI_GAP_ANALYSIS.md` that this proof of concept can
 honestly address** — high-pressure die casting timed by Chvorinov's rule with proposed cores,
@@ -968,6 +973,73 @@ database from the previous code upgraded with its estimate served byte-identical
 not SSO or OIDC and not production-grade**: no token expiry or rotation, no rate limiting, a
 best-effort (non-transactional) audit write, no user-management UI (API only), and no
 simultaneous-request test of the approval sequence.
+
+### Real-file trial — three STEP files, four defects fixed
+
+`model1_1.stp` (one part, 43 faces), `model2.stp` (one product, two solids) and `Assembly.stp`
+(a needle roller bearing: Drawn Cup, 18 Needle Rollers, cage; 4 definitions, 20 placements) were
+run against the live app on a scratch database: Steel, `poc-default`, quantity 10, built-in time
+assumptions, every system estimate accepted. Every call answered 200, none took over 5 s, mass
+and material agreed across endpoints, and every recognized diameter in `model2.stp` matched the
+cylinder radii in the file's own text. The files are user data and are not in the repository.
+
+Four defects, each fixed by a separate agent or in review, merged into `timed-welding`. Full
+suite on the merged code: **2890 passed, 8 skipped**.
+
+**1. A zero-minute estimate was accepted and then silently left out of the cost.** The assembly
+has 36 blind holes of 1 mm diameter, 0.2 mm deep; the drilling formula gives 0.002444 min, which
+was reported as 0.00 with status `estimated`. The plan costs only a cycle above zero, so the
+operations were estimated, accepted and absent (137 of 173 costed) with nothing saying so.
+`operation_time` now returns `needs_user_input` for any cycle that would be *reported* as zero
+(below half of the 0.01 min resolution; 0.0001 for moulding and die-casting shots), recording
+`unrounded_cycle_time_minutes` and substituting no minimum; a stored zero never applies in the
+plan; and `/cost/cad-part` adds `uncosted_operations` and `uncosted_note` whenever something is
+left out (absent otherwise). The boundary is deliberately the reported zero, not 0.01: refusing
+everything below 0.01 would have changed 72 estimates on this file that have always been
+reported as 0.01 and costed. Not done: the Cost panel does not render the new response field
+(the operations table, overview and quotation warning already show the same operations), and the
+`plan.js` change was not driven in a browser.
+
+**2. Turning was suggested, and charged, on bodies the route said are not turned.** Every
+external cylinder was proposed for turning while the same response's route said those cylinders
+were "treated as milled bosses". A cylinder is now proposed for turning only where the single
+rotational test passes for its own solid; otherwise it is a milling suggestion
+(`external_cylinder_to_boss_milling`, medium at most, turning offered as the alternative) with
+**no system time**, because no milling time model sweeps a cylinder's flank and a turning time is
+never borrowed. The route names the same features by that rule. Turned fixtures are byte-identical.
+On `model2.stp`: the 60 mm boss on the bracket is a milled boss, the separate tube is still
+turned, and the estimate went from 6,006.20 to 5,762.86 **with that boss listed as not costed** —
+an incomplete figure until a time is entered, not a cheaper part. On the assembly the Needle
+Roller and Drawn Cup are unchanged and the cage's 37 small cylinders are milled bosses needing a
+time. Not done: a boss-milling time model.
+
+**3. An assembly sent to a whole-file analysis read like findings about a part.** For a file
+that declares an assembly (`cad_import.declares_assembly`, the declaration `/cad/import` already
+reports), geometry, mass, features, suggestions, DFM, wall thickness, governing wall, sheet
+metal, casting modulus and `/cost/cad-part` now carry a structured `assembly_notice`
+(`assembly_measured_as_one_body`) with figures unchanged; draw direction, cores and the setup
+proposal without a `component_id` are **refused (400)**, because their rays are stopped by
+neighbouring components (the lump had read 328 of 337 faces as undercuts). `/cad/wall-thickness`
+and `/cad/draw-direction` take a `component_id`: the lump's 0.46 mm wall is the Needle Roller's
+own; the Drawn Cup is 1.5 mm and the cage 0.606 mm. A part, including the two-solid
+`model2.stp`, is answered exactly as before (17 calls each compared with the previous build).
+Not done: the notice is not stored on the estimate, the previews do not carry it, and the setup
+proposal's refusal shows in the page's error bar.
+
+**4. An assembly quotation counted components as left-out operations (found in review).** An
+assembly roll-up stores its uncosted operation ids per component definition; `quotation.py` read
+that mapping as a flat list, so the `partial_costing` warning counted the components and named
+their definition ids even when no operation was left out. It now flattens the mapping.
+
+**After the fixes, on the merged code:** `model1_1.stp` 4,215.69 with 31 of 31 operations costed
+(unchanged); `model2.stp` 5,762.86 with 21 costed and 1 named as left out; the assembly as one
+lump 1,274.15 with 64 costed and 109 named as left out, carrying the notice; the roll-up
+1,051.41 per assembly (10,514.15 for 10). **The roll-up still reports `is_complete: true`** while
+the cage's 37 bosses and the Needle Roller's two holes have no time: a partly committed
+component stays complete by an existing rule, covered only by the `partial_costing` warning.
+With this many operations left out on a real assembly that rule deserves a second look. Also
+seen and not addressed: the setup proposal leaves 4-5 operations unplaced on each part (convex
+fillets it finds no approach for), and overlap between `model2.stp`'s two solids was not tested.
 
 ### Shape-loading debt closed (refactor, no behaviour change)
 

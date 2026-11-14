@@ -18,7 +18,7 @@ uvicorn cad_costing_agent.main:app --reload
 # whatever it is pointed at.
 CAD_COSTING_DATABASE_URL=sqlite:///./scratch.db uvicorn cad_costing_agent.main:app --port 8710
 
-# Tests (2765 collected; measured without cadmodels/: 2757 pass, 8 skip; full run about 3.5-12 min)
+# Tests (2898 collected; measured without cadmodels/: 2890 pass, 8 skip; full run about 4-12 min)
 # cadquery-ocp must stay below 8 (pinned): 8.x drops names this code imports.
 # A git worktree has no cadmodels/ (git-ignored), so tests needing real models
 # skip there (8 skips instead of 1). Judge a branch by a run in the main tree.
@@ -384,6 +384,12 @@ optional one-off batch charge (pattern, die).
   beside it. An **unconfirmed** bar changes no cost. A confirmed one reaches costing only as a
   volume (`material_stock_volume_mm3`); `mass` must stay the finished part's own, and the bar's
   is `stock_mass`. Never present a bar volume as the part's.
+- **A cylinder is proposed for turning only where the rotational test passes for its own solid**
+  (`rotational_form_by_solid` — the same test per `solid_index`, never a copy). Otherwise it is
+  `BOSS_MILLING_RULE`, a milling suggestion with no system time; never give it a turning time.
+  `process_classification` names the bosses by that rule id, and a turning stage exists exactly
+  when a turning suggestion does — `test_boss_milling.py` fails if route and operations
+  disagree about a feature.
 - Turning estimates use the *proposed* bar (`stock_diameter_mm`), so they stay system
   estimates; a different bar is flagged as making them stale, never silently re-estimated.
 
@@ -772,6 +778,25 @@ features — the status that path has always returned).
   clears it. An operation with no committed cycle time is *omitted* from the cost, never zeroed or
   averaged. `plan.js` reimplements the same three branches so the table and the backend cannot
   disagree — change one, change both.
+- **A zero-minute estimate is not an estimate.** `estimate_operation_time` refuses a cycle that
+  would be *reported* as zero (`_rounds_to_nothing`: 0.01 min, 0.0001 for the shot processes)
+  with `needs_user_input` and `parameters["unrounded_cycle_time_minutes"]`; never round it up
+  or substitute a minimum. In the plan a system cycle of zero never applies
+  (`system_time_applies` needs `> 0`), so it cannot be accepted and is listed in
+  `uncosted_operations`. A typed zero cycle is refused; a typed zero setup is a decision.
+  `/cost/cad-part` adds `uncosted_operations` / `uncosted_note` only when something was left
+  out. `plan.js`'s `systemTimeApplies` / `systemTimeIsZero` mirror the backend.
+- **An assembly read whole is one fused body, and every whole-file response says so.**
+  `cad_import.declares_assembly` is the only test (the import's `structure_state`; never count
+  solids — an OCCT-written compound is an assembly, a multi-body part is not).
+  `main._with_assembly_notice` adds `assembly_notice` for an assembly and hands a part's result
+  back untouched (key absent, not null); `_refuse_assembly_as_one_body` is the 400 for analyses
+  whose rays other components would stop (draw direction, cores, setups without
+  `component_id`). A new whole-file endpoint must go through one of the two.
+  `assembly_notice.py` imports nothing; the UI draws the server's object and never detects an
+  assembly itself.
+- **An assembly's `uncosted_operation_ids` is a mapping by definition, a part's is a list.**
+  Read it through `quotation._uncosted_operation_ids`, never with `len()`.
 - **Missing inputs produce `needs_user_input`, never a default.** Times come back `None` rather
   than `0` so nothing can add a missing time into a total. Non-millimetre units (a faceted export
   reports "as written in the file") are refused rather than scaled — guessing is a 1000× error.
