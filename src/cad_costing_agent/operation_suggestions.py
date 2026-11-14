@@ -57,7 +57,7 @@ from __future__ import annotations
 
 import time
 from collections.abc import Collection, Iterable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from enum import Enum
 
 from pydantic import BaseModel, ConfigDict, Field
@@ -69,7 +69,12 @@ from cad_costing_agent.features.model import (
     FeatureRecognitionResult,
     FeatureType,
 )
-from cad_costing_agent.features.rotational import parallel, rotational_form
+from cad_costing_agent.features.rotational import (
+    RotationalForm,
+    parallel,
+    rotational_form,
+    rotational_form_by_solid,
+)
 from cad_costing_agent.rate_sets import OperationRequirement
 
 # ------------------------------------------------------------------ vocabulary
@@ -82,6 +87,11 @@ TURNING = "turning"
 # resolves them case-insensitively. Using the same spelling here means a
 # suggestion can be looked up in a rate set without translation.
 KNOWN_OPERATION_TYPES = (DRILLING, MILLING, TURNING)
+
+# The rule an external cylinder gets on a body the rotational test did not pass.
+# Named here because the route recommendation reads it to say which cylinders it
+# counts as milled bosses — the two must name the same features.
+BOSS_MILLING_RULE = "external_cylinder_to_boss_milling"
 
 NOT_COSTED_REASON = (
     "Suggested operation — not yet costed because processing time has not been estimated."
@@ -320,6 +330,30 @@ class _Context:
     largest_plane_area_by_solid: dict[int, float]
     # Set when the whole model is one body of revolution: its turning axis.
     turning_axis: object | None = None
+    # The single rotational test (`features.rotational`) run on each solid's own
+    # features. With one solid this is the whole-model answer again.
+    form_by_solid: dict[int, RotationalForm] = field(default_factory=dict)
+    solid_count: int = 1
+
+    def solid_form(self, feature: Feature) -> RotationalForm | None:
+        return self.form_by_solid.get(feature.solid_index)
+
+    def turning_axis_for(self, feature: Feature) -> tuple[object | None, bool]:
+        """The axis this feature's body turns about, and whether only its own solid has one.
+
+        The whole model's axis when the whole model is one body of revolution
+        (unchanged from before solids were tested separately); otherwise the
+        axis of the feature's own solid, if that solid is one by itself.
+        """
+        if self.turning_axis is not None:
+            return self.turning_axis, False
+        form = self.solid_form(feature)
+        if form is not None and form.observed is True:
+            return form.axis, True
+        return None, False
+
+    def solid_label(self, feature: Feature) -> str:
+        return f"solid {feature.solid_index + 1} of {self.solid_count}"
 
 
 # --- holes -------------------------------------------------------------------
@@ -406,10 +440,16 @@ def _cylinder_rule(feature: Feature, context: _Context) -> _Proposal | _Decline:
     subtype = (feature.subtype or "").lower()
 
     if subtype == "shaft":
-        # An external cylinder is the classic turned form, but a shaft feature on
-        # a prismatic part is just as often milled as a boss. The geometry cannot
-        # tell a turned bar from a milled boss, so turning leads and milling is
-        # offered rather than the choice being made silently.
+        # Turning needs the body to spin about this cylinder's axis. Whether it
+        # can is what the single rotational test answers, so the proposal follows
+        # it — the same test the route recommendation reads, which is what keeps
+        # the two from saying different things about the same face. A boss on a
+        # body that is not one of revolution has nothing to chuck: it is milled.
+        axis, _ = context.turning_axis_for(feature)
+        if axis is None:
+            return _boss_proposal(feature, context)
+        # On a body of revolution an external cylinder is the classic turned
+        # form. Milling stays offered: the shop's machines are not in the file.
         return _Proposal(
             operation_type=TURNING,
             rule_id="external_cylinder_to_turning",
@@ -448,6 +488,52 @@ def _cylinder_rule(feature: Feature, context: _Context) -> _Proposal | _Decline:
             f"cylinder subtype '{feature.subtype}' has no suggestion rule, so no operation is "
             "suggested."
         ),
+    )
+
+
+def _boss_proposal(feature: Feature, context: _Context) -> _Proposal:
+    """An external cylinder on a body the rotational test did not pass: a milled boss."""
+    form = context.solid_form(feature)
+    several = context.solid_count > 1
+    body = "solid" if several else "part"
+    if form is None or form.observed is None:
+        # The test had nothing to stand on (this cylinder carries no axis or no
+        # position). Turning is not proposed on an untested form.
+        reason = (
+            f"external cylindrical surface detected, but the {body} could not be tested as a "
+            "body of revolution about its axis, so turning is not suggested; it is proposed "
+            "as a milled boss"
+        )
+        tested = (
+            "the rotational test needs the cylinder's axis and position, which this feature "
+            "does not carry"
+        )
+    else:
+        reason = (
+            f"external cylindrical surface on a {body} that is not a body of revolution about "
+            "its axis, so there is nothing to chuck and turn it about; it is proposed as a "
+            "milled boss"
+        )
+        tested = f"rotational test: {form.detail}"
+    extra = [tested]
+    if several:
+        extra.append(
+            f"the test was run on this feature's own solid ({context.solid_label(feature)}); "
+            "the file's solids are not assumed to be one workpiece"
+        )
+    extra.append(
+        "turning is offered as the alternative: a shop may still turn a boss by swinging the "
+        "whole part in a fixture, which the CAD geometry does not state"
+    )
+    return _Proposal(
+        operation_type=MILLING,
+        rule_id=BOSS_MILLING_RULE,
+        reason=reason,
+        # Medium at most: the geometry settles that the body does not turn about
+        # this axis, not which machine the shop puts it on.
+        ceiling=Confidence.MEDIUM,
+        alternatives=(TURNING,),
+        extra_evidence=tuple(extra),
     )
 
 
@@ -497,8 +583,9 @@ def _plane_rule(feature: Feature, context: _Context) -> _Proposal | _Decline:
     # On a body of revolution every planar face is square to the turning axis
     # (that is part of what made it rotational), so it is an end face or a
     # shoulder — faced on the lathe in the same chucking, not milled.
-    if context.turning_axis is not None and feature.axis is not None and parallel(
-        feature.axis, context.turning_axis
+    turning_axis, own_solid_only = context.turning_axis_for(feature)
+    if turning_axis is not None and feature.axis is not None and parallel(
+        feature.axis, turning_axis
     ):
         return _Proposal(
             operation_type=TURNING,
@@ -511,8 +598,15 @@ def _plane_rule(feature: Feature, context: _Context) -> _Proposal | _Decline:
             alternatives=(MILLING,),
             extra_evidence=(
                 f"this face is {share:.1%} of the largest planar face on its solid",
-                "every external cylinder of this part shares one axis and every planar face is "
-                "square to it, so the part is treated as turned",
+                (
+                    f"every external cylinder of this solid ({context.solid_label(feature)}) "
+                    "shares one axis and every planar face of it is square to that axis, so "
+                    "this solid is treated as turned; the file as a whole is not one body of "
+                    "revolution"
+                )
+                if own_solid_only
+                else "every external cylinder of this part shares one axis and every planar "
+                "face is square to it, so the part is treated as turned",
                 "whether this face needs material removed is a process decision — it may already "
                 "be the bar's cut end",
             ),
@@ -679,9 +773,12 @@ def suggest_operations(
     )
 
     form = rotational_form(list(recognition.features))
+    form_by_solid = rotational_form_by_solid(list(recognition.features))
     context = _Context(
         largest_plane_area_by_solid=_largest_plane_area_by_solid(recognition.features),
         turning_axis=form.axis if form.observed else None,
+        form_by_solid=form_by_solid,
+        solid_count=max(recognition.solid_count, len(form_by_solid), 1),
     )
 
     suggestions: list[OperationSuggestion] = []
@@ -967,6 +1064,7 @@ __all__ = [
     "DRILLING",
     "MILLING",
     "TURNING",
+    "BOSS_MILLING_RULE",
     "KNOWN_OPERATION_TYPES",
     "MIN_PLANE_AREA_SHARE",
     "NOT_COSTED_REASON",

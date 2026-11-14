@@ -394,3 +394,28 @@ GOVERNING_WALL_FIXTURES = {
     "plate_2mm_with_6mm_boss": (plate_2mm_with_6mm_boss, 6.0),
     "plate_4mm": (plate_4mm, 4.0),
 }
+
+
+# A bracket and a tube in one file: two solids, mirroring a real export. Solid 0
+# is the 60 x 40 x 20 block with a Ø18 boss standing on its top face (boss axis
+# Z) — not a body of revolution, its side faces are not square to the boss.
+# Solid 1 is a tube, Ø24 outside with a Ø12 bore, 30 long, lying along X and
+# moved clear of the block — a body of revolution by itself. Expected: the boss
+# is a milled boss, the tube is turned, and the file as a whole is not
+# rotational (the two external cylinders share no axis).
+def bracket_and_tube() -> bytes:
+    from OCP.BRep import BRep_Builder
+    from OCP.TopoDS import TopoDS_Compound
+
+    builder = BRep_Builder()
+    compound = TopoDS_Compound()
+    builder.MakeCompound(compound)
+    builder.Add(compound, _fuse(_box(*BLOCK), _cylinder(9.0, 10.0, (30.0, 20.0, 20.0))))
+    builder.Add(
+        compound,
+        _cut(
+            _cylinder(12.0, 30.0, (100.0, 20.0, 10.0), direction=(1.0, 0.0, 0.0)),
+            _cylinder(6.0, 50.0, (90.0, 20.0, 10.0), direction=(1.0, 0.0, 0.0)),
+        ),
+    )
+    return to_step(compound)

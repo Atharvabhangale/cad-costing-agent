@@ -138,4 +138,19 @@ def rotational_form(features: list[Feature]) -> RotationalForm:
     )
 
 
-__all__ = ["RotationalForm", "parallel", "rotational_form"]
+def rotational_form_by_solid(features: list[Feature]) -> dict[int, RotationalForm]:
+    """The same test, run on each solid's own features. Keyed by `solid_index`.
+
+    Not a second test: it only chooses which features `rotational_form` is
+    handed. A file with one solid gives one entry equal to the whole-file
+    answer. A file with several gives one answer per solid, because a tube
+    modelled beside a bracket is a body of revolution whether or not the
+    bracket is, and nothing in the file says the two are one workpiece.
+    """
+    by_solid: dict[int, list[Feature]] = {}
+    for feature in features:
+        by_solid.setdefault(feature.solid_index, []).append(feature)
+    return {index: rotational_form(group) for index, group in sorted(by_solid.items())}
+
+
+__all__ = ["RotationalForm", "parallel", "rotational_form", "rotational_form_by_solid"]
