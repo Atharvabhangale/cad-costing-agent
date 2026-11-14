@@ -34,6 +34,7 @@
 
   function sheetClear() {
     sheet.analysis = null;
+    showAssemblyNotice("sheet-assembly-notice", null);
     $("sheet-status").textContent =
       "Measure the part to see its thickness, bends and flat blank. Enter your K-factor first " +
       "for the flat size; none is assumed.";
@@ -153,6 +154,7 @@
 
   function sheetRender(a) {
     sheet.analysis = a;
+    showAssemblyNotice("sheet-assembly-notice", a.assembly_notice);
     const heading = {
       sheet: "A constant-thickness sheet",
       not_sheet: "Not a sheet part",

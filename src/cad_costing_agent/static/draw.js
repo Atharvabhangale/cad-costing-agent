@@ -63,6 +63,7 @@
 
   function drawRender(result) {
     draw_.result = result;
+    showAssemblyNotice("draw-assembly-notice", result.assembly_notice);
     draw_.marked = false;
     if (!result.measured) {
       $("draw-status").textContent = `Not measured. ${result.not_measured_reason || ""}`;
@@ -102,6 +103,7 @@
 
   function drawClear() {
     draw_.result = null;
+    showAssemblyNotice("draw-assembly-notice", null);
     draw_.marked = false;
     $("draw-body").classList.add("hidden");
     $("draw-status").textContent =
@@ -131,8 +133,15 @@
     try {
       result = await api("/cad/draw-direction", { method: "POST", body });
     } catch (error) {
-      $("draw-status").textContent = "Could not measure the pull direction of this model.";
       $("draw-run").disabled = false;
+      // A refusal that carries the server's notice is shown in the card, as sent.
+      const refusal = error.detail && error.detail.assembly_notice;
+      showAssemblyNotice("draw-assembly-notice", refusal || null);
+      if (refusal) {
+        $("draw-status").textContent = "Not measured for this file.";
+        return;
+      }
+      $("draw-status").textContent = "Could not measure the pull direction of this model.";
       showError(error.message);
       return;
     }

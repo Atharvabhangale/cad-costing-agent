@@ -1484,6 +1484,71 @@ def _geometry_of(document: CADDocument) -> GeometryProperties:
     return document.geometry
 
 
+# ------------------------------------------------ an assembly read as one body
+#
+# Every whole-file analysis below reads an upload as one shape. For a file that
+# declares an assembly that shape is every component fused together, so each of
+# those responses says so with the same notice (`assembly_notice`), or — where
+# the result would be an artefact of the neighbouring components rather than a
+# figure about the lump — refuses with it. Whether the file declares an assembly
+# is `cad_import.declares_assembly`, from the identification `_import` already
+# made; nothing is parsed for it. A file that declares none is answered exactly
+# as before: the function hands back the object it was given.
+
+from fastapi.encoders import jsonable_encoder  # noqa: E402
+from fastapi.responses import JSONResponse  # noqa: E402
+
+from cad_costing_agent import assembly_notice  # noqa: E402
+from cad_costing_agent.cad_import import declares_assembly  # noqa: E402
+
+
+def _lump_counts(document: CADDocument) -> dict:
+    metadata = document.metadata
+    return {
+        "component_placements": getattr(metadata, "assembly_occurrence_count", None),
+        "product_definitions": getattr(metadata, "product_count", None),
+    }
+
+
+def _with_assembly_notice(result, document: CADDocument, analysis: str):
+    """The result as it is for a part; the same result plus the notice for an assembly."""
+    if not declares_assembly(document):
+        return result
+    notice = assembly_notice.lump_notice(analysis, **_lump_counts(document))
+    # A response already built as a plain dict (extra keys beside the model) is kept as it is.
+    content = result if isinstance(result, dict) else jsonable_encoder(result)
+    return JSONResponse(content={**content, assembly_notice.KEY: notice})
+
+
+def _refuse_assembly_as_one_body(document: CADDocument, analysis: str) -> None:
+    """400 for an analysis that is not run on an assembly's fused components."""
+    if declares_assembly(document):
+        raise HTTPException(
+            status_code=400,
+            detail=assembly_notice.lump_refusal(analysis, **_lump_counts(document)),
+        )
+
+
+def _component_shape(data: bytes, document: CADDocument, component_id: str):
+    """One component definition's own exact shape, through the feature layer's loader."""
+    from cad_costing_agent.features.approach import ApproachUnavailable, shape_and_features
+
+    try:
+        shape, _ = shape_and_features(data, document.source_format, component_id=component_id)
+    except ApproachUnavailable as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return shape
+
+
+def _for_component(result, component_id: str):
+    """A component's measurement, saying which component it is of."""
+    return JSONResponse(content={**jsonable_encoder(result), "component_id": component_id})
+
+
 @app.get("/cad/formats", response_model=list[FormatDescription])
 async def cad_formats() -> list[FormatDescription]:
     """Every CAD format this application recognizes, and what each can do.
@@ -2368,7 +2433,7 @@ async def cad_geometry(file: UploadFile = File(...)) -> GeometryProperties:
     """
     data = await file.read()
     document = _import(data, file.filename or "", CAPABILITY_GEOMETRY)
-    return _geometry_of(document)
+    return _with_assembly_notice(_geometry_of(document), document, "geometry")
 
 
 @app.post("/cad/mesh", response_model=CadViewerModel)
@@ -2478,9 +2543,11 @@ async def cad_features(file: UploadFile = File(...)) -> FeatureRecognitionResult
     # Identified without parsing geometry: recognition reads the file itself,
     # and measuring it here would be a second pass for a number this endpoint
     # does not report.
-    _import(data, file.filename or "", CAPABILITY_FEATURES, with_geometry=False)
+    document = _import(data, file.filename or "", CAPABILITY_FEATURES, with_geometry=False)
     try:
-        return recognize_features_from_bytes(data, file.filename or "")
+        return _with_assembly_notice(
+            recognize_features_from_bytes(data, file.filename or ""), document, "features"
+        )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except Exception as exc:  # noqa: BLE001 - a bad model must not take the app down
@@ -2568,7 +2635,7 @@ async def cad_suggest_operations(
         priced_processes = list(selected.operations.keys())
         resolved_version = selected.version
 
-    _import(data, file.filename or "", CAPABILITY_FEATURES, with_geometry=False)
+    document = _import(data, file.filename or "", CAPABILITY_FEATURES, with_geometry=False)
     try:
         recognition = recognize_features_from_bytes(data, file.filename or "")
     except ValueError as exc:
@@ -2588,10 +2655,14 @@ async def cad_suggest_operations(
         rate_set_id=rate_set_id,
         rate_set_version=resolved_version,
     )
-    return OperationSuggestionResponse(
-        **suggestions.model_dump(),
-        process_classification=classify_process(recognition, suggestions),
-        raw_stock=propose_bar_stock(list(recognition.features)),
+    return _with_assembly_notice(
+        OperationSuggestionResponse(
+            **suggestions.model_dump(),
+            process_classification=classify_process(recognition, suggestions),
+            raw_stock=propose_bar_stock(list(recognition.features)),
+        ),
+        document,
+        "suggestions",
     )
 
 
@@ -3021,13 +3092,16 @@ async def cad_mass(
     Not a cost calculation.
     """
     data = await file.read()
-    geometry = _geometry_of(_import(data, file.filename or "", CAPABILITY_GEOMETRY))
+    document = _import(data, file.filename or "", CAPABILITY_GEOMETRY)
+    geometry = _geometry_of(document)
 
     geometry = _resolve_geometry(
         geometry, geometry_completion_method, geometry_completion_volume_mm3
     )
     try:
-        return calculate_mass_from_geometry(geometry, material, source_unit)
+        return _with_assembly_notice(
+            calculate_mass_from_geometry(geometry, material, source_unit), document, "mass"
+        )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
@@ -3915,9 +3989,10 @@ async def cost_cad_part(
     This is the CAD-driven counterpart to `/cost/part`, which still accepts a
     manually supplied `mass_kg`. `/cost/part` is unchanged.
     """
+    data = await file.read()
     priced = price_cad_part(
         session,
-        data=await file.read(),
+        data=data,
         filename=file.filename or "",
         material=material,
         source_unit=source_unit,
@@ -4069,6 +4144,10 @@ async def cost_cad_part(
     result.estimate_id = estimate_id
     result.part_cost.estimate_id = estimate_id
 
+    # The figure and the stored estimate are unchanged; an assembly's response also
+    # says the fused volume was priced as one part. Identified without geometry.
+    document = _import(data, file.filename or "", CAPABILITY_GEOMETRY, with_geometry=False)
+
     # Operations that are in the plan and in the route but were left out of this
     # cost for want of a committed time are named in the response itself, each
     # with its reason — an estimate must not look whole while covering less work
@@ -4076,30 +4155,28 @@ async def cost_cad_part(
     # response is exactly what it always was.
     uncosted = [] if plan is None else plan.uncosted_operations()
     if uncosted:
-        from fastapi.responses import JSONResponse
-
-        return JSONResponse(
-            {
-                **result.model_dump(mode="json"),
-                "uncosted_operations": [
-                    {
-                        "operation_id": operation.operation_id,
-                        "operation_name": operation.operation_name or operation.operation_id,
-                        "operation_type": operation.operation_type,
-                        "reason": operation.not_costable_reason,
-                        "time_status": operation.system_time_status.value,
-                        "time_reason": operation.system_time_reason,
-                    }
-                    for operation in uncosted
-                ],
-                "uncosted_note": (
-                    f"{len(uncosted)} planned operation(s) carry no committed cycle time and "
-                    "were left out of this cost rather than defaulted to zero, so it covers "
-                    "less work than the plan describes."
-                ),
-            }
-        )
-    return result
+        content = {
+            **result.model_dump(mode="json"),
+            "uncosted_operations": [
+                {
+                    "operation_id": operation.operation_id,
+                    "operation_name": operation.operation_name or operation.operation_id,
+                    "operation_type": operation.operation_type,
+                    "reason": operation.not_costable_reason,
+                    "time_status": operation.system_time_status.value,
+                    "time_reason": operation.system_time_reason,
+                }
+                for operation in uncosted
+            ],
+            "uncosted_note": (
+                f"{len(uncosted)} planned operation(s) carry no committed cycle time and "
+                "were left out of this cost rather than defaulted to zero, so it covers "
+                "less work than the plan describes."
+            ),
+        }
+        noticed = _with_assembly_notice(content, document, "cost")
+        return noticed if noticed is not content else JSONResponse(content)
+    return _with_assembly_notice(result, document, "cost")
 
 
 # ---------------------------------------------------------- route comparison
@@ -4863,7 +4940,7 @@ async def cad_dfm(
         profile = DfmProfileRepository(session).get(dfm_profile_id, dfm_profile_version)
     except ValueError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
-    _import(data, file.filename or "", CAPABILITY_FEATURES, with_geometry=False)
+    document = _import(data, file.filename or "", CAPABILITY_FEATURES, with_geometry=False)
     try:
         # The shape is kept so the minimum-wall rule measures the B-Rep recognition read.
         recognized = recognize_features_with_shape(data, file.filename or "")
@@ -4883,7 +4960,18 @@ async def cad_dfm(
     # Draft and undercuts only when the request states a forming process (see their section).
     draw = (
         _draw_evidence(
-            recognized, file.filename or "", forming_process, process_classification, pull_axis
+            recognized,
+            file.filename or "",
+            forming_process,
+            process_classification,
+            pull_axis,
+            # Draft and undercuts are not measured on an assembly's fused components
+            # (see `/cad/draw-direction`): the two rules are reported not evaluated.
+            not_measured_as_one_body=(
+                assembly_notice.REFUSAL_REASONS["draw_direction"]
+                if declares_assembly(document)
+                else None
+            ),
         )
         if _profile_reads_draw(profile)
         else None
@@ -4892,7 +4980,7 @@ async def cad_dfm(
         recognition.features, profile, file.filename or "", wall=wall, draw=draw
     )
     report.warnings.extend(recognition.warnings)
-    return report
+    return _with_assembly_notice(report, document, "dfm")
 
 
 # ---------------------------------------------------------------- cost drivers
@@ -4986,7 +5074,16 @@ def _wall_evidence(recognized: RecognizedShape, filename: str) -> WallEvidence:
 
 
 @app.post("/cad/wall-thickness", response_model=wall_thickness.WallThicknessResult)
-async def cad_wall_thickness(file: UploadFile = File(...)) -> wall_thickness.WallThicknessResult:
+async def cad_wall_thickness(
+    file: UploadFile = File(...),
+    component_id: str | None = Form(
+        None,
+        description=(
+            "For an assembly: one component definition's id. Its walls are measured on that "
+            "component's own shape, and the response names it in `component_id`."
+        ),
+    ),
+) -> wall_thickness.WallThicknessResult:
     """Measure the walls of an uploaded exact B-Rep part: the thinnest found, per face, and a
     fixed-bin distribution, with the method and what it can miss.
 
@@ -5005,7 +5102,21 @@ async def cad_wall_thickness(file: UploadFile = File(...)) -> wall_thickness.Wal
         )
     filename = file.filename or ""
     # The same capability as recognition: walls are measured on the shape it reads.
-    _import(data, filename, CAPABILITY_FEATURES, with_geometry=False)
+    document = _import(data, filename, CAPABILITY_FEATURES, with_geometry=False)
+    if component_id:
+        shape = _component_shape(data, document, component_id)
+        try:
+            return _for_component(
+                wall_thickness.measure_wall_thickness(shape, filename=filename), component_id
+            )
+        except Exception as exc:  # noqa: BLE001 - a bad model must not take the app down
+            raise HTTPException(
+                status_code=500,
+                detail=(
+                    f"Wall-thickness measurement failed unexpectedly on this component "
+                    f"({type(exc).__name__}). Geometry, the 3D preview and costing are unaffected."
+                ),
+            ) from exc
     try:
         recognized = recognize_features_with_shape(data, filename)
     except ValueError as exc:
@@ -5026,7 +5137,9 @@ async def cad_wall_thickness(file: UploadFile = File(...)) -> wall_thickness.Wal
     try:
         # Over budget, or with no solid, this still answers 200 with `measured` false and
         # the reason: the file is fine, this one analysis is what degraded.
-        return _measure_walls(recognized, filename)
+        return _with_assembly_notice(
+            _measure_walls(recognized, filename), document, "wall_thickness"
+        )
     except Exception as exc:  # noqa: BLE001 - a bad model must not take the app down
         raise HTTPException(
             status_code=500,
@@ -5144,6 +5257,7 @@ def _draw_evidence(
     forming_process: str | None,
     process_classification: str | None,
     pull_axis: str | None,
+    not_measured_as_one_body: str | None = None,
 ) -> DrawEvidence:
     """The measurement as the DFM rules' plain carrier — or why it was not made."""
     stated = _stated_forming_process(forming_process, process_classification)
@@ -5151,6 +5265,13 @@ def _draw_evidence(
     if stated is None:
         return DrawEvidence(measured=False, not_measured_reason=NO_FORMING_PROCESS)
     process, source = stated
+    if not_measured_as_one_body is not None:
+        return DrawEvidence(
+            measured=False,
+            forming_process=process,
+            forming_process_source=source,
+            not_measured_reason=not_measured_as_one_body,
+        )
     try:
         result = _measure_draw(recognized, filename, axis)
     except Exception as exc:  # noqa: BLE001 - a failed measurement skips two rules, no more
@@ -5202,6 +5323,14 @@ async def cad_draw_direction(
             "as the axis used, beside the recommendation."
         ),
     ),
+    component_id: str | None = Form(
+        None,
+        description=(
+            "For an assembly: one component definition's id. The pull direction is measured on "
+            "that component's own shape, and the response names it in `component_id`. An "
+            "assembly sent without one is refused (400): its components are not measured fused."
+        ),
+    ),
 ) -> draw_direction.DrawDirectionResult:
     """Candidate pull axes for a two-half mould or die, the draft of every face against the
     axis used, and the faces no straight pull releases (undercuts), with the method and what
@@ -5223,7 +5352,23 @@ async def cad_draw_direction(
         )
     filename = file.filename or ""
     axis = _pull_axis_from_form(pull_axis)
-    _import(data, filename, CAPABILITY_FEATURES, with_geometry=False)
+    document = _import(data, filename, CAPABILITY_FEATURES, with_geometry=False)
+    if component_id:
+        shape = _component_shape(data, document, component_id)
+        try:
+            return _for_component(
+                draw_direction.measure_draw_direction(shape, filename=filename, pull_axis=axis),
+                component_id,
+            )
+        except Exception as exc:  # noqa: BLE001 - a bad model must not take the app down
+            raise HTTPException(
+                status_code=500,
+                detail=(
+                    f"Pull-direction measurement failed unexpectedly on this component "
+                    f"({type(exc).__name__}). Geometry, the 3D preview and costing are unaffected."
+                ),
+            ) from exc
+    _refuse_assembly_as_one_body(document, "draw_direction")
     try:
         recognized = recognize_features_with_shape(data, filename)
     except ValueError as exc:
@@ -5275,7 +5420,9 @@ async def cad_cores_propose(
     data = await _read_capped(file)  # defined in the die-casting section
     filename = file.filename or ""
     axis = _pull_axis_from_form(pull_axis)
-    _import(data, filename, CAPABILITY_FEATURES, with_geometry=False)
+    _refuse_assembly_as_one_body(
+        _import(data, filename, CAPABILITY_FEATURES, with_geometry=False), "cores"
+    )
     try:
         recognized = recognize_features_with_shape(data, filename)
     except ValueError as exc:
@@ -5344,6 +5491,8 @@ def _setup_proposal_for(
             ),
         )
     document = _import(data, filename, CAPABILITY_FEATURES, with_geometry=False)
+    if not component_id:
+        _refuse_assembly_as_one_body(document, "setups")
     try:
         shape, recognition = shape_and_features(
             data, document.source_format, component_id=component_id or None
@@ -5465,13 +5614,17 @@ async def cad_sheet_metal(
                 f"{MAX_UPLOAD_BYTES // 1024 // 1024} MB limit for this POC."
             ),
         )
-    _import(data, file.filename or "", CAPABILITY_FEATURES, with_geometry=False)
+    document = _import(data, file.filename or "", CAPABILITY_FEATURES, with_geometry=False)
     try:
-        return analyse_sheet_metal_from_bytes(
-            data,
-            file.filename or "",
-            k_factor=k_factor,
-            sheet_excluders=sheet_excluding_features,
+        return _with_assembly_notice(
+            analyse_sheet_metal_from_bytes(
+                data,
+                file.filename or "",
+                k_factor=k_factor,
+                sheet_excluders=sheet_excluding_features,
+            ),
+            document,
+            "sheet_metal",
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -5712,7 +5865,7 @@ async def cad_governing_wall(file: UploadFile = File(...)) -> wall_thickness.Gov
             ),
         )
     filename = file.filename or ""
-    _import(data, filename, CAPABILITY_FEATURES, with_geometry=False)
+    document = _import(data, filename, CAPABILITY_FEATURES, with_geometry=False)
     try:
         recognized = recognize_features_with_shape(data, filename)
     except ValueError as exc:
@@ -5731,7 +5884,11 @@ async def cad_governing_wall(file: UploadFile = File(...)) -> wall_thickness.Gov
     if reason is not None:
         raise HTTPException(status_code=400, detail=reason)
     try:
-        return wall_thickness.measure_governing_wall(recognized.shape, filename=filename)
+        return _with_assembly_notice(
+            wall_thickness.measure_governing_wall(recognized.shape, filename=filename),
+            document,
+            "governing_wall",
+        )
     except Exception as exc:  # noqa: BLE001 - a bad model must not take the app down
         raise HTTPException(
             status_code=500,
@@ -6245,6 +6402,8 @@ async def cad_casting_modulus(file: UploadFile = File(...)) -> CastingModulus:
     data = await _read_capped(file)
     filename = file.filename or ""
     geometry = _geometry_of(_import(data, filename, CAPABILITY_GEOMETRY))
+    # Identified again without geometry (a header read), only to say what the file is.
+    document = _import(data, filename, CAPABILITY_GEOMETRY, with_geometry=False)
     if geometry.geometry_source != "brep":
         raise HTTPException(
             status_code=400,
@@ -6263,13 +6422,17 @@ async def cad_casting_modulus(file: UploadFile = File(...)) -> CastingModulus:
                 "one, so it has no volume to divide. Export the part as a solid."
             ),
         )
-    return CastingModulus(
-        filename=filename,
-        measured=True,
-        volume_mm3=geometry.volume,
-        surface_area_mm2=geometry.surface_area,
-        modulus_mm=geometry.volume / geometry.surface_area,
-        geometry_source=geometry.geometry_source,
+    return _with_assembly_notice(
+        CastingModulus(
+            filename=filename,
+            measured=True,
+            volume_mm3=geometry.volume,
+            surface_area_mm2=geometry.surface_area,
+            modulus_mm=geometry.volume / geometry.surface_area,
+            geometry_source=geometry.geometry_source,
+        ),
+        document,
+        "casting_modulus",
     )
 
 

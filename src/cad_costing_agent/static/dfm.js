@@ -191,6 +191,7 @@
 
   function dfmRender(report) {
     state_.report = report;
+    showAssemblyNotice("dfm-assembly-notice", report.assembly_notice);
     state_.marked = null;
     const list = $("dfm-flags");
     $("dfm-profile-line").textContent =
@@ -224,6 +225,7 @@
 
   function dfmClear() {
     state_.report = null;
+    showAssemblyNotice("dfm-assembly-notice", null);
     state_.marked = null;
     $("dfm-flags").innerHTML = "";
     $("dfm-wall").innerHTML = "";

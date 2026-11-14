@@ -218,6 +218,7 @@
             <h2>Recognized features</h2>
             <button type="button" id="analyse-features" class="secondary tiny" disabled>Analyse features</button>
           </div>
+          <div id="features-assembly-notice" class="warning assembly-lump-notice hidden" role="note"></div>
           <p id="features-status" class="hint">
             Upload a CAD file, then analyse it to see the holes,
             pockets, cylinders and faces it contains.
@@ -248,6 +249,7 @@
             <h2>Design-for-manufacturing flags</h2>
             <button type="button" id="dfm-run" class="secondary tiny" disabled>Check design</button>
           </div>
+          <div id="dfm-assembly-notice" class="warning assembly-lump-notice hidden" role="note"></div>
           <p id="dfm-status" class="hint"></p>
           <!-- Draft and undercuts are checked only for a stated forming process: chosen
                here, or a decided casting, forging or moulding route. Never guessed. -->
@@ -294,6 +296,7 @@
             <h2>Pull direction, draft and undercuts</h2>
             <button type="button" id="draw-run" class="secondary tiny" disabled>Measure pull direction</button>
           </div>
+          <div id="draw-assembly-notice" class="warning assembly-lump-notice hidden" role="note"></div>
           <p id="draw-status" class="hint"></p>
           <div class="draw-axis-input">
             <span>Pull axis (optional, overrides the recommendation):</span>
@@ -338,6 +341,7 @@
               <h3>Proposed cores and side actions</h3>
               <button type="button" id="cores-run" class="secondary tiny" disabled>Propose cores</button>
             </div>
+            <div id="cores-assembly-notice" class="warning assembly-lump-notice hidden" role="note"></div>
             <p id="cores-status" class="hint"></p>
             <div id="cores-body" class="hidden">
               <p id="cores-count"></p>
@@ -427,6 +431,7 @@
               <button type="button" id="sheet-add-lines" class="secondary tiny" disabled>Add cut and bend lines to the plan</button>
             </div>
           </div>
+          <div id="sheet-assembly-notice" class="warning assembly-lump-notice hidden" role="note"></div>
           <p id="sheet-status" class="hint"></p>
           <div id="sheet-result"></div>
           <!-- The flat blank nested on the engineer's sheet: a grid estimate from
@@ -529,6 +534,7 @@
               <button type="button" id="suggest-operations" class="secondary tiny" disabled>Suggest operations</button>
             </div>
           </div>
+          <div id="suggestions-assembly-notice" class="warning assembly-lump-notice hidden" role="note"></div>
           <p id="suggestions-status" class="hint">
             Analyse a CAD file, then suggest operations from the
             features it contains. Suggestions and their estimated times are proposals only — nothing
@@ -590,6 +596,7 @@
         <!-- ---------------- result ---------------- -->
         <section id="result" class="hidden">
           <div id="illustrative-warning" class="warning hidden"></div>
+          <div id="cost-assembly-notice" class="warning assembly-lump-notice hidden" role="note"></div>
           <div class="headline">
             <div class="headline-item">
               <span class="label">Total cost</span>

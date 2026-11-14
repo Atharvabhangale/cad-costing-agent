@@ -25,6 +25,7 @@ function suggestionsEnabledFor() {
 
 function resetSuggestionsPanel() {
   state.suggestions = null;
+  showAssemblyNotice("suggestions-assembly-notice", null);
   $("suggestions-summary").classList.add("hidden");
   $("suggestions-note").classList.add("hidden");
   $("declined-wrap").classList.add("hidden");
@@ -104,6 +105,7 @@ $("suggest-operations").addEventListener("click", async () => {
 // the estimate came from.
 
 function renderSuggestions(result) {
+  showAssemblyNotice("suggestions-assembly-notice", result.assembly_notice);
   const total = result.suggestions.length;
   $("suggestions-status").textContent =
     `${total} suggestion${total === 1 ? "" : "s"} from ${result.feature_count} recognized ` +
