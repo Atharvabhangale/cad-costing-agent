@@ -347,7 +347,45 @@ function systemTimeApplies(operation) {
     operation.system_time_status === "estimated" &&
     estimatedFor(operation) != null &&
     effectiveType(operation) === estimatedFor(operation) &&
-    systemCycleForChoice(operation) != null
+    systemCycleForChoice(operation) > 0
+  );
+}
+
+// Mirrors PlannedOperation.system_time_is_zero: an "estimated" time for the
+// process now selected that is not above zero. It never applies, so it can be
+// neither accepted nor costed, and the row reads as needing a time.
+const ZERO_SYSTEM_TIME_NOTE =
+  "The system's estimated cycle time for this operation is 0 min — the formula's result was " +
+  "below what an estimate is reported to — so it is not a usable time and the operation is not " +
+  "costed. Enter a cycle time. No minimum is assumed.";
+
+// A typed cycle time of zero is a different statement from an estimate that
+// rounds to zero: it says the work takes no time. The backend refuses it (a
+// cycle time must be above zero), so it is never stored as the engineer's time;
+// the row stays as needing a time and says why.
+const ZERO_CYCLE_TIME_NOTE =
+  "A cycle time of 0 is not a time, so it was not recorded: an operation that takes none is " +
+  "removed from the plan, not costed at nothing.";
+
+// Whether the estimator declined this row because its formula's cycle was below
+// the resolution an estimate is reported to. Read from the fields the backend
+// recorded; nothing is compared with a threshold here.
+function estimateBelowResolution(operation) {
+  const parameters = operation.system_time_parameters || {};
+  return (
+    operation.system_time_status === "needs_user_input" &&
+    parameters.unrounded_cycle_time_minutes != null
+  );
+}
+
+function systemTimeIsZero(operation) {
+  const cycle = systemCycleForChoice(operation);
+  return (
+    operation.system_time_status === "estimated" &&
+    estimatedFor(operation) != null &&
+    effectiveType(operation) === estimatedFor(operation) &&
+    cycle != null &&
+    cycle <= 0
   );
 }
 
@@ -1191,7 +1229,11 @@ function planExplanation(operation) {
           `</ul>`
       );
     }
-    if (!systemTimeApplies(operation)) {
+    if (systemTimeIsZero(operation)) {
+      parts.push(
+        `<p class="provenance">${escapeHtml(ZERO_SYSTEM_TIME_NOTE)}</p>`
+      );
+    } else if (!systemTimeApplies(operation)) {
       parts.push(
         `<p class="provenance">This estimate was for ` +
           `${escapeHtml(operation.system_suggested_operation)}. You changed the operation to ` +
@@ -1391,6 +1433,12 @@ function wirePlanRows() {
         const raw = input.value.trim();
         const field = which === "setup" ? "user_setup_time" : "user_cycle_time";
         operation[field] = raw === "" ? null : Number(raw);
+        // A zero setup is a decision; a zero cycle is not a time (see
+        // ZERO_CYCLE_TIME_NOTE), so it is not kept as the engineer's value.
+        const zeroCycle = which === "cycle" && raw !== "" && !(Number(raw) > 0);
+        if (zeroCycle) operation.user_cycle_time = null;
+        input.title = zeroCycle ? ZERO_CYCLE_TIME_NOTE : "";
+        operation._zeroCycleTyped = zeroCycle;
         if (operation.user_action === ACT.PENDING || operation.user_action === ACT.ACCEPTED) {
           operation.user_action = ACT.EDITED;
         }
@@ -1918,6 +1966,19 @@ function refreshUncostedNote() {
     `${uncosted.length === 1 ? "it is" : "they are"} not costed. ` +
     "Accept the estimate or enter a cycle time to include " +
     `${uncosted.length === 1 ? "it" : "them"}. Nothing is assumed.`;
+  // Two reasons a row can look timed and still not be: say each in words.
+  const tooSmall = uncosted.filter(
+    (operation) => estimateBelowResolution(operation) || systemTimeIsZero(operation)
+  );
+  if (tooSmall.length) {
+    note.textContent +=
+      ` ${tooSmall.length} of these ${tooSmall.length === 1 ? "has" : "have"} an estimated ` +
+      "cycle below what an estimate is reported to, so no estimate is offered: enter a cycle " +
+      "time. No minimum is assumed.";
+  }
+  if (uncosted.some((operation) => operation._zeroCycleTyped)) {
+    note.textContent += ` ${ZERO_CYCLE_TIME_NOTE}`;
+  }
   note.classList.remove("hidden");
 }
 
