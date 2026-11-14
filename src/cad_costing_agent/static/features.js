@@ -48,6 +48,7 @@ function featuresEnabledFor() {
 // Called by app.js whenever a file is selected, so the panel always reflects
 // the file currently loaded rather than a previous analysis.
 function resetFeaturesPanel() {
+  showAssemblyNotice("features-assembly-notice", null);
   const file = state.file;
   $("features-summary").classList.add("hidden");
   $("features-table").classList.add("hidden");
@@ -131,6 +132,7 @@ $("analyse-features").addEventListener("click", async () => {
 
 function renderFeatures(result) {
   state.features = result;
+  showAssemblyNotice("features-assembly-notice", result.assembly_notice);
   const total = result.features.length;
   $("features-status").textContent =
     `${total} feature${total === 1 ? "" : "s"} across ${result.solid_count} solid${

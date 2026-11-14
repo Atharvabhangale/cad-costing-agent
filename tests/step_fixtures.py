@@ -419,3 +419,35 @@ def bracket_and_tube() -> bytes:
         ),
     )
     return to_step(compound)
+
+
+# --- a multi-body part ---------------------------------------------------------
+# Two solids under ONE product, with no assembly entities — what the real
+# `model2.stp` is. `to_step` cannot write it: by default OpenCASCADE's writer
+# turns a compound into an assembly, one PRODUCT and one placement per solid,
+# which is what `two_solids` therefore is. Here the writer's assembly mode is
+# switched off for one write and restored, so the file declares a single part.
+def multi_body_part() -> bytes:
+    from OCP.BRep import BRep_Builder
+    from OCP.Interface import Interface_Static
+    from OCP.STEPControl import STEPControl_Controller
+    from OCP.TopoDS import TopoDS_Compound
+
+    builder = BRep_Builder()
+    compound = TopoDS_Compound()
+    builder.MakeCompound(compound)
+    builder.Add(compound, _box(20.0, 20.0, 20.0))
+    builder.Add(
+        compound,
+        _cut(_box(30.0, 20.0, 20.0, at=(50.0, 0.0, 0.0)), _cylinder(6.0, 40.0, (65.0, 10.0, -10.0))),
+    )
+
+    STEPControl_Controller.Init_s()
+    previous = Interface_Static.IVal_s("write.step.assembly")
+    Interface_Static.SetIVal_s("write.step.assembly", 0)
+    try:
+        data = to_step(compound)
+    finally:
+        Interface_Static.SetIVal_s("write.step.assembly", previous)
+    assert data.count(b"NEXT_ASSEMBLY_USAGE_OCCURRENCE") == 0
+    return data

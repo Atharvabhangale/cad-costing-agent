@@ -33,6 +33,7 @@
 
   function coresRender(result) {
     cores_.result = result;
+    showAssemblyNotice("cores-assembly-notice", result.assembly_notice);
     if (!result.measured) {
       $("cores-status").textContent = `No proposal. ${result.not_measured_reason || ""}`;
       $("cores-body").classList.add("hidden");
@@ -63,6 +64,7 @@
 
   function coresClear() {
     cores_.result = null;
+    showAssemblyNotice("cores-assembly-notice", null);
     $("cores-body").classList.add("hidden");
     $("cores-status").textContent =
       "Group the undercut faces into proposed cores or side actions. Analysis only; nothing is applied.";
@@ -88,8 +90,15 @@
     try {
       coresRender(await api("/cad/cores/propose", { method: "POST", body }));
     } catch (error) {
-      $("cores-status").textContent = "Could not propose cores for this model.";
-      showError(error.message);
+      // A refusal that carries the server's notice is shown in the card, as sent.
+      const refusal = error.detail && error.detail.assembly_notice;
+      showAssemblyNotice("cores-assembly-notice", refusal || null);
+      if (refusal) {
+        $("cores-status").textContent = "No proposal for this file.";
+      } else {
+        $("cores-status").textContent = "Could not propose cores for this model.";
+        showError(error.message);
+      }
     }
     $("cores-run").disabled = false;
   });

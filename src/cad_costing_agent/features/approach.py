@@ -699,6 +699,14 @@ def shape_and_features(data: bytes, source_format: str, *, component_id: str | N
                 f"Component '{definition.name}' carries no geometry the reader could transfer, "
                 "so there is nothing to cast rays against."
             )
+        if definition.is_assembly:
+            # A sub-assembly's shape is a compound of its children's: rays cast
+            # against it would be stopped by the other children.
+            raise ApproachUnavailable(
+                f"Component '{definition.name}' is a sub-assembly: its shape is its "
+                "children's together, so it is not analysed as one body. Ask for one of the "
+                "parts it contains."
+            )
         recognition = recognize_component_features(
             loaded.shape,
             component_id=definition.name or component_id,

@@ -89,9 +89,28 @@ async function api(path, options) {
     } catch {
       detail = null;
     }
-    throw new Error(readableError(detail, response.status));
+    const failure = new Error(readableError(detail, response.status));
+    // A structured refusal is kept whole, so a card can show what the server said.
+    failure.detail = detail;
+    throw failure;
   }
   return response.json();
+}
+
+// A whole-file analysis of an assembly says so itself: `assembly_notice` in the
+// response, or in a refusal's detail. These two draw that object and nothing
+// else — whether a file is an assembly is never worked out here.
+function assemblyNoticeMarkup(notice) {
+  return `<p><strong>${escapeHtml(notice.message)}</strong></p>
+    <p>${escapeHtml(notice.per_component)}</p>
+    <p>${escapeHtml(notice.see_instead)}</p>`;
+}
+
+function showAssemblyNotice(elementId, notice) {
+  const element = $(elementId);
+  if (!element) return;
+  element.innerHTML = notice ? assemblyNoticeMarkup(notice) : "";
+  element.classList.toggle("hidden", !notice);
 }
 
 // FastAPI validation errors arrive as a list of field objects. Turn those into
@@ -888,6 +907,7 @@ $("calculate").addEventListener("click", async () => {
 });
 
 function renderResult(response) {
+  showAssemblyNotice("cost-assembly-notice", response.assembly_notice);
   const cost = response.part_cost;
   const currency = cost.currency;
   const rateSet = cost.rate_set;

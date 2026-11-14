@@ -846,3 +846,8 @@ tr.driver-unrecorded td { color: var(--muted); font-style: italic; }
 .dfm-forming { display: inline-flex; gap: 6px; align-items: center; margin: 4px 0 8px; }
 table.draw-table { width: 100%; border-collapse: collapse; margin-top: 6px; font-size: 13px; }
 table.draw-table th, table.draw-table td { text-align: left; padding: 3px 8px 3px 0; border-top: 1px solid var(--line); vertical-align: top; }
+
+/* An assembly measured as one body: the server's notice, shown in the card it is about. */
+.assembly-lump-notice { margin: 10px 0 12px; }
+.assembly-lump-notice p { margin: 0 0 6px; }
+.assembly-lump-notice p:last-child { margin-bottom: 0; }

@@ -89,6 +89,7 @@ __all__ = [
     "ComponentDefinition",
     "ComponentOccurrence",
     "ComponentTransform",
+    "declares_assembly",
     "decompose_assembly",
     "CapabilityReport",
     "FormatDescription",
@@ -606,6 +607,21 @@ def _assembly_capability(structure, state: str) -> CapabilityReport:
             "with that reason rather than counted as zero."
         ),
     )
+
+
+def declares_assembly(document: CADDocument) -> bool:
+    """Whether the file itself declares an assembly — the one place that is decided.
+
+    Read from the identification `/cad/import` reports (`structure_state`), which
+    the adapter sets from the file's own declaration of component placements
+    during the cheap inspection. Nothing is parsed for it and no product
+    structure is read, so the answer is the same with or without geometry and
+    costs nothing on a large export.
+
+    A part made of several solid bodies declares no placements and is not an
+    assembly; nothing here counts bodies.
+    """
+    return document.structure_state == STRUCTURE_AVAILABLE
 
 
 def require(document: CADDocument, capability: str) -> CapabilityReport:
