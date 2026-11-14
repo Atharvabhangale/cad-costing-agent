@@ -4068,6 +4068,37 @@ async def cost_cad_part(
 
     result.estimate_id = estimate_id
     result.part_cost.estimate_id = estimate_id
+
+    # Operations that are in the plan and in the route but were left out of this
+    # cost for want of a committed time are named in the response itself, each
+    # with its reason — an estimate must not look whole while covering less work
+    # than its plan. Present only when there are some: a fully costed estimate's
+    # response is exactly what it always was.
+    uncosted = [] if plan is None else plan.uncosted_operations()
+    if uncosted:
+        from fastapi.responses import JSONResponse
+
+        return JSONResponse(
+            {
+                **result.model_dump(mode="json"),
+                "uncosted_operations": [
+                    {
+                        "operation_id": operation.operation_id,
+                        "operation_name": operation.operation_name or operation.operation_id,
+                        "operation_type": operation.operation_type,
+                        "reason": operation.not_costable_reason,
+                        "time_status": operation.system_time_status.value,
+                        "time_reason": operation.system_time_reason,
+                    }
+                    for operation in uncosted
+                ],
+                "uncosted_note": (
+                    f"{len(uncosted)} planned operation(s) carry no committed cycle time and "
+                    "were left out of this cost rather than defaulted to zero, so it covers "
+                    "less work than the plan describes."
+                ),
+            }
+        )
     return result
 
 

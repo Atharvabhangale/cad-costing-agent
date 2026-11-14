@@ -96,7 +96,7 @@ def test_a_deeper_hole_takes_longer_and_a_wider_one_takes_longer_per_mm():
 def test_the_spindle_speed_is_clamped_for_a_tiny_hole():
     """1000·Vc/(π·D) runs away as D shrinks; the machine cannot."""
     estimate = estimate_operation_time(
-        operation_type="drilling", dimensions={"diameter_mm": 0.05, "depth_mm": 1.0}
+        operation_type="drilling", dimensions={"diameter_mm": 0.05, "depth_mm": 10.0}
     )
 
     assert estimate.estimated

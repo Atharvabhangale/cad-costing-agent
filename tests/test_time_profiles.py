@@ -218,7 +218,7 @@ def test_the_spindle_clamp_is_kept_because_it_is_part_of_the_model():
     """The one place clamping is right: a machine really does have limits."""
     estimate = estimate_operation_time(
         operation_type="drilling",
-        dimensions={"diameter_mm": 0.02, "depth_mm": 1.0},
+        dimensions={"diameter_mm": 0.02, "depth_mm": 10.0},
         assumptions=TimeAssumptions(max_spindle_rpm=6000.0),
     )
 

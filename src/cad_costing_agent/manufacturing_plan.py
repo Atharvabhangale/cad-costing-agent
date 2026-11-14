@@ -118,6 +118,24 @@ NOT_COSTED_WITHOUT_TIME = (
     "estimate. Nothing is assumed."
 )
 
+# A system time of zero is not a time. It reaches a plan only from a record made
+# before the estimator refused a cycle below its reporting resolution, or from a
+# payload built by hand; either way it never applies, so it can be neither
+# accepted nor costed, and the operation is listed as needing a time.
+NOT_COSTED_ZERO_SYSTEM_TIME = (
+    "The system's estimated cycle time for this operation is 0 min — the formula's result was "
+    "below what an estimate is reported to — so it is not a usable time and the operation is not "
+    "costed. Enter a cycle time. No minimum is assumed."
+)
+
+# What the engineer is told when they type a cycle time of zero. A typed zero is
+# a different statement from an estimate that rounds to zero: it says the work
+# takes no time, which is a reason to remove the operation, not a time to cost.
+ZERO_CYCLE_TIME_REFUSED = (
+    "Cycle time must be greater than zero. A cycle time of 0 is not a time: an operation that "
+    "takes none is removed from the plan, not costed at nothing."
+)
+
 
 class SetupTimeSummary(BaseModel):
     """One setup's contribution of minutes, setup and cycle kept apart."""
@@ -509,8 +527,24 @@ class PlannedOperation(BaseModel):
             return False
         if self.operation_type != self.estimated_for:
             return False
-        # A drilling sequence the system never timed has no system time.
-        return self.system_cycle_for_choice is not None
+        # A drilling sequence the system never timed has no system time — and
+        # a system time of zero is not one either (`system_time_is_zero`).
+        cycle = self.system_cycle_for_choice
+        return cycle is not None and cycle > 0
+
+    @property
+    def system_time_is_zero(self) -> bool:
+        """An "estimated" time for the process now selected that is not above zero.
+
+        Such a time never applies: accepting it would commit nothing, and the
+        operation would be estimated, accepted and left out of the cost.
+        """
+        if self.system_time_status is not TimeStatus.ESTIMATED:
+            return False
+        if self.estimated_for is None or self.operation_type != self.estimated_for:
+            return False
+        cycle = self.system_cycle_for_choice
+        return cycle is not None and cycle <= 0
 
     @property
     def drilling_steps(self) -> list[float]:
@@ -582,6 +616,8 @@ class PlannedOperation(BaseModel):
             return "Removed from the plan by the engineer, so it is not costed."
         if not self.operation_type:
             return "This operation has no process, so it cannot be costed."
+        if self.system_time_is_zero:
+            return NOT_COSTED_ZERO_SYSTEM_TIME
         if self.system_time_status is TimeStatus.ESTIMATED and not self.system_time_applies:
             return (
                 f"The estimated time was for {self.estimated_for}, but this "
@@ -636,7 +672,7 @@ class PlannedOperation(BaseModel):
             updates["user_setup_time"] = float(setup_time_minutes)
         if cycle_time_minutes is not None:
             if cycle_time_minutes <= 0:
-                raise ValueError("Cycle time must be greater than zero.")
+                raise ValueError(ZERO_CYCLE_TIME_REFUSED)
             updates["user_cycle_time"] = float(cycle_time_minutes)
         if not updates:
             return self

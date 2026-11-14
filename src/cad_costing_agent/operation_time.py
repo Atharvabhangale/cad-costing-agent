@@ -29,6 +29,15 @@ assumptions and rate sets are deliberately separate concerns: assumptions
 determine duration, rates determine money, and mixing them would make a
 shop-floor parameter silently change a price.
 
+**Nothing rounds to nothing.** A formula whose cycle would be reported as zero
+at the resolution an estimate is reported to (0.01 min; 0.0001 min for a
+moulding or die-casting shot — so below half of it) is `needs_user_input`, with
+the unrounded figure recorded in
+`parameters["unrounded_cycle_time_minutes"]`. A zero-minute estimate would be
+accepted and then left out of the cost, and no minimum time is invented to
+avoid that. A setup time is a profile's own stated figure rather than a
+formula's result, and zero is a legitimate one.
+
 No AI, no ML, no learning, no randomness. The same inputs always give the same
 times — a quotation has to be reproducible.
 
@@ -790,6 +799,29 @@ def _round(value: float) -> float:
     return round(value, TIME_DECIMALS)
 
 
+def time_resolution_minutes(process: str) -> float:
+    """The smallest cycle time an estimate for this process can report."""
+    return 10.0 ** -(MOULDING_TIME_DECIMALS if process in _FINE_TIME_PROCESSES else TIME_DECIMALS)
+
+
+def _reported_cycle(cycle: float, process: str) -> float:
+    """A formula's cycle as an estimate reports it: rounded to the process's resolution."""
+    return round(
+        cycle, MOULDING_TIME_DECIMALS if process in _FINE_TIME_PROCESSES else TIME_DECIMALS
+    )
+
+
+def _rounds_to_nothing(cycle: float, process: str) -> bool:
+    """Whether a formula's cycle would be reported as zero minutes.
+
+    The test is on the reported figure itself, so there is exactly one boundary:
+    half the resolution, where rounding stops giving 0.00. A cycle that reports
+    as 0.01 is an ordinary rounded estimate; one that reports as 0.00 is not a
+    time at all.
+    """
+    return _reported_cycle(cycle, process) <= 0
+
+
 def _spindle_rpm(cutting_speed_m_per_min: float, diameter_mm: float, a: TimeAssumptions) -> float:
     """rpm = 1000·Vc / (π·D), clamped to the machine's usable range."""
     raw = (1000.0 * cutting_speed_m_per_min) / (math.pi * diameter_mm)
@@ -891,6 +923,12 @@ def drilling_options(
         if any(option.steps == steps for option in options):
             continue
         cycle = sum(_drill_pass(step, travel, a)[0] for step in steps)
+        # An alternative whose time rounds to nothing is not offered: it would
+        # carry 0.00 as "its own system-computed time". The suggested sequence
+        # is kept — when it is the one that rounds to nothing the whole estimate
+        # is refused, and that refusal offers no options.
+        if steps != suggested and _rounds_to_nothing(cycle, "drilling"):
+            continue
         options.append(
             DrillingOption(
                 steps=steps,
@@ -2002,6 +2040,44 @@ def estimate_operation_time(
         return outcome.model_copy(update=_provenance(profile))
 
     cycle, method, evidence, formula_assumptions, parameters = outcome
+
+    # A formula can give a positive time smaller than an estimate is reported
+    # to: a Ø1 mm hole 0.2 mm deep drills in a fraction of a second. Rounded,
+    # that is 0.00 min — and a zero-minute "estimate" is not a time anyone can
+    # accept: the plan costs only a cycle above zero, so the operation would be
+    # estimated, accepted and absent. It is refused instead, with the unrounded
+    # figure recorded so the engineer can see what the formula said. No minimum
+    # is substituted and nothing is rounded up.
+    resolution = time_resolution_minutes(process)
+    if _rounds_to_nothing(cycle, process):
+        return OperationTimeEstimate(
+            time_status=TimeStatus.NEEDS_USER_INPUT,
+            estimated=False,
+            method=method,
+            reason=(
+                f"The {process.replace('_', ' ')} formula gives a cycle of {cycle:.6f} min "
+                f"({cycle * 60:.3f} s), which rounds to 0 at the {resolution:g} min an estimate "
+                "is reported to. It is not offered as an estimate, because a zero-minute time "
+                "would be accepted and then left out of the cost: enter a cycle time for this "
+                "operation. No minimum time is assumed."
+            ),
+            evidence=evidence,
+            assumptions=[
+                *formula_assumptions,
+                f"unrounded cycle {cycle:.6f} min — rounds to 0 at the {resolution:g} min "
+                "reporting resolution, so it is recorded here and not used as a time",
+            ],
+            missing=["cycle_time_minutes"],
+            is_illustrative=a.is_illustrative,
+            parameters={
+                **parameters,
+                "unrounded_cycle_time_minutes": round(cycle, 9),
+                "time_resolution_minutes": resolution,
+            },
+            drilling_steps=drilling_fields.get("drilling_steps", []),
+            **_provenance(profile),
+        )
+
     setup = _SETUP_MINUTES[process](a)
 
     confidence = (
@@ -2091,6 +2167,7 @@ __all__ = [
     "WeldSpec",
     "estimate_for_suggestion",
     "estimate_operation_time",
+    "time_resolution_minutes",
 ]
 
 
