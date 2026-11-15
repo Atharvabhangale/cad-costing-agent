@@ -68,6 +68,20 @@ Facing a plane is the same with a single pass and no depth. A fillet or chamfer
 is a single pass along its length rather than over an area, because a blend is
 finished by following it.
 
+**Milling a boss** — an external cylinder being milled has a diameter and a
+length and no area, so the cutter goes round it (`boss_milling_time_v1`)::
+
+    path_per_pass = π · (D + cutter_diameter)         (the cutter centre's circle)
+    passes        = ceil(length / axial_depth_of_cut)
+    cycle         = path_per_pass · passes / feed_rate
+
+It reads only the milling parameters a pocket is already timed with, so it
+adds none. It is one radial pass at full finishing engagement: the stock around
+the boss is not roughed away, because the CAD does not say what stock was
+there, and there is no approach, retract or tool change — every estimate says
+so. It is reached by what the feature is (a cylinder whose subtype is `shaft`),
+never by what the operation is called.
+
 **Turning** — passes along a cylinder, feed per revolution::
 
     feed_rate = f_rev · rpm
@@ -1169,6 +1183,83 @@ def _milling(
     )
 
 
+def _boss_milling(
+    dimensions: dict[str, float], a: TimeAssumptions
+) -> tuple[float, str, list[str], list[str], dict[str, float]] | OperationTimeEstimate:
+    """Profiling an external cylinder with the side of the milling cutter.
+
+    The cutter's centre travels a circle of diameter D + cutter diameter around
+    the boss, once per axial pass, at the same feed every other milling formula
+    here uses. Nothing new is assumed: the cutter, its feed and its axial depth
+    per pass are the milling parameters a pocket is already timed with, which
+    is why a boss is timed under any profile that times a pocket.
+
+    What it leaves out is stated on every estimate, because it is most of what
+    a real boss costs: the stock around the boss is not roughed away (the CAD
+    does not say what stock was there), and there is no approach, retract or
+    tool change.
+    """
+    diameter = _positive(dimensions, "diameter_mm")
+    length = _positive(dimensions, "length_mm")
+    missing = [
+        name for name, value in [("diameter_mm", diameter), ("length_mm", length)] if value is None
+    ]
+    if missing:
+        return _needs_input(
+            "Milling a boss needs the cylinder's diameter and length, and this feature does not "
+            f"carry {' and '.join(missing)}. No time is assumed.",
+            missing,
+            a.is_illustrative,
+        )
+
+    cutter = a.milling_cutter_diameter_mm
+    rpm = _spindle_rpm(a.milling_cutting_speed_m_per_min, cutter, a)
+    feed_rate = a.milling_feed_per_tooth_mm * a.milling_teeth * rpm
+    passes = math.ceil(length / a.milling_axial_depth_of_cut_mm)
+    path_per_pass = math.pi * (diameter + cutter)
+    path = path_per_pass * passes
+    cycle = path / feed_rate
+
+    evidence = [
+        f"Ø{diameter:g} mm × {length:g} mm long external cylinder, milled as a boss",
+        f"spindle speed {rpm:.0f} rpm from a {cutter:g} mm cutter",
+        f"feed rate {feed_rate:.1f} mm/min = {a.milling_feed_per_tooth_mm:g} mm/tooth × "
+        f"{a.milling_teeth} teeth × {rpm:.0f} rpm",
+        f"path per pass {path_per_pass:.1f} mm = π × ({diameter:g} mm + {cutter:g} mm cutter) — "
+        "the circle the cutter's centre travels around the boss",
+        f"{passes} axial pass(es) = ceil({length:g} mm long / "
+        f"{a.milling_axial_depth_of_cut_mm:g} mm per pass)",
+        f"tool path {path:.0f} mm = {path_per_pass:.1f} mm × {passes} pass(es)",
+    ]
+    assumptions = [
+        f"cutting speed {a.milling_cutting_speed_m_per_min:g} m/min",
+        f"feed {a.milling_feed_per_tooth_mm:g} mm/tooth × {a.milling_teeth} teeth",
+        f"cutter diameter {a.milling_cutter_diameter_mm:g} mm",
+        f"axial depth of cut {a.milling_axial_depth_of_cut_mm:g} mm — the same depth per pass a "
+        "pocket is timed with",
+        f"spindle limited to {a.min_spindle_rpm:g}–{a.max_spindle_rpm:g} rpm",
+        "one radial pass around the boss at full finishing engagement at each depth",
+        "no roughing of the surrounding stock — the CAD does not say what stock stood around "
+        "this boss, so clearing it is not in this time and the real operation is longer",
+        "no approach or retract move and no tool change is included",
+    ]
+    parameters = {
+        "milling_cutting_speed_m_per_min": a.milling_cutting_speed_m_per_min,
+        "milling_feed_per_tooth_mm": a.milling_feed_per_tooth_mm,
+        "milling_teeth": float(a.milling_teeth),
+        "milling_cutter_diameter_mm": a.milling_cutter_diameter_mm,
+        "milling_axial_depth_of_cut_mm": a.milling_axial_depth_of_cut_mm,
+        "milling_setup_minutes": a.milling_setup_minutes,
+        "min_spindle_rpm": a.min_spindle_rpm,
+        "max_spindle_rpm": a.max_spindle_rpm,
+        "resolved_spindle_rpm": round(rpm, 3),
+        "resolved_feed_rate_mm_per_min": round(feed_rate, 3),
+        "resolved_path_per_pass_mm": round(path_per_pass, 3),
+        "passes": float(passes),
+    }
+    return cycle, "boss_milling_time_v1", evidence, assumptions, parameters
+
+
 def _facing(
     dimensions: dict[str, float], a: TimeAssumptions
 ) -> tuple[float, str, list[str], list[str], dict[str, float]] | OperationTimeEstimate:
@@ -2033,6 +2124,15 @@ def estimate_operation_time(
         outcome = _facing(dimensions, a)
     elif process == "turning":
         outcome = _turning(dimensions, a, stock_diameter_mm)
+    elif (
+        process == "milling"
+        and (feature_type or "").lower() == "cylinder"
+        and (feature_subtype or "").lower() == "shaft"
+    ):
+        # An external cylinder has a diameter and a length and no area to sweep:
+        # the cutter goes round it. Chosen by what the feature is, never by what
+        # the operation is called.
+        outcome = _boss_milling(dimensions, a)
     else:
         outcome = _milling(dimensions, feature_type, a)
 
