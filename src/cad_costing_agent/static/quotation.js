@@ -162,7 +162,36 @@ function renderBlocked(quote) {
         in with a zero to make a total appear.
       </p>
     </div>
+    ${renderOperationsWithoutTime(quote)}
     <div class="foot"><span>${escapeHtml(quote.basis_note)}</span></div>`;
+}
+
+/**
+ * The engineering view of a refused roll-up: which components left which
+ * operations out. Present only in that view's payload, and only for a roll-up
+ * that recorded it; the rows are the server's, in the server's order.
+ */
+function renderOperationsWithoutTime(quote) {
+  const listed = (quote.engineering && quote.engineering.operations_without_time) || [];
+  if (!listed.length) return "";
+  return `
+    <h2>Operations left out for want of a committed time</h2>
+    <table>
+      <thead><tr><th>Component</th><th class="num">Operations</th><th>Operation ids</th></tr></thead>
+      <tbody>${listed
+        .map(
+          (untimed) => `
+          <tr>
+            <td>${escapeHtml(untimed.name)}</td>
+            <td class="num">${escapeHtml(String(untimed.operation_count))}</td>
+            <td class="small">${escapeHtml(untimed.operation_ids.join(", "))}</td>
+          </tr>`
+        )
+        .join("")}</tbody>
+    </table>
+    <p class="basis">Engineering detail — internal. Enter a time for each of these in the
+      component's plan, or remove an operation that will not be done, and cost the assembly
+      again.</p>`;
 }
 
 function renderWarnings(quote) {

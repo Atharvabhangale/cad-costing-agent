@@ -139,8 +139,8 @@ function renderOverview() {
     statRow("Mass", shown("mi-mass")),
     componentCount === null ? "" : statRow("Components", componentCount),
     featureCount === null ? "" : statRow("Recognized features", featureCount),
-    statRow(current ? current.unitLabel : "Unit cost", current ? current.unitCost : null),
-    statRow("Total cost", current ? current.total : null),
+    statRow(current ? partialLabel(current, current.unitLabel) : "Unit cost", current ? current.unitCost : null),
+    statRow(current ? partialLabel(current, "Total cost") : "Total cost", current ? current.total : null),
   ]
     .filter(Boolean)
     .join("");
@@ -328,6 +328,21 @@ function authoritativeEstimate() {
   return null;
 }
 
+/**
+ * A label for a figure of the current estimate, saying so when the estimate is
+ * partial. `incomplete` is the server's `is_complete`, read once above; this
+ * adds a word and decides nothing.
+ */
+function partialLabel(target, label) {
+  return target && target.incomplete ? `${label} (partial)` : label;
+}
+
+/** The same word beside a bare figure, where there is no label to carry it. */
+function partialFigure(target, figure) {
+  if (!figure) return "—";
+  return target && target.incomplete ? `${figure} (partial)` : figure;
+}
+
 /** Why there is no current estimate, phrased as what to do about it. */
 function estimateGuidance() {
   if (!state.document) return "Upload a CAD model to begin.";
@@ -395,9 +410,9 @@ function renderCostAuthority() {
     ${partial}
     <div class="stat-grid">
       ${statRow("Assembly", target.subject)}
-      ${statRow(target.incomplete ? "Per assembly (partial)" : target.unitLabel, target.unitCost)}
+      ${statRow(partialLabel(target, target.unitLabel), target.unitCost)}
       ${statRow(target.quantityLabel, target.quantity)}
-      ${statRow("Total", target.total)}
+      ${statRow(partialLabel(target, "Total"), target.total)}
     </div>
     <p class="provenance">Estimate <span class="mono">${escapeHtml(target.id)}</span> (assembly).
       <button type="button" class="secondary tiny" data-goto="assembly">See the components</button>
@@ -456,16 +471,22 @@ function renderQuote() {
        ${escapeHtml(target.note)} The document reports it rather than filling the gap.</p>`
     : "";
 
+  // Which components need times is the roll-up card's own list, drawn by the
+  // file that owns it from the server's fields; this screen only places it.
+  const needingTimes =
+    target.kind === "assembly" ? componentsNeedingTimesMarkup(state.assemblyCost) : "";
+
   // Two views of the same stored estimate. The customer document omits the
   // engineering section entirely rather than merely not printing it.
   host.innerHTML = `
     <p class="hint">${subjectLine}</p>
     ${incomplete}
+    ${needingTimes}
     <div class="stat-grid">
       ${statRow(target.subjectLabel, target.subject)}
       ${statRow(target.quantityLabel, target.quantity)}
-      ${statRow(target.unitLabel, target.unitCost)}
-      ${statRow("Total", target.total)}
+      ${statRow(partialLabel(target, target.unitLabel), target.unitCost)}
+      ${statRow(partialLabel(target, "Total"), target.total)}
     </div>
     <div class="row quote-actions">
       <a class="button" id="open-quotation" target="_blank"
@@ -509,8 +530,8 @@ function refreshFlowChrome() {
   const unit = document.getElementById("eb-unit");
   const total = document.getElementById("eb-total");
   const current = authoritativeEstimate();
-  if (unit) unit.textContent = (current && current.unitCost) || "—";
-  if (total) total.textContent = (current && current.total) || "—";
+  if (unit) unit.textContent = partialFigure(current, current && current.unitCost);
+  if (total) total.textContent = partialFigure(current, current && current.total);
 
   // The Assembly section is offered as soon as the file *declares* component
   // structure, which `/cad/import` says at identification — not only once it

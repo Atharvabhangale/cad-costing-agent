@@ -2233,6 +2233,14 @@ async def cost_assembly(
                 "setup_count": len(entry.plan.setups),
                 "setup_time_minutes": summary_.total_setup_time_minutes,
                 "cycle_time_minutes": summary_.total_cycle_time_minutes,
+                # The plan's own list of what it left out for want of a time:
+                # active, in the route, not as formed. The roll-up is handed
+                # the ids and decides completeness from them; it cannot read a
+                # plan, and nothing here restates the plan's rule.
+                "uncosted_operation_ids": [
+                    operation.operation_id
+                    for operation in entry.plan.uncosted_operations()
+                ],
             }
         else:
             plan_facts[definition.definition_id] = {

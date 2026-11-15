@@ -210,6 +210,13 @@ MANUAL_STEPS = """
         Without the second, setup cost is 0.00 and a warning stays on screen.
     [ ] For the assembly, generate component plans and commit times for each
         component you intend to show, or the roll-up reads 0.02.
+    [ ] Then deal with every operation the system could not time. Accepting
+        the estimates is not enough: the roll-up stays PARTIAL, and the
+        quotation is refused (assembly_operations_without_time), while any
+        planned operation has no committed time. The roll-up card lists them
+        per component. For each one, TYPE A CYCLE TIME in the component's
+        plan - that is what this runbook resolves them with - or remove the
+        operation if it will not be done. Then cost the assembly again.
 """
 
 
