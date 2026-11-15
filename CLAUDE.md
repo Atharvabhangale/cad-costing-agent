@@ -18,7 +18,7 @@ uvicorn cad_costing_agent.main:app --reload
 # whatever it is pointed at.
 CAD_COSTING_DATABASE_URL=sqlite:///./scratch.db uvicorn cad_costing_agent.main:app --port 8710
 
-# Tests (2898 collected; measured without cadmodels/: 2890 pass, 8 skip; full run about 4-12 min)
+# Tests (2972 collected; measured without cadmodels/: 2964 pass, 8 skip; full run about 4-12 min)
 # cadquery-ocp must stay below 8 (pinned): 8.x drops names this code imports.
 # A git worktree has no cadmodels/ (git-ignored), so tests needing real models
 # skip there (8 skips instead of 1). Judge a branch by a run in the main tree.
@@ -386,10 +386,18 @@ optional one-off batch charge (pattern, die).
   is `stock_mass`. Never present a bar volume as the part's.
 - **A cylinder is proposed for turning only where the rotational test passes for its own solid**
   (`rotational_form_by_solid` — the same test per `solid_index`, never a copy). Otherwise it is
-  `BOSS_MILLING_RULE`, a milling suggestion with no system time; never give it a turning time.
+  `BOSS_MILLING_RULE`, a milling suggestion timed by `boss_milling_time_v1` (below); never give it
+  a turning time.
   `process_classification` names the bosses by that rule id, and a turning stage exists exactly
   when a turning suggestion does — `test_boss_milling.py` fails if route and operations
   disagree about a feature.
+- **A milled boss is timed by profiling round it, never by a turning formula.**
+  `operation_time._boss_milling` (`boss_milling_time_v1`: pi x (D + cutter) per pass, `ceil(length /
+  milling_axial_depth_of_cut_mm)` passes, at the milling feed) is reached only for `milling` on a
+  `cylinder` whose subtype is `shaft` — by the feature, never the operation name. It reads existing
+  milling parameters only; do not add a boss parameter while those mean the right thing. One radial
+  pass, no roughing, approach or tool change, and every estimate says so. There is no tool-fit
+  check: a 1 mm pin is timed with the profile's 12 mm cutter.
 - Turning estimates use the *proposed* bar (`stock_diameter_mm`), so they stay system
   estimates; a different bar is flagged as making them stale, never silently re-estimated.
 
@@ -837,16 +845,20 @@ features — the status that path has always returned).
   committed time. `editComponentPlan` ends with `setFlow("manufacturing")` (guarded —
   `estimateflow.js` loads later): the operations table is in that section, so retargeting
   it from the Assembly section left it correct and invisible.
-- **A manufactured component costed with no committed time makes the roll-up incomplete.**
-  `unplanned_definition_count`, `manufacturing_committed` and the `no_committed_operations`
-  reason carry it; `is_complete` requires their absence and the note leads "Partial
-  assembly estimate — manufacturing plans incomplete"; `quotation.py` refuses it with
-  `assembly_manufacturing_incomplete`. **`manufacturing_committed` is tri-state on
-  purpose**: `None` means the caller passed no plan facts, which is the pre-plan `roll_up`
-  contract and claims nothing, and only supplied facts showing nothing committed make it
-  `False`. A *partly* committed component stays complete — the existing `partial_costing`
-  warning covers it — because the demo assembly has two operations the estimator cannot
-  time, and blocking on those would refuse a finished review.
+- **A manufactured component costed with an operation left out makes the roll-up incomplete.**
+  Two distinct reasons: `no_committed_operations` (nothing committed; `unplanned_definition_count`,
+  `manufacturing_committed`) and `operations_without_time` (some committed, but the plan's own
+  `uncosted_operations()` lists ids; `operations_without_time_count` / `_definition_count`).
+  `is_complete` requires neither; the quotation refuses with `assembly_manufacturing_incomplete`
+  or `assembly_operations_without_time`, and the engineering view names the operations. Removed,
+  out-of-route and as-formed operations are decisions, not gaps: the honest ways out are to type
+  a time or remove the operation. `main.py` hands the ids as `uncosted_operation_ids` in the plan
+  facts; `roll_up` never reads a plan. **Both facts are tri-state**: no plan facts, or facts
+  without the id list, claim nothing — the new keys are absent and the output is byte-identical
+  to the pre-rule `roll_up` (golden-file test). The quotation blocks only on a stored line
+  carrying the reason, so a roll-up stored before the rule is not re-judged. (Until 2026-11-15 a
+  *partly* committed component counted as complete; the real-file trial showed that let a total
+  omitting 39 operations read as quotable.)
 - **An assembly total is not a quotation.** It is the sum of each component's contribution with no
   assembly labour and no fastening time, and every summary says so. Purchased and standard costs are
   what a person entered — no price is looked up, and a purchased part's cost is never derived from
@@ -1073,9 +1085,10 @@ unparse the one function under test rather than the module.
 roll-up, an assembly whose manufactured components have committed no time is refused as a customer
 document however exact its arithmetic — so a test about the *document* has to accept the estimates
 first. `tests/assembly_fixtures.committed_plans(client, rate_set_id=...)` builds every manufactured
-component's plan through the real endpoint and accepts every system estimate (`commit_every_time`
+component's plan through the real endpoint, accepts every system estimate (`commit_every_time`
 does the accepting, and is the single implementation of what the operations table's "use all
-estimates" does). Pass the same classification decisions to it that the cost call will use, or the
+estimates" does), and then types a time for each operation still left out
+(`resolve_untimed_operations`, the one shared way a test completes a plan). Pass the same classification decisions to it that the cost call will use, or the
 plans endpoint refuses the contradiction — planning a component another call excludes. And use
 `poc-default`, per the rate-set note above.
 

@@ -236,7 +236,10 @@ out at material plus tooling with nothing for the making — a plausible figure 
 half the real one. Generating remains distinct from accepting: the times are the system's
 estimates with nothing committed, and a manufactured component that has committed none of
 them now makes the roll-up `is_complete: false`, names itself in the completeness note, and
-blocks the customer quotation while leaving the engineering view intact.
+blocks the customer quotation while leaving the engineering view intact. Since 2026-11-15 the
+same holds for a component that committed some time but still has operations left out for want
+of one (`operations_without_time`, quotation blocker `assembly_operations_without_time`); typing
+a time or removing the operation are the ways to complete it.
 
 Because there is no build step, the `/ui` mount is served with `cache-control: no-cache`
 (`RevalidatedStaticFiles`). No asset filename carries a content hash, so without the header a

@@ -1,6 +1,6 @@
 # Project Status
 
-Last updated: 2026-11-14 (first trial on real CAD files, and the four defects it found)
+Last updated: 2026-11-15 (boss-milling time model; roll-up complete only when no operation is left out)
 
 `CHECKPOINT.md` is a point-in-time handoff written at the Step 30 pause and is not
 updated in place; this file is the step-by-step record.
@@ -745,7 +745,9 @@ the pre-plan contract `roll_up` has always honoured and says nothing about; only
 facts that show nothing committed make it `False`. A partly committed component
 is *complete* here and reported by the existing `partial_costing` warning — the
 demo assembly has two operations the estimator cannot time, and blocking on those
-would refuse a quotation the engineer has genuinely finished reviewing.
+would refuse a quotation the engineer has genuinely finished reviewing. *(Superseded
+2026-11-15: a component with any operation left out now makes the roll-up incomplete —
+see "Boss milling, and a stricter roll-up".)*
 
 **Nothing about the arithmetic moved.** No formula, rate, tooling rule, quantity
 multiplication or setup charge was touched, and the two figures are the ones the
@@ -974,6 +976,40 @@ not SSO or OIDC and not production-grade**: no token expiry or rotation, no rate
 best-effort (non-transactional) audit write, no user-management UI (API only), and no
 simultaneous-request test of the approval sequence.
 
+### Boss milling, and a stricter roll-up (2026-11-15)
+
+Two follow-ups from the real-file trial, each built by an agent, reviewed and merged. Full suite
+on the merged code: **2964 passed, 8 skipped**.
+
+**Boss-milling time model.** A milling operation on an external cylinder is timed by
+`boss_milling_time_v1`: the cutter centre's circle pi x (D + cutter diameter), once per axial
+pass `ceil(length / milling_axial_depth_of_cut_mm)`, at the milling feed. It reads only existing
+milling parameters, so no setting was added and the seeded profile is unchanged; bosses are timed
+under every profile. Each estimate states its limits: one radial pass at finishing engagement, no
+roughing of the surrounding stock (the CAD does not say what was there), no approach, retract or
+tool change — so it under-states a real boss. Live: `model2.stp`'s 60 x 25 mm boss 4.33 min
+(hand calculation 4.3303), estimate 5,762.86 -> 7,061.86 with 22 of 22 operations costed; the
+bearing cage's 37 bosses all timed (36 pins of 1 mm at 0.06 min, one at 1.78), none refused as
+zero. There is no tool-fit check: the 1 mm pins are timed as if the profile's 12 mm cutter went
+round them, which it could not — and on a bearing cage they are probably not milled at all.
+
+**A roll-up is complete only when no planned operation is left out.** A component that committed
+some time used to count as complete however many operations had none. `main.py` now hands
+`roll_up` each plan's own `uncosted_operations()` ids; a component with any gets reason
+`operations_without_time` (distinct from `no_committed_operations`), the note says how many
+operations in how many components, the total is still shown but labelled partial on every screen,
+and the quotation refuses it (`assembly_operations_without_time`) while the engineering view names
+the operations. Removed, out-of-route and as-formed operations do not count. Without the new fact
+the output is byte-identical to before (golden-file test), and older stored roll-ups are not
+re-judged. Test assemblies now complete their plans through one shared helper
+(`resolve_untimed_operations`); the demo pre-flight checklist gained the same step. Live on
+`Assembly.stp` with every estimate accepted: 4 Needle Roller operations left out (two 1 mm holes
+and two end faces, whose estimates round to zero) — 1,169.61 per assembly, partial, quotation
+refused; typing 0.5 min for each gives 2,534.61, complete; removing them gives 1,169.61, complete.
+**`DEMO.md`'s assembly figures (2,221.62) were measured before both changes and no longer
+reproduce; they need re-measuring on the demo machine.** Not done: a part estimate with
+operations left out still gets only the `partial_costing` warning, not a refusal.
+
 ### Real-file trial — three STEP files, four defects fixed
 
 `model1_1.stp` (one part, 43 faces), `model2.stp` (one product, two solids) and `Assembly.stp`
@@ -1037,7 +1073,8 @@ lump 1,274.15 with 64 costed and 109 named as left out, carrying the notice; the
 1,051.41 per assembly (10,514.15 for 10). **The roll-up still reports `is_complete: true`** while
 the cage's 37 bosses and the Needle Roller's two holes have no time: a partly committed
 component stays complete by an existing rule, covered only by the `partial_costing` warning.
-With this many operations left out on a real assembly that rule deserves a second look. Also
+With this many operations left out on a real assembly that rule deserves a second look.
+**Resolved 2026-11-15** — see *Boss milling, and a stricter roll-up* below. Also
 seen and not addressed: the setup proposal leaves 4-5 operations unplaced on each part (convex
 fillets it finds no approach for), and overlap between `model2.stp`'s two solids was not tested.
 

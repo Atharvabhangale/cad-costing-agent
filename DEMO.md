@@ -149,7 +149,12 @@ but it is not a demo.
 11. **Component classification** — "no CAD format states make/buy".
 12. Open **Drawn Cup**'s plan (4 operations) and show a **Details** row.
 13. For each of the three: *Use all estimated times* **and** *Use estimate* on
-    the Setup band.
+    the Setup band. **Since 2026-11-15 that is not enough**: any operation whose
+    estimate is refused (the Needle Roller's tiny holes and end faces round to
+    zero) must have a cycle time typed or be removed, or the roll-up stays
+    partial and the quotation is refused. The figures below were measured
+    before that rule and before the boss-milling time model; **re-measure them
+    before a demo** — they will not reproduce.
 14. **Cost every component**.
 
 Worth doing deliberately: press **Cost every component** *before* committing
