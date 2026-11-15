@@ -1361,6 +1361,39 @@ $("cost-assembly").addEventListener("click", async () => {
   }
 });
 
+/**
+ * Which components still have planned operations with no committed time, as the
+ * roll-up reported them. Every number here is a field of the server's summary —
+ * the operation count, the component count and each line's own count and ids —
+ * and which lines to show is the server's `reason`, never a test on a time.
+ * Empty when the roll-up did not report the fact (an older one, or one costed
+ * without plans), which is not a claim that nothing was left out.
+ */
+function componentsNeedingTimesMarkup(summary) {
+  if (!summary || !summary.operations_without_time_count) return "";
+  const items = (summary.lines || [])
+    .filter((line) => line.reason === "operations_without_time")
+    .map(
+      (line) =>
+        `<li><strong>${escapeHtml(line.name)}</strong> — ${escapeHtml(
+          String(line.operations_without_time_count)
+        )} operation(s) without a time: <span class="mono">${escapeHtml(
+          (line.operations_without_time_ids || []).join(", ")
+        )}</span></li>`
+    )
+    .join("");
+  return `<div class="assembly-warning" id="assembly-needs-times">
+      <strong>Partial total — ${escapeHtml(
+        String(summary.operations_without_time_count)
+      )} planned operation(s) in ${escapeHtml(
+    String(summary.operations_without_time_definition_count)
+  )} component(s) have no committed time and are in no figure.</strong>
+      Enter a time for each in the component's plan, or remove an operation that will not
+      be done, then cost the assembly again.
+      <ul>${items}</ul>
+    </div>`;
+}
+
 function renderAssemblyCost(summary) {
   const rows = summary.lines
     .map(
@@ -1412,6 +1445,13 @@ function renderAssemblyCost(summary) {
     )
     .join("");
 
+  // Said on the figure itself, not only in the note under it: a total that
+  // leaves work out is still a true number, and it sits exactly where a
+  // complete one would. The flag is the server's `is_complete`.
+  const partialMark = summary.is_complete
+    ? ""
+    : ` <span class="badge illustrative" id="assembly-total-partial">partial</span>`;
+
   $("assembly-cost-body").innerHTML = `
     <table class="mini bom">
       <thead><tr><th>Component</th><th>Classification</th><th>Qty</th><th>Per unit</th>
@@ -1421,12 +1461,12 @@ function renderAssemblyCost(summary) {
     <table class="mini">
       <tbody>
         ${contributions}
-        <tr><th>Assembly total (one assembly)</th><td class="num"><strong>${
+        <tr><th>Assembly total (one assembly)${partialMark}</th><td class="num"><strong>${
           summary.total_cost === null ? "no total" : money(summary.total_cost, summary.currency)
         }</strong></td></tr>
         ${
           summary.assembly_quantity > 1
-            ? `<tr><th>${summary.assembly_quantity} assemblies</th><td class="num"><strong>${
+            ? `<tr><th>${summary.assembly_quantity} assemblies${partialMark}</th><td class="num"><strong>${
                 summary.production_total_cost === null
                   ? "no total"
                   : money(summary.production_total_cost, summary.currency)
@@ -1465,6 +1505,7 @@ function renderAssemblyCost(summary) {
          manufacturing plans incomplete", and is rendered in the warning style
          whenever the roll-up is not complete. One sentence, authored once, on
          the server that knows the counts. -->
+    ${componentsNeedingTimesMarkup(summary)}
     ${
       summary.is_aggregatable
         ? ""

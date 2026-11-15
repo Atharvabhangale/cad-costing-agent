@@ -177,7 +177,21 @@ UNRESOLVED_CLASSIFICATION = "unresolved_classification"
 # it, which is a smaller number that looks exactly like a finished one.
 NO_COMMITTED_OPERATIONS = "no_committed_operations"
 
+# The same kind of reason, one step further in: the component committed *some*
+# time, and its plan still lists operations with none. Those operations are in
+# no figure, so the component's cost covers less work than its plan describes.
+# Kept apart from `no_committed_operations` because the two send a person to
+# different places — one to a plan nobody has reviewed, the other to the named
+# operations of a plan somebody has.
+OPERATIONS_WITHOUT_TIME = "operations_without_time"
+
 REASON_TEXT = {
+    OPERATIONS_WITHOUT_TIME: (
+        "This component's plan lists operations with no committed time. They were left out of "
+        "its cost rather than defaulted, so the figure covers less work than the plan "
+        "describes. Enter a time for each of them, or remove an operation that will not be "
+        "done, and cost the assembly again."
+    ),
     NO_COMMITTED_OPERATIONS: (
         "This component is costed for its material and tooling, but no manufacturing time has "
         "been committed for it, so nothing is charged for making it. Generate or review its "

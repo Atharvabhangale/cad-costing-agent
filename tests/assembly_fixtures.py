@@ -238,7 +238,9 @@ def commit_every_time(plan):
     "use estimate" do, expressed on the JSON, so a test can produce a costable
     plan without reimplementing the three-branch resolution rule. Operations the
     system could not time are left alone: accepting an absent estimate commits
-    nothing, and they stay out of the cost.
+    nothing, and they stay out of the cost — which now leaves an assembly
+    roll-up incomplete, so a test that wants a *reviewed* assembly follows this
+    with `resolve_untimed_operations` (as `committed_plans` does).
     """
     for operation in plan["operations"]:
         if operation["system_suggested_cycle_time"] is not None:
@@ -249,8 +251,47 @@ def commit_every_time(plan):
     return plan
 
 
+RESOLVED_CYCLE_MINUTES = 1.0
+"""The cycle time `resolve_untimed_operations` types for an operation the system
+could not time. A stand-in for an engineer's figure, deliberately round so it is
+recognisable in a failing assertion; it is nobody's estimate of anything."""
+
+
+def resolve_untimed_operations(plan, *, remove=False, cycle_minutes=RESOLVED_CYCLE_MINUTES):
+    """Resolve every operation the plan would leave out for want of a time.
+
+    Since an assembly roll-up became complete only when no planned operation is
+    left out, accepting the system's estimates is not a finished review on its
+    own: an operation the system could not time has to be dealt with by a
+    person, and there are exactly two honest ways. This is the one place a test
+    does either — **type a time** for it (the default), or **remove** it.
+
+    Which operations those are is asked of the plan itself
+    (`ManufacturingPlan.uncosted_operations`), never re-derived here, so this
+    cannot drift from the rule the roll-up is handed.
+    """
+    from cad_costing_agent.manufacturing_plan import ManufacturingPlan
+
+    left_out = {
+        operation.operation_id
+        for operation in ManufacturingPlan.model_validate(plan).uncosted_operations()
+    }
+    for operation in plan["operations"]:
+        if operation["operation_id"] not in left_out:
+            continue
+        if remove:
+            operation["user_action"] = "rejected"
+        else:
+            operation["user_cycle_time"] = cycle_minutes
+    return plan
+
+
 def committed_plans(client, *, rate_set_id, components=None, filename="pump.step", **extra):
-    """Build every manufactured component's plan and accept its times.
+    """Build every manufactured component's plan and finish its review.
+
+    Every system estimate is accepted, and any operation the system could not
+    time is then given a typed time (`resolve_untimed_operations`), because a
+    reviewed assembly is one whose roll-up leaves no planned operation out.
 
     Returns the mapping `/cost/assembly` takes as `component_plans`. It goes
     through the real endpoint rather than constructing plans directly, so a test
@@ -269,7 +310,7 @@ def committed_plans(client, *, rate_set_id, components=None, filename="pump.step
     )
     assert response.status_code == 200, response.text
     return {
-        entry["definition_id"]: commit_every_time(entry["plan"])
+        entry["definition_id"]: resolve_untimed_operations(commit_every_time(entry["plan"]))
         for entry in response.json()["plan"]["component_plans"]
         if entry["plan"]
     }

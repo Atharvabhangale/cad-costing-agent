@@ -55,7 +55,7 @@ behaviour.
 
 from __future__ import annotations
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_serializer
 
 from cad_costing_agent.component_classification import (
     COST_FROM_ESTIMATE,
@@ -74,6 +74,7 @@ from cad_costing_agent.component_classification import (
     NO_UNIT_COST,
     NOT_A_COMPONENT,
     NOT_ESTIMATED,
+    OPERATIONS_WITHOUT_TIME,
     PURCHASED,
     REASON_TEXT,
     STANDARD,
@@ -96,6 +97,7 @@ __all__ = [
     "NO_GEOMETRY",
     "NO_UNIT_COST",
     "NOT_ESTIMATED",
+    "OPERATIONS_WITHOUT_TIME",
     "REASON_TEXT",
     "SUB_ASSEMBLY",
     "UNRESOLVED_CLASSIFICATION",
@@ -104,6 +106,19 @@ __all__ = [
     "ComponentEstimate",
     "roll_up",
 ]
+
+
+# Keys that exist only when the caller said which planned operations carry no
+# committed time. A roll-up computed without that fact serializes exactly as it
+# did before the fact existed: the keys are absent, not null and not zero, so a
+# stored roll-up from before this rule and a new one made without plan facts
+# are indistinguishable — and neither is called incomplete on evidence nobody
+# supplied.
+_LINE_OPERATION_KEYS = ("operations_without_time_count", "operations_without_time_ids")
+_SUMMARY_OPERATION_KEYS = (
+    "operations_without_time_count",
+    "operations_without_time_definition_count",
+)
 
 
 class ComponentEstimate(BaseModel):
@@ -215,12 +230,35 @@ class ComponentCostLine(BaseModel):
         ),
     )
 
+    operations_without_time_count: int | None = Field(
+        default=None,
+        description=(
+            "How many of this component's planned operations were left out of its cost for "
+            "want of a committed cycle time — active, in the route, not as formed. Operations "
+            "the engineer removed, and out-of-route or as-formed ones, are decisions and are "
+            "not counted. **None, and absent from the serialized line, when the caller did not "
+            "say**: that is not a claim that there are none."
+        ),
+    )
+    operations_without_time_ids: list[str] | None = Field(
+        default=None,
+        description="Those operations' ids, as the caller listed them. Absent with the count.",
+    )
+
     # --- the production run, multiplied exactly once ---
     assembly_quantity: int = 1
     total_quantity: int = Field(
         default=0, description="quantity x assembly_quantity. The only place the two ever meet."
     )
     production_extended_cost: float | None = None
+
+    @model_serializer(mode="wrap")
+    def _without_an_unstated_operation_fact(self, handler):
+        data = handler(self)
+        if self.operations_without_time_count is None:
+            for key in _LINE_OPERATION_KEYS:
+                data.pop(key, None)
+        return data
 
 
 class AssemblyCostSummary(BaseModel):
@@ -287,6 +325,24 @@ class AssemblyCostSummary(BaseModel):
             "entirely."
         ),
     )
+    operations_without_time_definition_count: int | None = Field(
+        default=None,
+        description=(
+            "Manufactured component definitions that were costed and committed some time, but "
+            "whose plan still lists operations with none. Disjoint from "
+            "unplanned_definition_count, which counts components with nothing committed at "
+            "all. None, and absent when serialized, when no caller-supplied plan facts said "
+            "which operations lack a time."
+        ),
+    )
+    operations_without_time_count: int | None = Field(
+        default=None,
+        description=(
+            "The operations those components left out of the total, counted per component "
+            "definition (one plan per definition, never per occurrence). Absent with the "
+            "definition count."
+        ),
+    )
 
     classification_counts: dict[str, int] = Field(
         default_factory=dict, description="Definitions per classification."
@@ -322,7 +378,8 @@ class AssemblyCostSummary(BaseModel):
         description=(
             "True only when every part definition in the assembly was costed or deliberately "
             "excluded, *and* every manufactured one that was costed has committed manufacturing "
-            "time behind it. A false value means the total is a partial sum and must not be "
+            "time behind it, *and* none of their plans lists an operation left out for want of "
+            "a committed time. A false value means the total is a partial sum and must not be "
             "presented as a quotation. The second condition exists because a manufactured "
             "component with no committed time still produces a plausible figure — its material "
             "and its tooling — and a roll-up of those alone once read as a finished assembly "
@@ -333,6 +390,14 @@ class AssemblyCostSummary(BaseModel):
     currency_note: str = ""
     lines: list[ComponentCostLine] = Field(default_factory=list)
     notes: list[str] = Field(default_factory=list)
+
+    @model_serializer(mode="wrap")
+    def _without_an_unstated_operation_fact(self, handler):
+        data = handler(self)
+        if self.operations_without_time_definition_count is None:
+            for key in _SUMMARY_OPERATION_KEYS:
+                data.pop(key, None)
+        return data
 
 
 ASSEMBLY_SCOPE_NOTE = (
@@ -462,6 +527,13 @@ def roll_up(
             line.manufacturing_committed = (
                 (line.setup_time_minutes or 0.0) + (line.cycle_time_minutes or 0.0)
             ) > 0
+            # Which planned operations carry no committed time is a separate
+            # fact with its own absence: a caller that supplies minutes but not
+            # this list has said nothing about it, and nothing is concluded.
+            without_time = planned.get("uncosted_operation_ids")
+            if without_time is not None:
+                line.operations_without_time_ids = [str(item) for item in without_time]
+                line.operations_without_time_count = len(line.operations_without_time_ids)
         # else it stays None: no facts were supplied, so nothing is claimed.
 
         # A sub-assembly is a container, not a thing that is made or bought.
@@ -615,7 +687,45 @@ def _summarise(summary: AssemblyCostSummary, currency: str | None) -> None:
         line.reason_detail = REASON_TEXT[NO_COMMITTED_OPERATIONS]
     summary.unplanned_definition_count = len(unplanned)
 
-    summary.is_complete = bool(costed) and not needs_input and not unplanned
+    # A component that committed *some* time and still has operations with none.
+    # Its cost is real and partial in the same direction: the operations are in
+    # no figure. It is told apart from the component above because the remedy
+    # differs — named operations to time or remove, not a plan to review — and
+    # the two never overlap: a component with nothing committed keeps the one
+    # reason, whatever its plan lists.
+    stated = [
+        line
+        for line in costed
+        if line.classification == MANUFACTURED and line.operations_without_time_count is not None
+    ]
+    untimed = [
+        line
+        for line in stated
+        if line.operations_without_time_count and line.manufacturing_committed is not False
+    ]
+    for line in untimed:
+        line.reason = OPERATIONS_WITHOUT_TIME
+        line.reason_detail = (
+            f"{line.operations_without_time_count} planned operation(s) of this component "
+            "have no committed time and are in no figure: "
+            f"{', '.join(line.operations_without_time_ids or [])}. "
+            + REASON_TEXT[OPERATIONS_WITHOUT_TIME]
+        )
+    untimed_operations = sum(line.operations_without_time_count or 0 for line in untimed)
+    if stated:
+        summary.operations_without_time_definition_count = len(untimed)
+        summary.operations_without_time_count = untimed_operations
+
+    summary.is_complete = bool(costed) and not needs_input and not unplanned and not untimed
+
+    untimed_names = ", ".join(line.name for line in untimed[:4]) + (
+        ", …" if len(untimed) > 4 else ""
+    )
+    untimed_sentence = (
+        f"{untimed_operations} planned operation(s) in {len(untimed)} manufactured "
+        f"component definition(s) ({untimed_names}) have no committed time and were left out, "
+        "so this total covers less work than the plans describe."
+    )
 
     if not summary.is_aggregatable:
         summary.currency_note = (
@@ -645,6 +755,8 @@ def _summarise(summary: AssemblyCostSummary, currency: str | None) -> None:
                 "committed no manufacturing time, so their contribution is material and tooling "
                 "only."
             )
+        if untimed:
+            summary.completeness_note += f" Separately, {untimed_sentence}"
     elif unplanned:
         named = ", ".join(line.name for line in unplanned[:4]) + (
             ", …" if len(unplanned) > 4 else ""
@@ -656,6 +768,14 @@ def _summarise(summary: AssemblyCostSummary, currency: str | None) -> None:
             "total carries their material and tooling and nothing for making them. It is not a "
             "quotation. Review each component's plan and accept or enter its setup and cycle "
             "times, then cost the assembly again."
+        )
+        if untimed:
+            summary.completeness_note += f" Separately, {untimed_sentence}"
+    elif untimed:
+        summary.completeness_note = (
+            "Partial assembly estimate — operations without a committed time. "
+            f"{untimed_sentence} It is not a quotation. Enter a time for each of those "
+            "operations, or remove one that will not be done, then cost the assembly again."
         )
     else:
         excluded_note = (
@@ -669,6 +789,12 @@ def _summarise(summary: AssemblyCostSummary, currency: str | None) -> None:
             f"occurrences, and every manufactured one has committed manufacturing time behind "
             f"it.{excluded_note}"
         )
+        if stated:
+            # Said only when the caller stated the fact; a roll-up without it
+            # keeps the sentence it always had.
+            summary.completeness_note += (
+                " No planned operation was left out for want of a committed time."
+            )
 
     if summary.assembly_quantity > 1:
         summary.notes.append(

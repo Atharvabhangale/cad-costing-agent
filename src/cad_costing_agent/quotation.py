@@ -369,6 +369,16 @@ class QuoteComponentDecision(BaseModel):
     supplier_part_number: str | None = None
 
 
+class QuoteUntimedComponent(BaseModel):
+    """A component whose plan left operations out for want of a committed time."""
+
+    definition_id: str = ""
+    name: str = ""
+    operation_count: int = 0
+    operation_ids: list[str] = Field(default_factory=list)
+    reason: str = ""
+
+
 class QuoteEngineeringDetail(BaseModel):
     """The appendix. Present only in the engineering view.
 
@@ -383,6 +393,15 @@ class QuoteEngineeringDetail(BaseModel):
     features: list[str] = Field(default_factory=list)
     time_assumptions: dict = Field(default_factory=dict)
     component_decisions: list[QuoteComponentDecision] = Field(default_factory=list)
+    operations_without_time: list[QuoteUntimedComponent] = Field(
+        default_factory=list,
+        description=(
+            "For an assembly roll-up that recorded it: each component whose plan left "
+            "operations out of the cost for want of a committed time, with the operations "
+            "named. Empty for a roll-up stored before that was recorded — which is no claim "
+            "that it left nothing out."
+        ),
+    )
     corrections: list[str] = Field(
         default_factory=list,
         description="System/user differences, as sentences rather than raw feedback rows.",
@@ -509,6 +528,25 @@ def _money(value) -> float | None:
     return None if value is None else float(value)
 
 
+def _untimed_components(result: dict) -> list[QuoteUntimedComponent]:
+    """The roll-up's own lines that carry the `operations_without_time` reason.
+
+    The reason, the count and the ids are the stored ones. Nothing here decides
+    which operations lack a time — the plan did, and the roll-up recorded it.
+    """
+    return [
+        QuoteUntimedComponent(
+            definition_id=str(line.get("definition_id") or ""),
+            name=str(line.get("name") or ""),
+            operation_count=int(line.get("operations_without_time_count") or 0),
+            operation_ids=[str(item) for item in line.get("operations_without_time_ids") or []],
+            reason=str(line.get("reason_detail") or ""),
+        )
+        for line in result.get("lines") or []
+        if line.get("reason") == "operations_without_time"
+    ]
+
+
 # --------------------------------------------------------------------- blockers
 
 
@@ -547,6 +585,30 @@ def _blockers(detail: EstimateDetail, kind: str, assumptions: EstimateAssumption
                         "time, so this total carries their material and tooling and nothing for "
                         "making them. Review each component's manufacturing plan, accept or "
                         "enter its times, and cost the assembly again."
+                    ),
+                )
+            )
+        # Costed, with some time committed, and operations still left out. Read
+        # only where the roll-up recorded it: an estimate stored before this
+        # was recorded has no such key, and is not refused on evidence it never
+        # carried — it keeps the `partial_costing` warning it always had.
+        untimed = _untimed_components(result)
+        if untimed:
+            operations = int(result.get("operations_without_time_count") or 0)
+            named = "; ".join(
+                f"{component.name} — {', '.join(component.operation_ids)}"
+                for component in untimed
+            )
+            found.append(
+                QuoteBlocker(
+                    code="assembly_operations_without_time",
+                    title="Quotation unavailable",
+                    detail=(
+                        f"{operations} planned operation(s) in {len(untimed)} manufactured "
+                        "component(s) have no committed time and are in no figure, so this "
+                        "total covers less work than the plans describe. Enter a time for "
+                        "each, or remove an operation that will not be done, and cost the "
+                        f"assembly again. Left out: {named}."
                     ),
                 )
             )
@@ -1349,6 +1411,7 @@ def _engineering(
         features=features,
         time_assumptions=(detail.time_profile_snapshot or {}),
         component_decisions=_component_decisions(detail),
+        operations_without_time=_untimed_components(result),
         corrections=_corrections(detail, rows),
         rate_set_provenance={
             "rate_set_id": assumptions.rate_set_id,
