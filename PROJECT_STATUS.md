@@ -1,6 +1,6 @@
 # Project Status
 
-Last updated: 2026-11-15 (boss-milling time model; roll-up complete only when no operation is left out)
+Last updated: 2026-11-15 (boss milling; roll-up and part quotations refused while an operation is left out)
 
 `CHECKPOINT.md` is a point-in-time handoff written at the Step 30 pause and is not
 updated in place; this file is the step-by-step record.
@@ -1007,8 +1007,19 @@ re-judged. Test assemblies now complete their plans through one shared helper
 and two end faces, whose estimates round to zero) — 1,169.61 per assembly, partial, quotation
 refused; typing 0.5 min for each gives 2,534.61, complete; removing them gives 1,169.61, complete.
 **`DEMO.md`'s assembly figures (2,221.62) were measured before both changes and no longer
-reproduce; they need re-measuring on the demo machine.** Not done: a part estimate with
-operations left out still gets only the `partial_costing` warning, not a refusal.
+reproduce; they need re-measuring on the demo machine.**
+
+**A part with an operation left out is refused as a customer quotation too.** The part
+counterpart of the roll-up rule: `part_operations_without_time` names the left-out operations
+(the part snapshot has always recorded their ids, so this reads recorded evidence), issuing is a
+409, the engineering view still renders, and the `partial_costing` warning stays alongside. A
+quotation issued before the rule is not revoked: re-opening it (`GET /quotations/{number}`)
+passes `already_issued` and drops that one blocker. A first version keyed the exemption on
+`issued_at`, which issuing also passes, so it let a new incomplete quote be issued; a test caught
+it before merge and now holds it. Live on `model2.stp` (Steel, `poc-default`, 10 off): every
+estimate accepted gives 7,061.86, quotable, issued 200; the boss left unaccepted gives 5,762.86,
+refused with "Left out: OP-005", issuing 409; with 5 min typed for it, 7,262.86, quotable, issued
+200. Full suite: **2967 passed, 8 skipped**.
 
 ### Real-file trial — three STEP files, four defects fixed
 

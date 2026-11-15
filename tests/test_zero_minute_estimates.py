@@ -643,3 +643,93 @@ def test_no_minimum_time_is_substituted_anywhere():
         assert "minimum_cycle" not in code
         assert "math.ceil(cycle" not in code
     assert DEFAULT_ASSUMPTIONS.model_dump().keys() == TimeAssumptions().model_dump().keys()
+
+
+# --- a part quotation with operations left out is refused ------------------------
+#
+# The part counterpart of the assembly rule: a planned operation with no committed
+# time is in no figure, so the customer document is refused until a time is typed
+# or the operation is removed. The engineering view stays, and a quotation issued
+# before the rule is not revoked by it.
+
+
+def _part_with_one_untimed_hole():
+    plan = _accepted_plan()
+    tiny = next(o for o in plan.ordered if o.system_suggested_operation == "drilling")
+    plan = plan.replacing(
+        tiny.model_copy(update={"dimensions": {"diameter_mm": 1.0, "depth_mm": 0.2}})
+        .with_estimate(drill(1.0, 0.2))
+    )
+    return plan, tiny.operation_id
+
+
+def test_a_part_quotation_with_an_operation_left_out_is_refused_and_names_it():
+    plan, untimed = _part_with_one_untimed_hole()
+    body = _cost(plan).json()
+    estimate_id = body["estimate_id"]
+
+    customer = client.get(f"/estimates/{estimate_id}/quotation").json()
+    assert customer["available"] is False
+    blocker = next(b for b in customer["blockers"] if b["code"] == "part_operations_without_time")
+    assert untimed in blocker["detail"]
+    assert blocker["detail"].startswith("1 planned operation(s) have no committed time")
+
+    engineering = client.get(
+        f"/estimates/{estimate_id}/quotation", params={"view": "engineering"}
+    ).json()
+    assert engineering["available"] is False
+    assert engineering["engineering"] is not None
+
+    issued = client.post(f"/estimates/{estimate_id}/quotation", json={"customer_name": "Acme"})
+    assert issued.status_code == 409
+    assert untimed in issued.json()["detail"]
+
+
+def test_typing_a_time_or_removing_the_operation_makes_the_part_quotable():
+    plan, untimed = _part_with_one_untimed_hole()
+    operation = next(o for o in plan.operations if o.operation_id == untimed)
+
+    typed = plan.replacing(operation.with_times(cycle_time_minutes=0.05))
+    document = client.get(f"/estimates/{_cost(typed).json()['estimate_id']}/quotation").json()
+    assert document["available"] is True
+    assert not any(w["code"] == "partial_costing" for w in document["warnings"])
+
+    from cad_costing_agent.operation_suggestions import UserAction
+
+    removed = plan.replacing(operation.model_copy(update={"user_action": UserAction.REJECTED}))
+    document = client.get(f"/estimates/{_cost(removed).json()['estimate_id']}/quotation").json()
+    assert document["available"] is True
+
+
+def test_a_quotation_issued_before_the_rule_is_not_revoked_by_it():
+    """Re-reading an issued document passes `already_issued`; the new blocker is
+    dropped there, so a document issued under the old rule still renders as
+    issued, with the `partial_costing` warning it always carried. Issuing passes
+    an `issued_at` but not that flag, and is refused (the test above)."""
+    from datetime import datetime, timezone
+
+    from cad_costing_agent.estimates import EstimateDetail
+    from cad_costing_agent.quotation import build_quotation
+
+    plan, untimed = _part_with_one_untimed_hole()
+    stored = client.get(f"/estimates/{_cost(plan).json()['estimate_id']}").json()
+    detail = EstimateDetail(
+        estimate_id=stored["estimate_id"],
+        request_snapshot=stored.get("request_snapshot") or {},
+        result_snapshot=stored.get("result_snapshot") or {},
+        rate_set_snapshot=stored.get("rate_set_snapshot"),
+        plan_snapshot=stored.get("plan_snapshot"),
+        time_profile_snapshot=stored.get("time_profile_snapshot"),
+    )
+
+    preview = build_quotation(detail)
+    assert preview.available is False
+
+    being_issued = build_quotation(detail, issued_at=datetime(2026, 1, 1, tzinfo=timezone.utc))
+    assert being_issued.available is False
+
+    issued = build_quotation(
+        detail, issued_at=datetime(2026, 1, 1, tzinfo=timezone.utc), already_issued=True
+    )
+    assert issued.available is True
+    assert any(w.code == "partial_costing" and untimed in w.detail for w in issued.warnings)

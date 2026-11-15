@@ -18,7 +18,7 @@ uvicorn cad_costing_agent.main:app --reload
 # whatever it is pointed at.
 CAD_COSTING_DATABASE_URL=sqlite:///./scratch.db uvicorn cad_costing_agent.main:app --port 8710
 
-# Tests (2972 collected; measured without cadmodels/: 2964 pass, 8 skip; full run about 4-12 min)
+# Tests (2975 collected; measured without cadmodels/: 2967 pass, 8 skip; full run about 4-12 min)
 # cadquery-ocp must stay below 8 (pinned): 8.x drops names this code imports.
 # A git worktree has no cadmodels/ (git-ignored), so tests needing real models
 # skip there (8 skips instead of 1). Judge a branch by a run in the main tree.
@@ -805,6 +805,12 @@ features — the status that path has always returned).
   assembly itself.
 - **An assembly's `uncosted_operation_ids` is a mapping by definition, a part's is a list.**
   Read it through `quotation._uncosted_operation_ids`, never with `len()`.
+- **A part with an operation left out is not quotable either.** `_blockers` refuses it with
+  `part_operations_without_time`, naming the ids (the part snapshot has always recorded them).
+  `build_quotation(..., already_issued=True)` — passed only by `GET /quotations/{number}` —
+  drops that one blocker, so a document issued before the rule is not revoked by it. Issuing
+  passes `issued_at` but never `already_issued`; never key the exemption on `issued_at`, or
+  issuing itself slips through (that happened, and a test now holds it).
 - **Missing inputs produce `needs_user_input`, never a default.** Times come back `None` rather
   than `0` so nothing can add a missing time into a total. Non-millimetre units (a faceted export
   reports "as written in the file") are refused rather than scaled — guessing is a 1000× error.

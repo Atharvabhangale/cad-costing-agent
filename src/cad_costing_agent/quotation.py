@@ -550,6 +550,11 @@ def _untimed_components(result: dict) -> list[QuoteUntimedComponent]:
 # --------------------------------------------------------------------- blockers
 
 
+# A part estimate with planned operations left out for want of a time. Kept as a
+# name because issued documents are exempt from it (see `build_quotation`).
+PART_OPERATIONS_WITHOUT_TIME = "part_operations_without_time"
+
+
 def _blockers(detail: EstimateDetail, kind: str, assumptions: EstimateAssumptions):
     result = detail.result_snapshot or {}
     request = detail.request_snapshot or {}
@@ -642,6 +647,25 @@ def _blockers(detail: EstimateDetail, kind: str, assumptions: EstimateAssumption
                     code="no_total",
                     title="Quotation unavailable",
                     detail="This estimate has no total, so there is nothing to quote.",
+                )
+            )
+        # The part counterpart of `assembly_operations_without_time`: planned
+        # operations with no committed time are in no figure, so the price
+        # covers less work than the plan describes. A part's snapshot has always
+        # recorded the ids, so this reads recorded evidence, not a guess.
+        untimed_operations = _uncosted_operation_ids(detail)
+        if untimed_operations:
+            found.append(
+                QuoteBlocker(
+                    code=PART_OPERATIONS_WITHOUT_TIME,
+                    title="Quotation unavailable",
+                    detail=(
+                        f"{len(untimed_operations)} planned operation(s) have no committed time "
+                        "and are in no figure, so this price covers less work than the plan "
+                        "describes. Enter a time for each, or remove an operation that will not "
+                        "be done, and cost the part again. Left out: "
+                        f"{', '.join(untimed_operations)}."
+                    ),
                 )
             )
 
@@ -1442,6 +1466,7 @@ def build_quotation(
     created_at: datetime | None = None,
     scope_notes: list[str] | None = None,
     revision: QuoteRevision | None = None,
+    already_issued: bool = False,
 ) -> Quotation:
     """Render one estimate as a quotation.
 
@@ -1462,6 +1487,13 @@ def build_quotation(
     request = detail.request_snapshot or {}
 
     blockers = _blockers(detail, kind, assumptions)
+    if already_issued:
+        # Re-reading a document that was issued, never issuing one: a rule added
+        # after it was issued does not revoke it, so a part quotation issued
+        # before operations-without-time refused one keeps rendering as issued,
+        # with its `partial_costing` warning. Issuing passes `issued_at` but not
+        # this flag, so nothing issued since can carry the blocker.
+        blockers = [blocker for blocker in blockers if blocker.code != PART_OPERATIONS_WITHOUT_TIME]
     warnings = _warnings(detail, kind, assumptions)
 
     if kind == ASSEMBLY:

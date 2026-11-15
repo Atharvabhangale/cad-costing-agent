@@ -573,6 +573,7 @@ def _build_quotation(
     metadata: QuoteMetadata,
     view: str,
     issued_at: datetime | None = None,
+    already_issued: bool = False,
 ) -> Quotation:
     """Render a quotation from one estimate's snapshots. Nothing is recalculated."""
     if view not in VIEWS:
@@ -593,6 +594,7 @@ def _build_quotation(
         issued_at=issued_at,
         created_at=stored.created_at,
         revision=_quotation_revision(repository, estimate_id),
+        already_issued=already_issued,
     )
 
 
@@ -765,6 +767,7 @@ def quotation(
         ),
         view=view,
         issued_at=issued.issued_at,
+        already_issued=True,
     )
     return IssuedQuotationResult(issued=issued, quotation=document)
 

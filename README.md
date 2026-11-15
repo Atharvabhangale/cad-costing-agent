@@ -1931,8 +1931,7 @@ sentence and the absence of the phrase are asserted by tests.
 
 Every other warning is carried onto the document too — illustrative rates,
 illustrative time assumptions, repaired geometry, a volume derived from polygons
-rather than exact surfaces, operations left out for want of a committed time,
-components deliberately excluded. There is **no parameter that hides them**, in
+rather than exact surfaces, components deliberately excluded. There is **no parameter that hides them**, in
 the API or on the page.
 
 ### A quotation is refused rather than made misleading
@@ -1955,6 +1954,14 @@ Issuing such a quotation is refused with a 409. The **engineering view still
 renders**, because the person fixing the problem has to be able to see it — only
 the customer document is withheld. Geometry that was never resolved blocks it
 the same way, and nothing is ever filled in with a zero to make a total appear.
+
+Planned operations with no committed time block it too, for a part
+(`part_operations_without_time`) and for an assembly roll-up
+(`assembly_operations_without_time`): the price would cover less work than the
+plan describes. The blocker names the operations; type a time for each, or
+remove one that will not be done, and cost again. A quotation issued before this
+rule (2026-11-15) is not revoked by it — re-opening it shows it as issued, with
+the `partial_costing` warning it carried.
 
 ### A quotation stays what it was
 
