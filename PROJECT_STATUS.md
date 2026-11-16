@@ -1034,6 +1034,8 @@ turned work. The test ring with six windows reports 3 index positions for 12 wal
 rays also reach each wall from inside, through the window opposite; a shop would more likely index
 six times from outside, and the count is the rays' answer, not a programme.
 
+Full suite: **2980 passed, 8 skipped**.
+
 ### Setup proposal: fewer operations left unplaced (2026-11-16)
 
 The real-file trial's setup proposal left 4 of 31 operations unplaced on `model1_1.stp` and 7 of
