@@ -1,11 +1,16 @@
 # Project Status
 
-Last updated: 2026-11-16 (setup proposal places milled bosses, wrapped fillets, turned work and multi-body parts; fewest-setup search)
+Last updated: 2026-11-16 (setup proposal: a 4-axis indexer the engineer can choose; earlier the same day bosses, wrapped fillets, turned work, multi-body parts, fewest-setup search)
 
 `CHECKPOINT.md` is a point-in-time handoff written at the Step 30 pause and is not
 updated in place; this file is the step-by-step record.
 
 ## Current stage
+
+**A 4-axis indexer can be chosen for the setup proposal.** On `Assembly.stp`'s needle-roller
+cage it places 41 of 79 operations in three setups — all 36 window walls in one setup indexed
+about Z — where the 3-axis mill places 5. The 3-axis proposal stays the default and is
+unchanged. Details in *Setup proposal on a 4-axis indexer* below.
 
 **The setup proposal leaves far fewer operations unplaced on the real files.** Milled bosses,
 fillets no blended plane reaches, turned work (in lathe chuckings) and the bodies of a
@@ -982,6 +987,52 @@ database from the previous code upgraded with its estimate served byte-identical
 not SSO or OIDC and not production-grade**: no token expiry or rotation, no rate limiting, a
 best-effort (non-transactional) audit write, no user-management UI (API only), and no
 simultaneous-request test of the approval sequence.
+
+### Setup proposal on a 4-axis indexer (2026-11-16)
+
+The cage's window walls face each other across their 3.2 mm windows, so head-on every ray meets
+the opposite wall; a tool reaches them only radially, through the window, and each wall's radial
+direction differs from the next. A 3-axis mill would need a setup per direction, so the proposal
+left them unplaced. A rotary table that indexes between cuts holds every direction square to its
+axis in one clamping.
+
+- **The machine is the engineer's.** `/cad/setups/propose` and `/cad/setups/apply-proposal` take
+  `machine` (`3_axis_mill`, the default, or `4_axis_indexer`) and, for the indexer, `rotary_axis`
+  (X, Y or Z). Without the field the response is byte-identical to the 3-axis one (a test holds
+  it). With no axis given each is tried and the one placing the most operations is used (ties to
+  fewer setups, then Z, X, Y); `rotary_axis_basis` lists what each placed.
+- **Only on the indexer** does a planar face get the side-milling direction lying in its plane
+  and square to the rotary axis (both senses, ray-checked). On a 3-axis mill that direction would
+  be a setup of its own, so it is never offered there.
+- Every mill direction square to the axis keys into one setup per body, labelled "4-axis,
+  indexed about Z", with `index_positions` — the directions its operations are cut from. A
+  direction along the axis is still its own setup; lathe chuckings are unchanged.
+- The machine note says what is not modelled: the time to index between positions (the setup's
+  estimate is the same baseline any setup gets), continuous 4-axis cutting, the table's reach and
+  clearance, and how the part is held on it.
+- The card has a *Machine* select and a *Rotary axis* select (enabled only for the indexer);
+  changing either clears a proposal made for the other. Driven in a browser on a test ring: the
+  indexer's three setups and the axis reason rendered, no page errors.
+
+A first version took a face's normal from its first candidate, which after the 3-axis flank
+candidates are sorted in can be a flank direction; about X it then "placed" 29 cage walls along a
+direction derived from the wrong vector. The face's own (primary) normal is used now, and about X
+the cage places 5.
+
+Live, on a scratch database, per component of `Assembly.stp`:
+
+| Component | 3-axis mill | 4-axis indexer (axis chosen) |
+|---|---|---|
+| cage (79 operations) | 5 placed, 2 setups, low | 41 placed, 3 setups (indexed about Z: 36 at 36 positions; +Z 4; −Z 1), low. Tried Z 41, X 5, Y 7 |
+| drawn cup (5) | 5 placed, 4 setups | 5 placed, 3 setups (indexed about X 2; two lathe chuckings) |
+| needle roller (4) | 4 placed, 3 setups | 4 placed, 3 setups (axis Z by tie order) |
+
+Still unplaced on the cage: its 36 Ø1 × 0.9 mm pins (axis Z, standing on the bottom flange with
+the top flange 18.45 mm above: no straight axial approach, and no indexer direction profiles a pin
+square to the table) and the two inner flange faces, which face each other 19.19 mm apart and are
+turned work. The test ring with six windows reports 3 index positions for 12 walls, because the
+rays also reach each wall from inside, through the window opposite; a shop would more likely index
+six times from outside, and the count is the rays' answer, not a programme.
 
 ### Setup proposal: fewer operations left unplaced (2026-11-16)
 
@@ -2813,7 +2864,7 @@ a fault of the comparison. It is the kind of gap this feature exists to expose.
 
 ## What has NOT been done (explicitly out of scope so far)
 
-- Setup proposals for 4-axis or 5-axis machines, indexed rotary work (a bearing cage's radial windows), a feature cut across two setups (a lug end wrapping past a half turn), tool-body or holder collision, and a hole drilled from the tailstock in a lathe chucking — the proposal leaves those operations where they are and says why
+- Setup proposals for 5-axis or continuous 4-axis machines, index time on the 4-axis indexer, a feature cut across two setups (a lug end wrapping past a half turn), tool-body or holder collision, and a hole drilled from the tailstock in a lathe chucking — the proposal leaves those operations where they are and says why
 - Editing or deleting an existing rate set version — deliberately impossible; publish a new version instead
 - CAD file parsing for formats other than STL, STEP and IGES. **Native Creo `.prt`/`.asm`/`.drw` are recognized and refused with an explanation, not supported**: the formats are proprietary, the installed OpenCASCADE has no reader for them, and no reliable open-source parser exists. Parasolid, ACIS, JT and NX native are in the same position
 - Drawing information of any kind. No views, dimensions, tolerances or PMI are read from any format, STEP included

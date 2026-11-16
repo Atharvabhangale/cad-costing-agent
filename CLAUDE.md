@@ -531,6 +531,13 @@ the reason. Each reads the shape through the single STEP/IGES readers.
   the proposal) and two bodies never share a setup. A one-body milled proposal keys and labels
   exactly as before. With at most `EXACT_COVER_LIMIT` directions the fewest setups are found by
   trying every combination (`cover_method: "fewest"`), else greedy.
+  **The machine is the engineer's choice.** `machine` defaults to `3_axis_mill` and that
+  response must stay byte-identical without the field (a test holds it). `4_axis_indexer` takes
+  `rotary_axis` (X/Y/Z, or absent: each is tried and `choose_rotary_axis` keeps the one placing
+  the most, saying what each placed); every mill direction square to the axis keys into one
+  indexed setup per body, with its `index_positions`. Only then do planar faces get the
+  side-milling direction in their plane square to the axis (`_indexed_flank_candidates`) — on
+  the 3-axis mill that direction would invent a setup. Index time is not estimated; say so.
 - **K is the engineer's.** `/cad/sheet-metal`'s `k_factor` (0 < K <= 0.5) has no default;
   without it `flat_pattern` is null and `needs_input` is `["k_factor"]`. `features/sheet_metal.py`
   imports only `features.topology`; what sheet cannot make is handed in from `main.py`

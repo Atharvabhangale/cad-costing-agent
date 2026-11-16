@@ -815,8 +815,52 @@ def _solids(shape) -> list:
     return found
 
 
+def _indexed_flank_candidates(
+    model: _Shape, feature: Feature, approach: FeatureApproach, rotary_axis: tuple
+) -> FeatureApproach:
+    """Side-milling candidates for a planar face on a 4-axis indexer.
+
+    On an indexer every direction perpendicular to the rotary axis is in one
+    setup, so a face may be side-milled along the direction that lies both in
+    its plane and square to that axis — for a window wall in a ring, the
+    radial direction through the window. Both senses are checked with rays.
+    A face square to the rotary axis has no such direction.
+    """
+    head_on = [c for c in approach.candidates if c.kind == PRIMARY]
+    if not head_on:
+        return approach
+    # The face's own normal: the 3-axis flank candidates sort in beside it.
+    normal = head_on[0].direction.as_tuple()
+    side = _cross(normal, rotary_axis)
+    if math.sqrt(_dot(side, side)) < 1e-6:
+        return approach
+    side = _unit(side)
+    origins, _ = _face_origins(model, feature.source_faces[:1])
+    extra = [
+        _check(
+            model,
+            direction=direction,
+            kind=FLANK,
+            basis=(
+                "side milling on a 4-axis indexer: a tool square to the rotary axis and in this "
+                "face's plane cuts it with its flank, at one index position"
+            ),
+            origins=origins,
+        )
+        for direction in (side, (-side[0], -side[1], -side[2]))
+        if not any(_same(direction, c.direction.as_tuple()) for c in approach.candidates)
+    ]
+    if not extra:
+        return approach
+    return _finish(feature, approach.rule, [*approach.candidates, *extra])
+
+
 def approach_directions(
-    shape, features: list[Feature], *, turned: frozenset[str] | set[str] = frozenset()
+    shape,
+    features: list[Feature],
+    *,
+    turned: frozenset[str] | set[str] = frozenset(),
+    rotary_axis: tuple[float, float, float] | None = None,
 ) -> list[FeatureApproach]:
     """Candidate approach directions and the access check, for each feature given.
 
@@ -824,6 +868,8 @@ def approach_directions(
     their `source_faces` index into it. Faceted features carry no faces to read
     and are refused. `turned` names the features a turning operation cuts;
     those get the lathe rule, every other feature a milling or drilling rule.
+    `rotary_axis`, for a 4-axis indexer, adds each planar face's side-milling
+    directions square to that axis; without it the answer is the 3-axis one.
     """
     if any(feature.source_type != "brep" for feature in features):
         raise ApproachUnavailable(
@@ -889,6 +935,14 @@ def approach_directions(
         else a
         for a in results
     ]
+    if rotary_axis is not None:
+        axis = _unit(rotary_axis)
+        finished = [
+            _indexed_flank_candidates(model_for(by_id[a.feature_id]), by_id[a.feature_id], a, axis)
+            if a.rule == "plane_outward_normal"
+            else a
+            for a in finished
+        ]
     if not several:
         return finished
     return [

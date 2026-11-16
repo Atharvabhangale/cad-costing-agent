@@ -112,6 +112,19 @@ LATHE_PROCESSES = ("turning",)
 
 MACHINE = "3_axis_mill"
 LATHE_MACHINE = "lathe"
+INDEXER = "4_axis_indexer"
+"""A mill with a rotary table that indexes (turns and clamps) between cuts, never cutting while turning."""
+MILLING_MACHINES = (MACHINE, INDEXER)
+ROTARY_AXES = {"Z": (0.0, 0.0, 1.0), "X": (1.0, 0.0, 0.0), "Y": (0.0, 1.0, 0.0)}
+"""Rotary axes an indexer is proposed about, in the order ties go to."""
+INDEXER_NOTE = (
+    "Proposed for a 4-axis indexer: a rotary table about the {axis} axis turns the part between "
+    "cuts, so every approach direction square to that axis is one setup, each operation cut at "
+    "its own index position. A direction along the axis is still its own setup. The time to "
+    "index between positions is not estimated, cutting while the table turns (continuous 4-axis) "
+    "is not modelled, and the rotary table's reach, clearance and the part's fixturing on it are "
+    "not checked. Turning is proposed for a 2-axis lathe as on the 3-axis proposal."
+)
 MACHINE_NOTE = (
     "Proposed for a 3-axis mill: the tool axis is fixed, so every distinct approach direction is "
     "its own setup. A 4-axis machine with a rotary table could reach every direction "
@@ -164,7 +177,14 @@ class PlacedOperation(BaseModel):
 
 class ProposedSetup(BaseModel):
     position: int = Field(ge=1)
-    machine: str = Field(default=MACHINE, description="'3_axis_mill', or 'lathe' for a chucking.")
+    machine: str = Field(
+        default=MACHINE,
+        description="'3_axis_mill', '4_axis_indexer' for every direction square to its rotary axis, or 'lathe'.",
+    )
+    index_positions: list[str] = Field(
+        default_factory=list,
+        description="For an indexed setup: the approach directions its operations are cut from, one index position each.",
+    )
     solid_index: int | None = Field(
         default=None, description="The body this setup machines, for a part of several bodies."
     )
@@ -197,6 +217,12 @@ class SetupProposal(BaseModel):
     component_id: str | None = None
     machine: str = MACHINE
     machine_note: str = MACHINE_NOTE
+    rotary_axis: str | None = Field(
+        default=None, description="For a 4-axis indexer: the axis the table turns about ('X', 'Y' or 'Z')."
+    )
+    rotary_axis_basis: str | None = Field(
+        default=None, description="Why that axis: the engineer's, or which candidate placed the most operations."
+    )
     algorithm_note: str = ALGORITHM_NOTE
     cover_method: str = Field(
         default="fewest",
@@ -294,12 +320,19 @@ def _key(machine: str, solid: int | None, direction: str) -> str:
     A one-body part milled along +Z keys as '+Z', exactly the direction key.
     """
     return " ".join(
-        [*(["lathe"] if machine == LATHE_MACHINE else []), *([f"body{solid}"] if solid is not None else []), direction]
+        [
+            *(["lathe"] if machine == LATHE_MACHINE else []),
+            *(["indexed"] if machine == INDEXER else []),
+            *([f"body{solid}"] if solid is not None else []),
+            direction,
+        ]
     )
 
 
 def _label(machine: str, solid: int | None, direction: str) -> str:
     label = direction_label(direction)
+    if machine == INDEXER:
+        label = f"4-axis, indexed about {direction}"
     if machine == LATHE_MACHINE:
         label = f"lathe, {label} end toward the tool"
     if solid is not None:
@@ -322,8 +355,22 @@ def propose_setups(
     approaches: list[FeatureApproach],
     *,
     component_id: str | None = None,
+    machine: str = MACHINE,
+    rotary_axis: str | None = None,
 ) -> SetupProposal:
-    """Group the plan's operations by the directions their features are reachable from."""
+    """Group the plan's operations by the directions their features are reachable from.
+
+    `machine` is the 3-axis mill unless the engineer chose the 4-axis indexer,
+    which needs a `rotary_axis` ('X', 'Y' or 'Z') and the approaches computed
+    with that axis (`approach_directions(..., rotary_axis=...)`).
+    """
+    if machine not in MILLING_MACHINES:
+        raise ValueError(f"Unknown machine '{machine}'; expected one of {', '.join(MILLING_MACHINES)}.")
+    if (machine == INDEXER) != (rotary_axis is not None):
+        raise ValueError("A rotary axis is given for the 4-axis indexer, and only for it.")
+    if rotary_axis is not None and rotary_axis not in ROTARY_AXES:
+        raise ValueError(f"Unknown rotary axis '{rotary_axis}'; expected X, Y or Z.")
+    axis_vector = ROTARY_AXES.get(rotary_axis or "")
     by_feature = {approach.feature_id: approach for approach in approaches}
     # setup key -> (machine, body, direction key)
     meta: dict[str, tuple[str, int | None, str]] = {}
@@ -369,17 +416,28 @@ def propose_setups(
             )
             continue
 
-        machine = LATHE_MACHINE if (operation.operation_type or "") in LATHE_PROCESSES else MACHINE
-        kinds = (LATHE,) if machine == LATHE_MACHINE else (PRIMARY, FLANK)
+        lathe = (operation.operation_type or "") in LATHE_PROCESSES
+        kinds = (LATHE,) if lathe else (PRIMARY, FLANK)
         shared: dict[str, str] | None = None
         for approach in approaches_here:
             reachable = {}
             for candidate in approach.candidates:
                 if not candidate.reachable or candidate.kind not in kinds:
                     continue
-                key = _key(machine, approach.solid_index, candidate.direction_key)
-                meta.setdefault(key, (machine, approach.solid_index, candidate.direction_key))
-                reachable[key] = candidate.kind
+                on = LATHE_MACHINE if lathe else MACHINE
+                direction = candidate.direction_key
+                if (
+                    not lathe
+                    and axis_vector is not None
+                    and abs(sum(a * b for a, b in zip(candidate.direction.as_tuple(), axis_vector))) < 1e-6
+                ):
+                    on, direction = INDEXER, rotary_axis
+                key = _key(on, approach.solid_index, direction)
+                if key not in meta:
+                    meta[key] = (on, approach.solid_index, direction)
+                    if on == INDEXER:
+                        vectors[key] = Point3D.of(*axis_vector)
+                reachable[key] = PRIMARY if reachable.get(key) == PRIMARY else candidate.kind
                 vectors.setdefault(key, candidate.direction)
                 origins.setdefault((operation.operation_id, key), candidate.origin)
             if shared is None:
@@ -475,7 +533,14 @@ def propose_setups(
                     (
                         f"{fid}: {c.reason} ({c.basis})"
                         for c in by_feature[fid].candidates
-                        if c.direction_key == meta[key][2]
+                        if (
+                            c.direction_key == meta[key][2]
+                            or (
+                                meta[key][0] == INDEXER
+                                and abs(sum(a * b for a, b in zip(c.direction.as_tuple(), axis_vector)))
+                                < 1e-6
+                            )
+                        )
                         and c.reachable
                         and (c.kind == LATHE) == (meta[key][0] == LATHE_MACHINE)
                     ),
@@ -493,15 +558,29 @@ def propose_setups(
                 )
             )
         first = members[0].operation_id
-        machine, solid, direction = meta[key]
+        on, solid, direction = meta[key]
+        positions: list[str] = []
+        if on == INDEXER:
+            for operation in members:
+                for fid in operation.feature_ids:
+                    used = next(
+                        c.direction_key
+                        for c in by_feature[fid].candidates
+                        if c.reachable
+                        and c.kind != LATHE
+                        and abs(sum(a * b for a, b in zip(c.direction.as_tuple(), axis_vector))) < 1e-6
+                    )
+                    if used not in positions:
+                        positions.append(used)
         setups.append(
             ProposedSetup(
                 position=len(setups) + 1,
-                machine=machine,
+                machine=on,
+                index_positions=positions,
                 solid_index=solid,
                 direction=vectors[key],
                 direction_key=direction,
-                direction_label=_label(machine, solid, direction),
+                direction_label=_label(on, solid, direction),
                 operation_ids=[o.operation_id for o in members],
                 feature_ids=[fid for o in members for fid in operations[o.operation_id].feature_ids],
                 operations=placed,
@@ -535,6 +614,9 @@ def propose_setups(
         limitations.append(BODY_NOTE)
     return SetupProposal(
         component_id=component_id,
+        machine=machine,
+        machine_note=INDEXER_NOTE.format(axis=rotary_axis) if machine == INDEXER else MACHINE_NOTE,
+        rotary_axis=rotary_axis,
         limitations=limitations,
         confidence=confidence,
         confidence_reason=reason,
@@ -543,6 +625,33 @@ def propose_setups(
         setups=setups,
         unplaced=unplaced,
         features=approaches,
+    )
+
+
+def choose_rotary_axis(proposals: dict[str, SetupProposal]) -> SetupProposal:
+    """Of indexer proposals about each axis, the one placing the most operations.
+
+    Ties go to fewer setups, then to the order Z, X, Y. The chosen proposal
+    says which axes were tried and what each placed, so the choice is
+    checkable rather than asserted.
+    """
+    order = list(ROTARY_AXES)
+    def placed(p: SetupProposal) -> int:
+        return sum(len(s.operation_ids) for s in p.setups)
+
+    best = min(proposals, key=lambda a: (-placed(proposals[a]), len(proposals[a].setups), order.index(a)))
+    tried = "; ".join(
+        f"{a}: {placed(proposals[a])} placed in {len(proposals[a].setups)} setup(s)"
+        for a in order
+        if a in proposals
+    )
+    return proposals[best].model_copy(
+        update={
+            "rotary_axis_basis": (
+                f"Chosen by the system: the axis whose indexer proposal placed the most operations "
+                f"(ties to fewer setups, then Z, X, Y). Tried — {tried}."
+            )
+        }
     )
 
 
@@ -611,6 +720,8 @@ def apply_setup_proposal(plan: ManufacturingPlan, proposal: SetupProposal) -> Ap
             name=(
                 f"Lathe chucking, {proposed.direction_label.removeprefix('lathe, ')}"
                 if proposed.machine == LATHE_MACHINE
+                else f"Indexer {proposed.direction_label.removeprefix('4-axis, ')}"
+                if proposed.machine == INDEXER
                 else f"Approach {proposed.direction_label}"
             ),
             description=(
@@ -629,6 +740,13 @@ def apply_setup_proposal(plan: ManufacturingPlan, proposal: SetupProposal) -> Ap
                     "engineer."
                 )
                 if proposed.machine == LATHE_MACHINE
+                else (
+                    "Every operation here machines a feature that straight rays reach along a "
+                    f"direction square to the rotary axis ({len(proposed.index_positions)} index "
+                    "position(s)), and a 4-axis indexer turns the part between them in one "
+                    "clamping. Proposed from the B-Rep and applied by the engineer."
+                )
+                if proposed.machine == INDEXER
                 else (
                     f"Every operation here machines a feature that straight rays reach along "
                     f"{proposed.direction_label}, and a 3-axis mill holds one approach direction "
@@ -698,6 +816,9 @@ __all__ = [
     "UnplacedOperation",
     "apply_setup_proposal",
     "features_to_analyse",
+    "INDEXER",
+    "ROTARY_AXES",
+    "choose_rotary_axis",
     "propose_setups",
     "turned_feature_ids",
     "unavailable",

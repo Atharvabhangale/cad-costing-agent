@@ -516,9 +516,24 @@
             <summary>Proposed setups by approach direction</summary>
             <p class="hint">Reads, from the CAD's exact faces, which way a tool has to come from to
             reach each milled or drilled feature, and checks each direction with straight rays. On a
-            3-axis mill every direction is its own setup. A proposal only: the plan changes when you
+            3-axis mill every direction is its own setup; on a 4-axis indexer every direction square
+            to its rotary axis is one. A proposal only: the plan changes when you
             apply it, and the system's own grouping is kept beside yours.</p>
             <div class="viewer-tools">
+              <label class="hint">Machine
+                <select id="approach-machine">
+                  <option value="3_axis_mill">3-axis mill</option>
+                  <option value="4_axis_indexer">4-axis indexer (rotary table)</option>
+                </select>
+              </label>
+              <label class="hint">Rotary axis
+                <select id="approach-rotary-axis" disabled>
+                  <option value="">choose for me</option>
+                  <option value="Z">Z</option>
+                  <option value="X">X</option>
+                  <option value="Y">Y</option>
+                </select>
+              </label>
               <button type="button" id="propose-setups" class="secondary tiny">Propose setups from the CAD</button>
               <button type="button" id="apply-approach" class="secondary tiny hidden">Apply this grouping</button>
             </div>

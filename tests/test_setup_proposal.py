@@ -458,6 +458,122 @@ def test_the_fewest_setups_are_found_where_greedy_would_take_more():
     )
 
 
+def _ring():
+    shape, recognition = shape_and_features(approach_fixtures.ring_with_radial_windows(), "step")
+    plan = build_plan(suggest_operations(recognition).suggestions, units="mm")
+    features = features_to_analyse(plan, list(recognition.features))
+    return shape, plan, features, turned_feature_ids(plan)
+
+
+def _window_walls(plan):
+    return {o.operation_id for o in plan.operations if o.operation_name.startswith("Mill plane 12 ")}
+
+
+def test_window_walls_in_a_ring_are_not_placed_on_a_3_axis_mill():
+    shape, plan, features, turned = _ring()
+    proposal = propose_setups(plan, approach_directions(shape, features, turned=turned))
+
+    walls = _window_walls(plan)
+    assert len(walls) == 12
+    assert {u.operation_id for u in proposal.unplaced} == walls
+    assert proposal.machine == "3_axis_mill" and proposal.rotary_axis is None
+    assert all(s.machine == "3_axis_mill" and s.index_positions == [] for s in proposal.setups)
+
+
+def test_a_4_axis_indexer_places_every_window_wall_in_one_setup():
+    shape, plan, features, turned = _ring()
+    proposal = propose_setups(
+        plan,
+        approach_directions(shape, features, turned=turned, rotary_axis=(0.0, 0.0, 1.0)),
+        machine="4_axis_indexer",
+        rotary_axis="Z",
+    )
+
+    assert proposal.unplaced == []
+    indexed = [s for s in proposal.setups if s.machine == "4_axis_indexer"]
+    assert len(indexed) == 1
+    assert set(indexed[0].operation_ids) == _window_walls(plan)
+    assert indexed[0].direction_label == "4-axis, indexed about Z"
+    assert len(indexed[0].index_positions) >= 3
+    assert all(placed.access == "flank" for placed in indexed[0].operations)
+    assert all("4-axis indexer" in placed.evidence for placed in indexed[0].operations)
+    # Directions along the rotary axis are still their own setups.
+    assert {s.direction_key for s in proposal.setups if s.machine == "3_axis_mill"} == {"+Z", "-Z"}
+    assert "about the Z axis" in proposal.machine_note
+    assert "index between positions is not estimated" in proposal.machine_note
+    assert proposal.confidence is Confidence.MEDIUM
+
+
+def test_the_indexer_needs_a_rotary_axis_and_the_mill_takes_none():
+    shape, plan, features, turned = _ring()
+    approaches = approach_directions(shape, features, turned=turned)
+    with pytest.raises(ValueError, match="rotary axis"):
+        propose_setups(plan, approaches, machine="4_axis_indexer")
+    with pytest.raises(ValueError, match="rotary axis"):
+        propose_setups(plan, approaches, rotary_axis="Z")
+    with pytest.raises(ValueError, match="Unknown machine"):
+        propose_setups(plan, approaches, machine="5_axis")
+
+
+def test_the_endpoint_chooses_the_axis_that_places_the_most_and_says_so():
+    data = approach_fixtures.ring_with_radial_windows()
+    _, plan, _, _ = _ring()
+    form = {"manufacturing_plan": plan.model_dump_json(), "machine": "4_axis_indexer"}
+    chosen = client.post("/cad/setups/propose", files={"file": ("ring.step", data)}, data=form)
+    assert chosen.status_code == 200, chosen.text
+    body = chosen.json()
+    assert body["rotary_axis"] == "Z"
+    assert body["rotary_axis_basis"].startswith("Chosen by the system")
+    assert "Z: 16 placed" in body["rotary_axis_basis"]
+
+    named = client.post(
+        "/cad/setups/propose",
+        files={"file": ("ring.step", data)},
+        data={**form, "rotary_axis": "X"},
+    ).json()
+    assert named["rotary_axis"] == "X" and named["rotary_axis_basis"] == "Chosen by the engineer."
+
+    for bad in ({"machine": "5_axis"}, {"rotary_axis": "Z"}, {"machine": "4_axis_indexer", "rotary_axis": "W"}):
+        response = client.post(
+            "/cad/setups/propose",
+            files={"file": ("ring.step", data)},
+            data={"manufacturing_plan": plan.model_dump_json(), **bad},
+        )
+        assert response.status_code == 400, bad
+
+
+def test_applying_the_indexer_proposal_makes_one_named_indexed_setup():
+    data = approach_fixtures.ring_with_radial_windows()
+    _, plan, _, _ = _ring()
+    response = client.post(
+        "/cad/setups/apply-proposal",
+        files={"file": ("ring.step", data)},
+        data={"manufacturing_plan": plan.model_dump_json(), "machine": "4_axis_indexer", "rotary_axis": "Z"},
+    )
+    assert response.status_code == 200, response.text
+    applied = response.json()
+    names = [s["name"] for s in applied["plan"]["setups"]]
+    assert "Indexer indexed about Z" in names
+    indexer = next(s for s in applied["plan"]["setups"] if s["name"] == "Indexer indexed about Z")
+    assert "4-axis indexer" in indexer["system_grouping_reason"]
+    assert indexer["system_grouping"] == APPROACH_GROUPING
+    assert applied["left_in_place"] == []
+
+
+def test_without_the_machine_field_the_response_is_the_3_axis_one():
+    data = approach_fixtures.ring_with_radial_windows()
+    _, plan, _, _ = _ring()
+    plain = client.post(
+        "/cad/setups/propose", files={"file": ("ring.step", data)},
+        data={"manufacturing_plan": plan.model_dump_json()},
+    )
+    named = client.post(
+        "/cad/setups/propose", files={"file": ("ring.step", data)},
+        data={"manufacturing_plan": plan.model_dump_json(), "machine": "3_axis_mill"},
+    )
+    assert plain.status_code == 200 and plain.content == named.content
+
+
 def test_the_proposal_is_deterministic():
     plan = full_plan("bracket_with_overhung_through_hole")
     first = post_propose("bracket_with_overhung_through_hole", plan)

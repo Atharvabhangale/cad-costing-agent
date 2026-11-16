@@ -1641,7 +1641,31 @@ function approachRequestBody() {
   body.append("manufacturing_plan", JSON.stringify(payload));
   // A component's plan is proposed on that component's own shape only.
   if (state.planComponentId) body.append("component_id", state.planComponentId);
+  // The machine is the engineer's choice; the default request is the 3-axis one.
+  const machine = $("approach-machine")?.value || "3_axis_mill";
+  if (machine !== "3_axis_mill") {
+    body.append("machine", machine);
+    const axis = $("approach-rotary-axis")?.value;
+    if (axis) body.append("rotary_axis", axis);
+  }
   return body;
+}
+
+function wireApproachMachine() {
+  const machine = $("approach-machine");
+  const axis = $("approach-rotary-axis");
+  if (!machine || !axis || machine.dataset.wired) return;
+  machine.dataset.wired = "1";
+  machine.addEventListener("change", () => {
+    axis.disabled = machine.value !== "4_axis_indexer";
+    // A proposal was for the machine that is no longer chosen.
+    state.approachProposal = null;
+    renderApproachProposal();
+  });
+  axis.addEventListener("change", () => {
+    state.approachProposal = null;
+    renderApproachProposal();
+  });
 }
 
 async function proposeSetups() {
@@ -1675,13 +1699,16 @@ function approachSetupItem(setup) {
     .join("");
   return `<li class="approach-setup" data-position="${setup.position}">
       <strong>Setup ${setup.position} — ${escapeHtml(setup.direction_label)}</strong>
-      <span class="muted">· ${setup.operation_ids.length} operation(s)</span>
+      <span class="muted">· ${setup.operation_ids.length} operation(s)${
+        setup.index_positions.length ? ` at ${setup.index_positions.length} index position(s)` : ""
+      }</span>
       <button type="button" class="secondary tiny approach-show" data-position="${setup.position}">Show on model</button>
       <ul class="declined-list">${operations}</ul>
     </li>`;
 }
 
 function renderApproachProposal() {
+  wireApproachMachine();
   const box = $("approach-proposal");
   const apply = $("apply-approach");
   const proposal = state.approachProposal;
@@ -1713,6 +1740,10 @@ function renderApproachProposal() {
       ${proposal.considered_operation_count} milled, drilled or turned operation(s) ·
       confidence <strong>${escapeHtml(proposal.confidence)}</strong> —
       ${escapeHtml(proposal.confidence_reason)}</p>` +
+    (proposal.rotary_axis
+      ? `<p class="hint">Rotary axis <strong>${escapeHtml(proposal.rotary_axis)}</strong> —
+          ${escapeHtml(proposal.rotary_axis_basis || "")}</p>`
+      : "") +
     (stale
       ? `<p class="warning-inline">The plan has changed since this proposal. Applying recomputes it
           from the plan as it is now.</p>`

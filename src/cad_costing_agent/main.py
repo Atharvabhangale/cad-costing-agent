@@ -5491,8 +5491,25 @@ def _plan_from_form(manufacturing_plan: str) -> ManufacturingPlan:
 
 
 def _setup_proposal_for(
-    data: bytes, filename: str, plan: ManufacturingPlan, component_id: str | None
+    data: bytes,
+    filename: str,
+    plan: ManufacturingPlan,
+    component_id: str | None,
+    machine: str = setup_proposal.MACHINE,
+    rotary_axis: str | None = None,
 ) -> setup_proposal.SetupProposal:
+    if machine not in setup_proposal.MILLING_MACHINES:
+        raise HTTPException(
+            status_code=400,
+            detail=f"machine must be one of {', '.join(setup_proposal.MILLING_MACHINES)}.",
+        )
+    if rotary_axis is not None and (
+        machine != setup_proposal.INDEXER or rotary_axis not in setup_proposal.ROTARY_AXES
+    ):
+        raise HTTPException(
+            status_code=400,
+            detail="rotary_axis is X, Y or Z, and only for machine '4_axis_indexer'.",
+        )
     if len(data) > MAX_UPLOAD_BYTES:
         raise HTTPException(
             status_code=400,
@@ -5520,15 +5537,32 @@ def _setup_proposal_for(
             f"recovered from a {recognition.representation} representation.",
             component_id=component_id or None,
         )
+    features = setup_proposal.features_to_analyse(plan, list(recognition.features))
+    turned = setup_proposal.turned_feature_ids(plan)
     try:
-        approaches = approach_directions(
-            shape,
-            setup_proposal.features_to_analyse(plan, list(recognition.features)),
-            turned=setup_proposal.turned_feature_ids(plan),
-        )
+        if machine != setup_proposal.INDEXER:
+            approaches = approach_directions(shape, features, turned=turned)
+            return setup_proposal.propose_setups(plan, approaches, component_id=component_id or None)
+        axes = [rotary_axis] if rotary_axis else list(setup_proposal.ROTARY_AXES)
+        proposals = {
+            axis: setup_proposal.propose_setups(
+                plan,
+                approach_directions(
+                    shape, features, turned=turned, rotary_axis=setup_proposal.ROTARY_AXES[axis]
+                ),
+                component_id=component_id or None,
+                machine=machine,
+                rotary_axis=axis,
+            )
+            for axis in axes
+        }
     except ApproachUnavailable as exc:
         return setup_proposal.unavailable(str(exc), component_id=component_id or None)
-    return setup_proposal.propose_setups(plan, approaches, component_id=component_id or None)
+    if rotary_axis:
+        return proposals[rotary_axis].model_copy(
+            update={"rotary_axis_basis": "Chosen by the engineer."}
+        )
+    return setup_proposal.choose_rotary_axis(proposals)
 
 
 @app.post("/cad/setups/propose", response_model=setup_proposal.SetupProposal)
@@ -5540,6 +5574,20 @@ async def cad_setups_propose(
         description=(
             "For an assembly component's plan: its definition id. The proposal is made on that "
             "component's own shape only — never across components."
+        ),
+    ),
+    machine: str = Form(
+        "3_axis_mill",
+        description=(
+            "'3_axis_mill' (the default: one setup per approach direction) or "
+            "'4_axis_indexer' (every direction square to the rotary axis in one setup)."
+        ),
+    ),
+    rotary_axis: str | None = Form(
+        None,
+        description=(
+            "For the indexer: 'X', 'Y' or 'Z'. Absent, each is tried and the one placing the "
+            "most operations is used, and the proposal says so."
         ),
     ),
 ) -> setup_proposal.SetupProposal:
@@ -5559,7 +5607,7 @@ async def cad_setups_propose(
     """
     data = await file.read()
     plan = _plan_from_form(manufacturing_plan)
-    return _setup_proposal_for(data, file.filename or "", plan, component_id)
+    return _setup_proposal_for(data, file.filename or "", plan, component_id, machine, rotary_axis)
 
 
 @app.post("/cad/setups/apply-proposal", response_model=setup_proposal.AppliedProposal)
@@ -5567,6 +5615,8 @@ async def cad_setups_apply_proposal(
     file: UploadFile = File(...),
     manufacturing_plan: str = Form(...),
     component_id: str | None = Form(None),
+    machine: str = Form("3_axis_mill"),
+    rotary_axis: str | None = Form(None),
 ) -> setup_proposal.AppliedProposal:
     """Apply the approach-direction proposal to this plan, because a person asked.
 
@@ -5578,7 +5628,9 @@ async def cad_setups_apply_proposal(
     """
     data = await file.read()
     plan = _plan_from_form(manufacturing_plan)
-    proposal = _setup_proposal_for(data, file.filename or "", plan, component_id)
+    proposal = _setup_proposal_for(
+        data, file.filename or "", plan, component_id, machine, rotary_axis
+    )
     try:
         return setup_proposal.apply_setup_proposal(plan, proposal)
     except ValueError as exc:

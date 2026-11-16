@@ -128,3 +128,25 @@ def lug_with_bush_as_two_bodies() -> bytes:
     builder.Add(compound, lug)
     builder.Add(compound, bush)
     return to_step(compound)
+
+
+# A ring like a bearing cage: Ø40 outside, Ø34 bore, 30 tall, with six 6 mm wide
+# windows cut radially through its wall at 30°, 90°, ... 330°. Each window's two
+# side walls face each other across 6 mm, so head-on they are blocked by the
+# opposite wall; a tool reaches them radially, through the window. Expected: on
+# a 3-axis mill those walls are not placed (no direction another feature needs
+# lies in their planes); on a 4-axis indexer about Z every wall is reached at its
+# own index position, all in one setup.
+def ring_with_radial_windows() -> bytes:
+    import math
+
+    from OCP.BRepBuilderAPI import BRepBuilderAPI_Transform
+    from OCP.gp import gp_Ax1, gp_Dir, gp_Pnt, gp_Trsf
+
+    ring = _cut(_cylinder(20.0, 30.0, (0.0, 0.0, 0.0)), _cylinder(17.0, 40.0, (0.0, 0.0, -5.0)))
+    for k in range(6):
+        window = _box(10.0, 6.0, 12.0, at=(14.0, -3.0, 9.0))
+        turn = gp_Trsf()
+        turn.SetRotation(gp_Ax1(gp_Pnt(0.0, 0.0, 0.0), gp_Dir(0.0, 0.0, 1.0)), math.radians(30.0 + 60.0 * k))
+        ring = _cut(ring, BRepBuilderAPI_Transform(window, turn).Shape())
+    return to_step(ring)
