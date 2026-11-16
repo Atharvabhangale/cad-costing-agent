@@ -40,7 +40,13 @@ def _unit(vector: tuple[float, float, float]) -> tuple[float, float, float]:
 class ShapeRays:
     """The already-read shape, indexed the way recognition indexed it."""
 
-    def __init__(self, shape):
+    def __init__(self, shape, obstacle=None):
+        """`obstacle`, when given, is the only material rays can meet.
+
+        Faces are still numbered over the whole `shape`, so feature indices
+        keep their meaning; only what blocks a ray changes. Used to check one
+        body of a multi-body part against itself (`features.approach`).
+        """
         from OCP.IntCurvesFace import IntCurvesFace_ShapeIntersector
         from OCP.TopAbs import TopAbs_ShapeEnum
         from OCP.TopExp import TopExp
@@ -59,7 +65,14 @@ class ShapeRays:
             shape, TopAbs_ShapeEnum.TopAbs_EDGE, TopAbs_ShapeEnum.TopAbs_FACE, self.edge_faces
         )
         self.intersector = IntCurvesFace_ShapeIntersector()
-        self.intersector.Load(shape, 1e-7)
+        self.intersector.Load(shape if obstacle is None else obstacle, 1e-7)
+        self._obstacle_faces: set[int] | None = None
+        if obstacle is not None:
+            own = TopTools_IndexedMapOfShape()
+            TopExp.MapShapes_s(obstacle, TopAbs_ShapeEnum.TopAbs_FACE, own)
+            self._obstacle_faces = {
+                self.faces.FindIndex(own.FindKey(k)) for k in range(1, own.Extent() + 1)
+            }
         self._surface_cache: dict[int, dict] = {}
 
     def face(self, index: int):
@@ -267,6 +280,12 @@ class ShapeRays:
             low = np.empty((count, 3))
             high = np.empty((count, 3))
             for slot in range(count):
+                if self._obstacle_faces is not None and slot + 1 not in self._obstacle_faces:
+                    # Not material for this check: a NaN box fails every
+                    # comparison in `blocked_along`, so no ray is handed to it.
+                    low[slot] = (np.nan, np.nan, np.nan)
+                    high[slot] = (np.nan, np.nan, np.nan)
+                    continue
                 box = Bnd_Box()
                 BRepBndLib.Add_s(self.face(slot + 1), box)
                 box.Enlarge(BOX_MARGIN_MM)

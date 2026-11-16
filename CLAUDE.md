@@ -522,6 +522,15 @@ the reason. Each reads the shape through the single STEP/IGES readers.
   operation without evidence; confidence is medium at most (a validator enforces it). A ray is
   not a tool: never present "reachable" as proof of access. Flank coverage of a planar face is
   only along directions some feature already needs, so it never creates a setup of its own.
+  A milled boss (`boss_axis_flank`) and a fillet no blended plane reaches (`fillet_fallback`:
+  the middle of its arc, read from the cylinder's U bounds and only up to a half turn, then both
+  directions along its axis) are the other `flank`/fallback rules; a fillet wrapping past a half
+  turn stays unplaced with that reason. Turning operations get the `lathe` kind (features named
+  by `turned_feature_ids`) and their own chuckings — a lathe and a mill never share a setup. A
+  multi-body part is checked body by body (`ShapeRays(shape, obstacle=solid)`; `BODY_NOTE` on
+  the proposal) and two bodies never share a setup. A one-body milled proposal keys and labels
+  exactly as before. With at most `EXACT_COVER_LIMIT` directions the fewest setups are found by
+  trying every combination (`cover_method: "fewest"`), else greedy.
 - **K is the engineer's.** `/cad/sheet-metal`'s `k_factor` (0 < K <= 0.5) has no default;
   without it `flat_pattern` is null and `needs_input` is `["k_factor"]`. `features/sheet_metal.py`
   imports only `features.topology`; what sheet cannot make is handed in from `main.py`

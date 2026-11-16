@@ -34,7 +34,7 @@ from cad_costing_agent.features.approach import (
     approach_directions,
     shape_and_features,
 )
-from cad_costing_agent.features.model import Confidence
+from cad_costing_agent.features.model import Confidence, Point3D
 from cad_costing_agent.main import STATIC_PATH, app
 from cad_costing_agent.manufacturing_plan import (
     DEFAULT_SETUP_ID,
@@ -51,6 +51,7 @@ from cad_costing_agent.setup_proposal import (
     apply_setup_proposal,
     features_to_analyse,
     propose_setups,
+    turned_feature_ids,
 )
 from tests import approach_fixtures, faceted_fixtures, iges_fixtures, step_fixtures
 from tests.assembly_fixtures import pump_assembly
@@ -217,21 +218,123 @@ def test_a_blend_takes_the_normals_of_the_planes_it_blends():
     approach = approaches("block_with_fillet")["FIL-001"]
 
     # The two faces it rounds between, not the two end faces it merely meets.
+    # A blended plane reaches it, so no fallback is added beside it.
     assert approach.rule == "fillet_neighbour_normals"
     assert len(approach.candidates) == 2
     assert all(c.reachable and c.kind == "primary" for c in approach.candidates)
     assert all("blends into" in c.basis for c in approach.candidates)
 
 
-def test_turning_and_unclassified_bores_have_no_approach():
+def test_an_unturned_shaft_is_a_boss_profiled_from_its_free_end():
+    # Ø30 × 40 from z = 0, then Ø20 × 30 on top. Profiled round with a tool
+    # parallel to the axis, the Ø30 is clear both ways (the Ø20 sits inside its
+    # radius), and the Ø20 only from the top: the shoulder is under it.
     shape, recognition = shape_and_features(step_fixtures.stepped_shaft_with_cross_hole(), "step")
     result = {a.feature_id: a for a in approach_directions(shape, list(recognition.features))}
 
-    cylinders = [a for a in result.values() if a.feature_type == "cylinder"]
-    assert cylinders and all(a.status == "no_approach" for a in cylinders)
-    assert "turned work has no milling approach" in cylinders[0].reason
+    cylinders = {
+        round(f.dimensions["diameter_mm"]): result[f.feature_id]
+        for f in recognition.features
+        if f.feature_type.value == "cylinder"
+    }
+    assert set(cylinders) == {30, 20}
+    for approach in cylinders.values():
+        assert approach.rule == "boss_axis_flank"
+        assert all(c.kind == "flank" and "parallel to the boss" in c.basis for c in approach.candidates)
+    assert cylinders[30].reachable_keys == ["+Z", "-Z"]
+    assert cylinders[20].reachable_keys == ["+Z"]
     ambiguous = [a for a in result.values() if a.subtype == "ambiguous"]
     assert ambiguous and ambiguous[0].status == "no_approach"
+
+
+def test_a_turned_feature_gets_the_lathe_rule_and_never_a_milling_kind():
+    shape, recognition = shape_and_features(step_fixtures.stepped_shaft_with_cross_hole(), "step")
+    cylinder_ids = {f.feature_id for f in recognition.features if f.feature_type.value == "cylinder"}
+    result = approach_directions(shape, list(recognition.features), turned=cylinder_ids)
+
+    turned = [a for a in result if a.feature_id in cylinder_ids]
+    assert turned and all(a.rule == "turned_about_axis" for a in turned)
+    assert all(c.kind == "lathe" for a in turned for c in a.candidates)
+    assert all(c.kind != "lathe" for a in result if a.feature_id not in cylinder_ids for c in a.candidates)
+
+
+def test_a_full_round_is_reached_from_its_arc_and_along_its_axis_when_no_blended_plane_reaches_it():
+    # The R16 half round under the rib faces −Z at its middle and ±Y at its
+    # edges; the side planes are square to its middle, so the neighbour rule
+    # offers nothing. A tool parallel to its axis profiles it from either open end.
+    shape, recognition = shape_and_features(approach_fixtures.rib_with_full_round_edge(), "step")
+    fillet = next(f for f in recognition.features if f.feature_type.value == "fillet")
+    approach = approach_directions(shape, [fillet])[0]
+
+    assert approach.rule == "fillet_fallback"
+    assert approach.status == "reachable"
+    # Head-on from the middle of its 180° arc, read from the cylinder's own U
+    # bounds; and by the flank from either open end.
+    assert approach.reachable_keys == ["-Z", "+X", "-X"]
+    middle = next(c for c in approach.candidates if c.direction_key == "-Z")
+    assert middle.kind == "primary" and "the middle of the 180° arc" in middle.basis
+    assert [c.kind for c in approach.candidates if c.direction_key in ("+X", "-X")] == ["flank", "flank"]
+    assert all("offered because no plane it blends into reaches it" in c.basis for c in approach.candidates)
+
+
+def test_each_body_of_a_multi_body_part_is_checked_against_itself_only():
+    from cad_costing_agent.features.approach import BODY_NOTE, _plane
+    from cad_costing_agent.features.rays import ShapeRays
+
+    shape, recognition = shape_and_features(approach_fixtures.lug_with_bush_as_two_bodies(), "step")
+    plan = build_plan(suggest_operations(recognition).suggestions, units="mm")
+    approaches = approach_directions(
+        shape, features_to_analyse(plan, list(recognition.features)), turned=turned_feature_ids(plan)
+    )
+    by_id = {a.feature_id: a for a in approaches}
+    lug_faces = [
+        f for f in recognition.features
+        if f.feature_type.value == "plane" and f.solid_index == 0 and round(f.dimensions["area_mm2"]) == 3399
+    ]
+    assert len(lug_faces) == 2
+    for face in lug_faces:
+        own = by_id[face.feature_id]
+        assert own.solid_index == 0
+        head_on = [c for c in own.candidates if c.kind == "primary"]
+        assert head_on and all(c.reachable for c in head_on)
+        # The same face checked against both bodies at once is blocked by the bush.
+        assert not _plane(ShapeRays(shape), face).candidates[0].reachable
+
+    proposal = propose_setups(plan, approaches)
+    assert BODY_NOTE in proposal.limitations
+    features = {f.feature_id: f for f in recognition.features}
+    for setup in proposal.setups:
+        bodies = {features[fid].solid_index for fid in setup.feature_ids}
+        assert bodies == {setup.solid_index}
+        assert setup.direction_label.endswith(f"body {setup.solid_index + 1}")
+
+
+def test_a_one_body_part_carries_no_body_note_or_body_label():
+    shape, recognition = shape_and_features(approach_fixtures.block_with_top_and_side_holes(), "step")
+    plan = build_plan(suggest_operations(recognition).suggestions, units="mm")
+    proposal = propose_setups(
+        plan, approach_directions(shape, features_to_analyse(plan, list(recognition.features)))
+    )
+    assert all(a.solid_index is None for a in proposal.features)
+    assert all(s.solid_index is None and "body" not in s.direction_label for s in proposal.setups)
+    assert not any("several bodies" in line for line in proposal.limitations)
+
+
+def test_rays_restricted_to_one_body_agree_batched_and_single():
+    from cad_costing_agent.features.approach import _solids
+    from cad_costing_agent.features.rays import ShapeRays
+
+    shape, _ = shape_and_features(approach_fixtures.lug_with_bush_as_two_bodies(), "step")
+    for solid in _solids(shape):
+        rays = ShapeRays(shape, obstacle=solid)
+        origins = []
+        for index in range(1, rays.faces.Extent() + 1):
+            for point, normal in rays.samples(index, (5,)):
+                origins.append(tuple(p + n * 0.01 for p, n in zip(point, normal)))
+        for direction in ((1.0, 0.0, 0.0), (-1.0, 0.0, 0.0), (0.0, 0.0, 1.0)):
+            batched = rays.blocked_along(origins, direction)
+            single = [rays.first_hit(origin, direction) for origin in origins]
+            assert batched == [(evaluated, hit is not None) for evaluated, hit in single]
 
 
 def test_faceted_geometry_is_refused_with_its_reason():
@@ -299,9 +402,60 @@ def test_the_proposal_states_its_limits_and_its_machine():
     assert proposal.machine == "3_axis_mill"
     assert "4-axis" in proposal.machine_note and "5-axis" in proposal.machine_note
     assert "not guaranteed to be the fewest" in proposal.algorithm_note
+    assert proposal.cover_method == "fewest"
     text = " ".join(proposal.limitations)
     for limit in ("holder", "length", "Undercuts", "fixture"):
         assert limit in text
+
+
+def test_the_fewest_setups_are_found_where_greedy_would_take_more():
+    # Six operations. +Z reaches 1-4, −X reaches 1, 3, 5 and +X reaches 2, 4, 6.
+    # Greedy takes +Z first and then still needs both sides: three setups.
+    # −X and +X together reach all six: two.
+    from cad_costing_agent.features.approach import ApproachCandidate, FeatureApproach
+
+    plan = full_plan("block_with_top_and_side_holes")
+    operations = [o for o in plan.ordered if o.feature_ids][:6]
+    assert len(operations) == 6
+    reach = {"+Z": {0, 1, 2, 3}, "-X": {0, 2, 4}, "+X": {1, 3, 5}}
+    vectors = {"+Z": (0, 0, 1), "-X": (-1, 0, 0), "+X": (1, 0, 0)}
+    fake = [
+        FeatureApproach(
+            feature_id=operation.feature_ids[0],
+            feature_type="hole",
+            status="reachable",
+            rule="test",
+            reason="test",
+            candidates=[
+                ApproachCandidate(
+                    direction=Point3D.of(*vectors[key]),
+                    direction_key=key,
+                    direction_label=key,
+                    kind="primary",
+                    basis="test",
+                    reachable=True,
+                )
+                for key in ("+Z", "-X", "+X")
+                if index in reach[key]
+            ],
+        )
+        for index, operation in enumerate(operations)
+    ]
+    kept = plan.model_copy(
+        update={
+            "operations": [
+                o if o in operations else o.rejected() for o in plan.operations
+            ]
+        }
+    )
+
+    proposal = propose_setups(kept, fake)
+
+    assert proposal.cover_method == "fewest"
+    assert sorted(s.direction_key for s in proposal.setups) == ["+X", "-X"]
+    assert sorted(op for s in proposal.setups for op in s.operation_ids) == sorted(
+        o.operation_id for o in operations
+    )
 
 
 def test_the_proposal_is_deterministic():
@@ -313,17 +467,58 @@ def test_the_proposal_is_deterministic():
     assert first.content == second.content
 
 
-def test_turned_and_manual_lines_are_not_placed_and_say_why():
+def test_turned_lines_go_to_lathe_chuckings_by_the_end_facing_the_tool():
+    # Ø30 × 40 + Ø20 × 30 with a Ø8 blind hole down the top. Everything turned
+    # is reached from the top end except the bottom face, which needs the part
+    # turned round: two chuckings. The hole is drilled on the mill, and no
+    # setup mixes a lathe and a mill.
     shape, recognition = shape_and_features(step_fixtures.stepped_shaft_with_axial_hole(), "step")
     plan = build_plan(suggest_operations(recognition).suggestions, units="mm")
     proposal = propose_setups(
-        plan, approach_directions(shape, features_to_analyse(plan, list(recognition.features)))
+        plan,
+        approach_directions(
+            shape,
+            features_to_analyse(plan, list(recognition.features)),
+            turned=turned_feature_ids(plan),
+        ),
     )
 
-    turned = [u for u in proposal.unplaced if u.status == "not_a_tool_approach_process"]
-    assert turned and all("turning has no milling approach" in u.reason for u in turned)
-    placed = [fid for s in proposal.setups for fid in s.feature_ids]
-    assert placed == ["H-001"]
+    assert proposal.unplaced == []
+    by_machine = {(s.machine, s.direction_key): s for s in proposal.setups}
+    assert set(by_machine) == {("lathe", "+Z"), ("lathe", "-Z"), ("3_axis_mill", "+Z")}
+    assert by_machine[("3_axis_mill", "+Z")].feature_ids == ["H-001"]
+    bottom = by_machine[("lathe", "-Z")]
+    assert len(bottom.operation_ids) == 1 and bottom.operations[0].access == "lathe"
+    assert "turned round" in proposal.machine_note
+    for setup in proposal.setups:
+        processes = {plan.get(op).operation_type for op in setup.operation_ids}
+        assert processes == ({"turning"} if setup.machine == "lathe" else {"drilling"})
+
+
+def test_lines_with_no_tool_approach_are_not_placed_and_say_why():
+    shape, recognition = shape_and_features(step_fixtures.stepped_shaft_with_axial_hole(), "step")
+    plan = build_plan(suggest_operations(recognition).suggestions, units="mm")
+    target = plan.ordered[1].operation_id
+    welded = plan.model_copy(
+        update={
+            "operations": [
+                o.with_operation_type("welding") if o.operation_id == target else o
+                for o in plan.operations
+            ]
+        }
+    )
+    proposal = propose_setups(
+        welded,
+        approach_directions(
+            shape,
+            features_to_analyse(welded, list(recognition.features)),
+            turned=turned_feature_ids(welded),
+        ),
+    )
+
+    skipped = [u for u in proposal.unplaced if u.status == "not_a_tool_approach_process"]
+    assert [u.operation_id for u in skipped] == [plan.ordered[1].operation_id]
+    assert "'welding' is not cut by a tool" in skipped[0].reason
 
 
 # ----------------------------------------------------------- 3. nothing changes by itself

@@ -28,10 +28,19 @@ What it does not do
   sufficient (`features.approach.LIMITATIONS`).
 - **It never places an operation it has no evidence for.** An unreachable
   feature, a feature with no approach rule, a line with no feature, or a
-  process with no tool approach (turning, welding) is listed with its reason
-  and left in whatever setup it is already in.
-- **It never crosses components.** A plan is one part's or one component's;
-  this module sees one plan and one shape at a time.
+  process with no tool approach (welding, bending, anything but milling,
+  drilling and turning) is listed with its reason and left in whatever setup it
+  is already in.
+- **It never crosses components, or bodies.** A plan is one part's or one
+  component's; this module sees one plan and one shape at a time. In a part of
+  several bodies each body's features were checked against that body alone
+  (`features.approach`), and two bodies never share a proposed setup: setup
+  time is charged once per setup, and nothing says the bodies are clamped
+  together.
+- **A lathe and a mill never share a setup.** Turning operations are grouped
+  into lathe chuckings by the end of the part that faces the tool — the same
+  evidence, read for a spindle instead of a milling head — and milling and
+  drilling into mill setups.
 
 How a grouping is chosen
 ------------------------
@@ -41,8 +50,17 @@ the most still-uncovered operations; ties go to the one where more of those
 operations are approached head-on rather than by a tool's flank, then to a
 fixed order (+Z, −Z, +X, −X, +Y, −Y, then any other direction by name). An
 operation lands in the earliest chosen direction that reaches it head-on, else
-the earliest that reaches it at all. A greedy cover is deterministic and
-usually small; it is **not guaranteed minimal**, and the proposal says so.
+the earliest that reaches it at all.
+
+A greedy cover is not always the smallest: on a real 31-operation bracket it
+chose five directions where four reach everything. So when there are at most
+`EXACT_COVER_LIMIT` candidate directions, every smaller combination is then
+tried, and if one covers every operation the smallest is used (ties to the one
+reaching more operations head-on, then to the fixed order), its directions
+ordered the greedy way. The proposal's `cover_method` says which: `fewest`
+when the count is proven the smallest possible *for these candidate
+directions*, `greedy` when there were too many to try and it is **not
+guaranteed minimal**.
 
 The machine is a 3-axis mill: one setup per distinct direction. A 4-axis
 machine with a rotary table could hold every direction perpendicular to its
@@ -57,11 +75,14 @@ this one, it imports no costing arithmetic, and only `main.py` imports it.
 from __future__ import annotations
 
 import re
+from itertools import combinations
 
 from pydantic import BaseModel, Field, field_validator
 
 from cad_costing_agent.features.approach import (
+    BODY_NOTE,
     FLANK,
+    LATHE,
     LIMITATIONS,
     NO_APPROACH,
     PRIMARY,
@@ -86,17 +107,33 @@ APPROACH_GROUPING = "approach_direction"
 TOOL_APPROACH_PROCESSES = ("milling", "drilling")
 """Processes whose tool comes at the part along one direction per setup."""
 
+LATHE_PROCESSES = ("turning",)
+"""Processes cut with the part turning in a chuck: one chucking per end facing the tool."""
+
 MACHINE = "3_axis_mill"
+LATHE_MACHINE = "lathe"
 MACHINE_NOTE = (
     "Proposed for a 3-axis mill: the tool axis is fixed, so every distinct approach direction is "
     "its own setup. A 4-axis machine with a rotary table could reach every direction "
     "perpendicular to its rotary axis in one setup, and a 5-axis machine most directions in one "
-    "or two. Neither is modelled — this proposal does not reduce the count for them."
+    "or two. Neither is modelled — this proposal does not reduce the count for them. Turning is "
+    "proposed for a 2-axis lathe: one chucking per end of the part that has to face the tool, so "
+    "facing both ends is two chuckings, the part turned round between them. A sub-spindle or "
+    "bar feeder that does both ends in one cycle is not modelled, and a hole on the spindle axis "
+    "that a lathe would drill from the tailstock in the same chucking is still proposed on the "
+    "mill — move it by hand."
 )
+EXACT_COVER_LIMIT = 16
+"""Up to this many candidate directions, the fewest setups are found by trying every combination."""
+
 ALGORITHM_NOTE = (
     "Directions are chosen greedily — the one reaching the most remaining operations first, ties "
     "to the one approaching more of them head-on, then to the fixed order +Z, −Z, +X, −X, +Y, −Y. "
-    "Deterministic, and usually small, but not guaranteed to be the fewest setups possible."
+    f"With at most {EXACT_COVER_LIMIT} candidate directions every smaller combination is also "
+    "tried, so the count is the fewest these directions allow (cover method 'fewest'); with more, "
+    "the greedy choice stands and is not guaranteed to be the fewest setups possible (cover "
+    "method 'greedy'). Either way only the candidate directions read from the B-Rep are "
+    "considered, never an arbitrary angle."
 )
 PROPOSAL_NOTE = (
     "A proposal. Nothing in the plan changes until you apply it, and applying it moves operations "
@@ -119,12 +156,18 @@ class PlacedOperation(BaseModel):
     operation_id: str
     operation_name: str
     feature_ids: list[str]
-    access: str = Field(description="'primary' (head-on) or 'flank' (side milling).")
+    access: str = Field(
+        description="'primary' (head-on), 'flank' (cut with the side of the tool) or 'lathe' (turned)."
+    )
     evidence: str
 
 
 class ProposedSetup(BaseModel):
     position: int = Field(ge=1)
+    machine: str = Field(default=MACHINE, description="'3_axis_mill', or 'lathe' for a chucking.")
+    solid_index: int | None = Field(
+        default=None, description="The body this setup machines, for a part of several bodies."
+    )
     direction: Point3D
     direction_key: str
     direction_label: str
@@ -155,6 +198,13 @@ class SetupProposal(BaseModel):
     machine: str = MACHINE
     machine_note: str = MACHINE_NOTE
     algorithm_note: str = ALGORITHM_NOTE
+    cover_method: str = Field(
+        default="fewest",
+        description=(
+            "'fewest' when every combination of the candidate directions was tried, so no fewer "
+            "setups reach every placed operation; 'greedy' when there were too many to try."
+        ),
+    )
     note: str = PROPOSAL_NOTE
     confidence: Confidence = Confidence.LOW
     confidence_reason: str = ""
@@ -203,17 +253,12 @@ def _considered(plan: ManufacturingPlan, operation: PlannedOperation) -> tuple[b
     if not plan.in_route(operation) or plan.is_as_formed(operation):
         return False, NOT_IN_ROUTE, "not costed on the chosen route, so it is not grouped"
     process = operation.operation_type or ""
-    if process not in TOOL_APPROACH_PROCESSES:
+    if process not in TOOL_APPROACH_PROCESSES and process not in LATHE_PROCESSES:
         return (
             False,
             NOT_A_TOOL_APPROACH,
-            (
-                "turning has no milling approach: the part turns about the spindle, so it is "
-                "left where it is"
-                if process == "turning"
-                else f"'{process or 'no process'}' is not cut by a tool approaching along one "
-                "direction, so it is left where it is"
-            ),
+            f"'{process or 'no process'}' is not cut by a tool approaching along one direction "
+            "or by turning, so it is left where it is",
         )
     if not operation.feature_ids:
         return False, NO_FEATURE_LINK, "linked to no recognized feature, so no direction can be read for it"
@@ -231,6 +276,35 @@ def features_to_analyse(plan: ManufacturingPlan, features: list[Feature]) -> lis
 
 
 # ---------------------------------------------------------------- the proposal
+
+
+def turned_feature_ids(plan: ManufacturingPlan) -> frozenset[str]:
+    """The features the plan's considered turning operations cut — the ones `approach_directions` reads for a lathe."""
+    return frozenset(
+        fid
+        for operation in plan.operations
+        if (operation.operation_type or "") in LATHE_PROCESSES and _considered(plan, operation)[0]
+        for fid in operation.feature_ids
+    )
+
+
+def _key(machine: str, solid: int | None, direction: str) -> str:
+    """The proposal's setup key: the direction, kept apart per machine and per body.
+
+    A one-body part milled along +Z keys as '+Z', exactly the direction key.
+    """
+    return " ".join(
+        [*(["lathe"] if machine == LATHE_MACHINE else []), *([f"body{solid}"] if solid is not None else []), direction]
+    )
+
+
+def _label(machine: str, solid: int | None, direction: str) -> str:
+    label = direction_label(direction)
+    if machine == LATHE_MACHINE:
+        label = f"lathe, {label} end toward the tool"
+    if solid is not None:
+        label += f" — body {solid + 1}"
+    return label
 
 
 def unavailable(reason: str, *, component_id: str | None = None) -> SetupProposal:
@@ -251,6 +325,8 @@ def propose_setups(
 ) -> SetupProposal:
     """Group the plan's operations by the directions their features are reachable from."""
     by_feature = {approach.feature_id: approach for approach in approaches}
+    # setup key -> (machine, body, direction key)
+    meta: dict[str, tuple[str, int | None, str]] = {}
     unplaced: list[UnplacedOperation] = []
     # operation id -> {direction key: kind}
     coverable: dict[str, dict[str, str]] = {}
@@ -293,20 +369,24 @@ def propose_setups(
             )
             continue
 
+        machine = LATHE_MACHINE if (operation.operation_type or "") in LATHE_PROCESSES else MACHINE
+        kinds = (LATHE,) if machine == LATHE_MACHINE else (PRIMARY, FLANK)
         shared: dict[str, str] | None = None
         for approach in approaches_here:
-            reachable = {
-                c.direction_key: c.kind for c in approach.candidates if c.reachable
-            }
+            reachable = {}
             for candidate in approach.candidates:
-                if candidate.reachable:
-                    vectors.setdefault(candidate.direction_key, candidate.direction)
-                    origins.setdefault((operation.operation_id, candidate.direction_key), candidate.origin)
+                if not candidate.reachable or candidate.kind not in kinds:
+                    continue
+                key = _key(machine, approach.solid_index, candidate.direction_key)
+                meta.setdefault(key, (machine, approach.solid_index, candidate.direction_key))
+                reachable[key] = candidate.kind
+                vectors.setdefault(key, candidate.direction)
+                origins.setdefault((operation.operation_id, key), candidate.origin)
             if shared is None:
                 shared = reachable
             else:
                 shared = {
-                    key: (PRIMARY if shared[key] == PRIMARY and kind == PRIMARY else FLANK)
+                    key: (kind if shared[key] == kind else FLANK)
                     for key, kind in reachable.items()
                     if key in shared
                 }
@@ -322,25 +402,63 @@ def propose_setups(
             continue
         coverable[operation.operation_id] = shared
 
-    # Greedy cover, deterministic tie-breaks.
-    uncovered = set(coverable)
-    chosen: list[str] = []
-    while uncovered:
-        keys = sorted({key for op in uncovered for key in coverable[op]}, key=direction_order)
-        best = max(
-            keys,
-            key=lambda key: (
-                sum(1 for op in uncovered if key in coverable[op]),
-                sum(1 for op in uncovered if coverable[op].get(key) == PRIMARY),
-                -keys.index(key),
-            ),
-        )
-        chosen.append(best)
-        uncovered -= {op for op in uncovered if best in coverable[op]}
+    def order(key: str) -> tuple:
+        machine, solid, direction = meta[key]
+        return (-1 if solid is None else solid, machine == LATHE_MACHINE, direction_order(direction))
+
+    def greedy(allowed: set[str] | None) -> list[str]:
+        """Deterministic greedy cover, optionally from a given set of directions only."""
+        uncovered = set(coverable)
+        picked: list[str] = []
+        while uncovered:
+            keys = sorted(
+                {key for op in uncovered for key in coverable[op] if allowed is None or key in allowed},
+                key=order,
+            )
+            best = max(
+                keys,
+                key=lambda key: (
+                    sum(1 for op in uncovered if key in coverable[op]),
+                    sum(1 for op in uncovered if coverable[op].get(key) in (PRIMARY, LATHE)),
+                    -keys.index(key),
+                ),
+            )
+            picked.append(best)
+            uncovered -= {op for op in uncovered if best in coverable[op]}
+        return picked
+
+    chosen = greedy(None)
+    every_key = sorted({key for options in coverable.values() for key in options}, key=order)
+    cover_method = "fewest" if len(every_key) <= EXACT_COVER_LIMIT else "greedy"
+    if cover_method == "fewest" and len(chosen) > 1:
+        bit = {op: 1 << index for index, op in enumerate(sorted(coverable))}
+        everything = sum(bit.values())
+        reach = {key: sum(bit[op] for op in coverable if key in coverable[op]) for key in every_key}
+        head_on = {
+            key: sum(bit[op] for op in coverable if coverable[op].get(key) in (PRIMARY, LATHE))
+            for key in every_key
+        }
+        for size in range(1, len(chosen)):
+            best_combo: tuple[int, tuple[str, ...]] | None = None
+            for combo in combinations(every_key, size):
+                covered = 0
+                for key in combo:
+                    covered |= reach[key]
+                if covered != everything:
+                    continue
+                facing = 0
+                for key in combo:
+                    facing |= head_on[key]
+                score = bin(facing).count("1")
+                if best_combo is None or score > best_combo[0]:
+                    best_combo = (score, combo)
+            if best_combo is not None:
+                chosen = greedy(set(best_combo[1]))
+                break
 
     assignment: dict[str, str] = {}
     for operation_id, options in coverable.items():
-        head_on = [key for key in chosen if options.get(key) == PRIMARY]
+        head_on = [key for key in chosen if options.get(key) in (PRIMARY, LATHE)]
         assignment[operation_id] = head_on[0] if head_on else next(k for k in chosen if k in options)
 
     operations = {o.operation_id: o for o in plan.operations}
@@ -357,7 +475,9 @@ def propose_setups(
                     (
                         f"{fid}: {c.reason} ({c.basis})"
                         for c in by_feature[fid].candidates
-                        if c.direction_key == key and c.reachable
+                        if c.direction_key == meta[key][2]
+                        and c.reachable
+                        and (c.kind == LATHE) == (meta[key][0] == LATHE_MACHINE)
                     ),
                     fid,
                 )
@@ -373,12 +493,15 @@ def propose_setups(
                 )
             )
         first = members[0].operation_id
+        machine, solid, direction = meta[key]
         setups.append(
             ProposedSetup(
                 position=len(setups) + 1,
+                machine=machine,
+                solid_index=solid,
                 direction=vectors[key],
-                direction_key=key,
-                direction_label=direction_label(key),
+                direction_key=direction,
+                direction_label=_label(machine, solid, direction),
                 operation_ids=[o.operation_id for o in members],
                 feature_ids=[fid for o in members for fid in operations[o.operation_id].feature_ids],
                 operations=placed,
@@ -387,7 +510,10 @@ def propose_setups(
         )
 
     if not considered_count:
-        reason = "No operation in this plan is milled or drilled from a recognized feature, so there is nothing to group."
+        reason = (
+            "No operation in this plan is milled, drilled or turned from a recognized feature, so "
+            "there is nothing to group."
+        )
         confidence = Confidence.LOW
     elif weak:
         confidence = Confidence.LOW
@@ -404,11 +530,16 @@ def propose_setups(
             "checked."
         )
 
+    limitations = list(LIMITATIONS)
+    if any(approach.solid_index is not None for approach in approaches):
+        limitations.append(BODY_NOTE)
     return SetupProposal(
         component_id=component_id,
+        limitations=limitations,
         confidence=confidence,
         confidence_reason=reason,
         considered_operation_count=considered_count,
+        cover_method=cover_method,
         setups=setups,
         unplaced=unplaced,
         features=approaches,
@@ -477,9 +608,13 @@ def apply_setup_proposal(plan: ManufacturingPlan, proposal: SetupProposal) -> Ap
         setup = ManufacturingSetup(
             setup_id=setup_id,
             sequence_position=len(updated.setups) + 1,
-            name=f"Approach {proposed.direction_label}",
+            name=(
+                f"Lathe chucking, {proposed.direction_label.removeprefix('lathe, ')}"
+                if proposed.machine == LATHE_MACHINE
+                else f"Approach {proposed.direction_label}"
+            ),
             description=(
-                f"Proposed from tool approach directions ({proposal.machine}) and applied by the "
+                f"Proposed from tool approach directions ({proposed.machine}) and applied by the "
                 "engineer."
             ),
             process_context=_dominant_process(members),
@@ -487,15 +622,24 @@ def apply_setup_proposal(plan: ManufacturingPlan, proposal: SetupProposal) -> Ap
             system_operation_ids=list(proposed.operation_ids),
             system_grouping=APPROACH_GROUPING,
             system_grouping_reason=(
-                f"Every operation here machines a feature that straight rays reach along "
-                f"{proposed.direction_label}, and a 3-axis mill holds one approach direction per "
-                "setup. Proposed from the B-Rep and applied by the engineer."
+                (
+                    "Every operation here turns a feature reached from the same end of the part, "
+                    f"{proposed.direction_label.removeprefix('lathe, ')}, and a lathe chucking "
+                    "presents one end to the tool. Proposed from the B-Rep and applied by the "
+                    "engineer."
+                )
+                if proposed.machine == LATHE_MACHINE
+                else (
+                    f"Every operation here machines a feature that straight rays reach along "
+                    f"{proposed.direction_label}, and a 3-axis mill holds one approach direction "
+                    "per setup. Proposed from the B-Rep and applied by the engineer."
+                )
             ),
             system_grouping_confidence=proposal.confidence,
             system_grouping_assumptions=[
                 *(
                     f"{placed.operation_id} ({', '.join(placed.feature_ids)}), "
-                    f"{'side milled by the flank' if placed.access == FLANK else 'head-on'}: "
+                    f"{ {FLANK: 'cut by the flank', LATHE: 'turned'}.get(placed.access, 'head-on')}: "
                     f"{placed.evidence}"
                     for placed in proposed.operations
                 ),
@@ -555,5 +699,6 @@ __all__ = [
     "apply_setup_proposal",
     "features_to_analyse",
     "propose_setups",
+    "turned_feature_ids",
     "unavailable",
 ]

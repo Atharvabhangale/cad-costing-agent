@@ -1,11 +1,18 @@
 # Project Status
 
-Last updated: 2026-11-15 (boss milling; roll-up and part quotations refused while an operation is left out)
+Last updated: 2026-11-16 (setup proposal places milled bosses, wrapped fillets, turned work and multi-body parts; fewest-setup search)
 
 `CHECKPOINT.md` is a point-in-time handoff written at the Step 30 pause and is not
 updated in place; this file is the step-by-step record.
 
 ## Current stage
+
+**The setup proposal leaves far fewer operations unplaced on the real files.** Milled bosses,
+fillets no blended plane reaches, turned work (in lathe chuckings) and the bodies of a
+multi-body part are now placed with evidence, and the fewest setups are searched for. On
+`model2.stp` every one of 22 operations is placed (was 15 of 22); on `model1_1.stp` 29 of 31 in
+four setups (was 27 of 31); the two left are explained. Details in *Setup proposal: fewer
+operations left unplaced* below.
 
 **First trial on real CAD files.** Three user-supplied STEP files (a single part, a two-solid
 part and a needle-roller-bearing assembly) were run through every analysis and a costed
@@ -976,6 +983,54 @@ not SSO or OIDC and not production-grade**: no token expiry or rotation, no rate
 best-effort (non-transactional) audit write, no user-management UI (API only), and no
 simultaneous-request test of the approval sequence.
 
+### Setup proposal: fewer operations left unplaced (2026-11-16)
+
+The real-file trial's setup proposal left 4 of 31 operations unplaced on `model1_1.stp` and 7 of
+22 on `model2.stp`. Each cause was read from the B-Rep before anything was changed:
+
+- **A milled boss had no approach rule.** The 60 mm boss on `model2.stp` is now
+  `boss_axis_flank`: both directions along its axis, kind `flank` (profiling round it with a tool
+  parallel to it), ray-checked from its surface, so the end it stands on is blocked and the free
+  end is not.
+- **Lug ends and full rounds were fillets no blended plane reaches.** `model1_1.stp`'s R16 full
+  rounds (180°) and `model2.stp`'s R20 lug end were refused because the planes beside them are
+  square to their middle. A fillet that no neighbour reaches now falls back to the middle of its
+  arc — read exactly from the cylinder's U bounds, offered only up to a half turn, with the same
+  facing and ray checks — and to both directions along its axis (flank). A first version read the
+  arc from the sampled normals, which under-reads it (120° sampled on a 180° face); the exact
+  bounds replaced it.
+- **The bush in `model2.stp`'s lug is a second body that overlaps it.** Rays from the lug's
+  faces hit the bush 6 mm away in every direction. Each body of a multi-body part is now checked
+  against its own material only (`ShapeRays(shape, obstacle=solid)`, a NaN box for every other
+  face, held equal to the single-ray test), every such proposal carries a note saying so, and two
+  bodies never share a setup.
+- **Turning was left out on purpose.** Turning operations are now grouped into lathe chuckings by
+  the end of the part that faces the tool (a turned face's normal, a turned diameter either end of
+  its axis, ray-checked), kind `lathe`. Facing both ends is two chuckings; a lathe and a mill never
+  share a setup; a hole a lathe would drill from the tailstock is still proposed on the mill, and
+  the machine note says so.
+- **Greedy is not minimal.** With the new candidates the greedy cover chose five setups on
+  `model1_1.stp` where four reach everything. With at most 16 candidate directions every smaller
+  combination is now tried and the fewest used (`cover_method: "fewest"`), ordered the greedy
+  way; above that greedy stands and says so. A one-body milled proposal keys and labels exactly
+  as before.
+
+Live, on a scratch database, through `/cad/setups/propose` and `/cad/setups/apply-proposal`:
+
+| File | Before | After |
+|---|---|---|
+| `model1_1.stp` | 27 of 31 placed, 4 setups, low | 29 of 31 placed, 4 setups (+Z 10, +X 7, +Y 7, −Y 5), low, `fewest` |
+| `model2.stp` | 15 of 22 placed (3 of the 7 left out were turning or facing lines), 3 setups, low | 22 of 22 placed, 6 setups (body 1: +Z 9, +Y 7, +X 2; body 2: +X 1, lathe +X end 2, lathe −X end 1), medium |
+
+Apply created 4 and 6 setups and left OP-008 and OP-012 on `model1_1.stp` where they were. Those
+two are R20 lug ends whose arc turns through **225°**: no one 3-axis direction faces all of
+them, and along their axis one ray meets a step 5.3 mm away and the opposite lug 58.7 mm away.
+They stay unplaced with that reason ("a rotary axis about it, or cutting it across two setups,
+would reach it; neither is proposed"). On `Assembly.stp` the Drawn Cup and Needle Roller place
+every operation (4 of 4, 5 of 5, now with lathe chuckings); the cage places 5 of 79 — its windows
+face many radial directions, which is indexed rotary work this 3-axis proposal does not model,
+and each line says what blocked it.
+
 ### Boss milling, and a stricter roll-up (2026-11-15)
 
 Two follow-ups from the real-file trial, each built by an agent, reviewed and merged. Full suite
@@ -1207,7 +1262,10 @@ end, a through hole either end, a pocket's floor normal, a face's outward normal
 blended planes, and a planar face's side by the tool's flank along a direction another feature
 already needs — and checks each direction with straight rays (5 per hole end, a 3x3 grid per face)
 that must all leave the part. `setup_proposal.py` groups operations by a deterministic greedy
-cover, one setup per direction on a 3-axis mill, said not to be guaranteed minimal. **Nothing is
+cover, one setup per direction on a 3-axis mill, said not to be guaranteed minimal. *(Since
+2026-11-16 the fewest setups are searched for exactly with up to 16 directions, turned work is
+grouped into lathe chuckings, and bosses, wrapped fillets and multi-body parts have rules — see
+"Setup proposal: fewer operations left unplaced".)* **Nothing is
 applied by default**: `build_plan` still starts with one assumed setup, `POST /cad/setups/propose`
 returns the proposal beside the plan, and `POST /cad/setups/apply-proposal` recomputes it on the
 server and regroups through the existing `with_operation_in_setup` (`user_setup_id` written,
@@ -2750,6 +2808,7 @@ a fault of the comparison. It is the kind of gap this feature exists to expose.
 
 ## What has NOT been done (explicitly out of scope so far)
 
+- Setup proposals for 4-axis or 5-axis machines, indexed rotary work (a bearing cage's radial windows), a feature cut across two setups (a lug end wrapping past a half turn), tool-body or holder collision, and a hole drilled from the tailstock in a lathe chucking — the proposal leaves those operations where they are and says why
 - Editing or deleting an existing rate set version — deliberately impossible; publish a new version instead
 - CAD file parsing for formats other than STL, STEP and IGES. **Native Creo `.prt`/`.asm`/`.drw` are recognized and refused with an explanation, not supported**: the formats are proprietary, the installed OpenCASCADE has no reader for them, and no reliable open-source parser exists. Parasolid, ACIS, JT and NX native are in the same position
 - Drawing information of any kind. No views, dimensions, tolerances or PMI are read from any format, STEP included

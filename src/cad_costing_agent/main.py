@@ -5522,7 +5522,9 @@ def _setup_proposal_for(
         )
     try:
         approaches = approach_directions(
-            shape, setup_proposal.features_to_analyse(plan, list(recognition.features))
+            shape,
+            setup_proposal.features_to_analyse(plan, list(recognition.features)),
+            turned=setup_proposal.turned_feature_ids(plan),
         )
     except ApproachUnavailable as exc:
         return setup_proposal.unavailable(str(exc), component_id=component_id or None)

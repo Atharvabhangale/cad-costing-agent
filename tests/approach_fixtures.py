@@ -87,3 +87,44 @@ APPROACH_FIXTURES = {
     "bracket_with_overhung_through_hole": bracket_with_overhung_through_hole,
     "bracket_with_unreachable_blind_hole": bracket_with_unreachable_blind_hole,
 }
+
+
+# An 80 mm rib, 32 thick in Y and standing 24 mm above a full round: the bottom
+# edge is a single R16 half cylinder along X (z 0..16 round the axis at
+# y = 16, z = 16). No plane it blends into faces the way it does — the two side
+# faces are square to its middle — so only a tool parallel to its axis, coming
+# along X from either open end, profiles it. Expected: reachable along +X and
+# −X, by the flank, and along nothing else.
+def rib_with_full_round_edge() -> bytes:
+    return to_step(
+        _fuse(
+            _box(80.0, 32.0, 24.0, at=(0.0, 0.0, 16.0)),
+            _cylinder(16.0, 80.0, (0.0, 16.0, 16.0), direction=(1.0, 0.0, 0.0)),
+        )
+    )
+
+
+# Two bodies in one file: a 12 mm lug (x 0..12) with a Ø16 bore along X, and a
+# separate Ø50 × 36 bush through it, standing 12 mm proud of both lug faces.
+# The two overlap, the way a real export (model2.stp) models a bush in its lug:
+# the lug's own faces run under the bush. Checked as one piece, the bush blocks
+# the lug faces head-on; each body checked against its own material, the lug's
+# faces are clear along ±X.
+def lug_with_bush_as_two_bodies() -> bytes:
+    from OCP.BRep import BRep_Builder
+    from OCP.TopoDS import TopoDS_Compound
+
+    lug = _cut(
+        _box(12.0, 60.0, 60.0),
+        _cylinder(8.0, 40.0, (-10.0, 30.0, 30.0), direction=(1.0, 0.0, 0.0)),
+    )
+    bush = _cut(
+        _cylinder(25.0, 36.0, (-12.0, 30.0, 30.0), direction=(1.0, 0.0, 0.0)),
+        _cylinder(6.0, 50.0, (-20.0, 30.0, 30.0), direction=(1.0, 0.0, 0.0)),
+    )
+    builder = BRep_Builder()
+    compound = TopoDS_Compound()
+    builder.MakeCompound(compound)
+    builder.Add(compound, lug)
+    builder.Add(compound, bush)
+    return to_step(compound)

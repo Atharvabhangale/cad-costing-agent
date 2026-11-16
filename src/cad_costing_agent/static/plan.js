@@ -1670,7 +1670,7 @@ function approachSetupItem(setup) {
         `<li><span class="mono">${escapeHtml(placed.operation_id)}</span>
           ${escapeHtml(placed.operation_name)}
           <span class="muted">— ${escapeHtml(placed.feature_ids.join(", "))},
-          ${placed.access === "flank" ? "side milled by the tool's flank" : "head-on"}</span></li>`
+          ${placed.access === "flank" ? "cut by the tool's flank" : placed.access === "lathe" ? "turned" : "head-on"}</span></li>`
     )
     .join("");
   return `<li class="approach-setup" data-position="${setup.position}">
@@ -1710,7 +1710,7 @@ function renderApproachProposal() {
     .join("");
   box.innerHTML =
     `<p class="hint"><strong>${proposal.setups.length} setup(s) proposed</strong> for
-      ${proposal.considered_operation_count} milled or drilled operation(s) ·
+      ${proposal.considered_operation_count} milled, drilled or turned operation(s) ·
       confidence <strong>${escapeHtml(proposal.confidence)}</strong> —
       ${escapeHtml(proposal.confidence_reason)}</p>` +
     (stale

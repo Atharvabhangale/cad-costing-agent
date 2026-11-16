@@ -33,13 +33,35 @@ above. Every candidate is read from the B-Rep, never assumed:
 - **a fillet or chamfer** — the outward normals of the planar faces it blends
   between, read from the edges it shares with them. Only planes it faces
   toward count: the end faces a blend merely meets are perpendicular to it,
-  and a tool along them would run down its length.
+  and a tool along them would run down its length. When none of those is
+  reachable — a rounded lug end that wraps more than a quarter turn, a full
+  round on a rib — a fillet whose face is a cylinder is also offered both
+  directions along that cylinder's axis, labelled `flank`: a tool whose axis is
+  parallel to the fillet's traces its arc with the side of the cutter, the way
+  an outside profile's corner radius is cut.
+- **a milled boss** (an external cylinder milled, not turned) — both directions
+  along its axis, labelled `flank`: profiling round it with a tool parallel to
+  its axis. The free end is the one whose rays leave the part; the end the boss
+  stands on is blocked by the material under it.
+- **a turned feature** (only for the features of turning operations, named by
+  the caller) — labelled `lathe`, never `primary` or `flank`. A turned
+  cylinder is offered both directions along its axis and a turned face its
+  outward normal; the direction is the end of the part that faces the tool,
+  away from the chuck, and the rays check that end is open.
 
 Features with no approach rule are reported with the reason rather than
 guessed at: a hole whose ends the recognizer could not classify, an enclosed
-void, an internal cylinder that no hole rule claimed, an external cylinder
-(turning has no milling approach; the proposal leaves turned work out before
-it gets here), or a blend with no planar neighbour.
+void, an internal cylinder that no hole rule claimed, or a blend with no planar
+neighbour and no cylindrical face.
+
+A part of several bodies
+------------------------
+A multi-body part's bodies are checked one at a time: each feature's rays meet
+only the material of its own body (`solid_index`). A bush modelled sitting in a
+lug would otherwise block every face of the lug it passes in front of, as if
+the two were one piece that was machined after they were fitted. Whether they
+are — welded, pressed in, or made apart — the file does not say, and every
+proposal for such a part says which assumption was made.
 
 The access check
 ----------------
@@ -86,6 +108,7 @@ PERPENDICULAR = 1e-6
 
 PRIMARY = "primary"
 FLANK = "flank"
+LATHE = "lathe"
 
 REACHABLE = "reachable"
 UNREACHABLE = "unreachable"
@@ -112,6 +135,12 @@ LIMITATIONS = (
     "clear here.",
 )
 
+BODY_NOTE = (
+    "This part has several bodies, and each was checked against its own material only, as if "
+    "machined before they are joined or fitted. If a body is welded or fitted to another before "
+    "machining, the other body may block a direction reported clear here."
+)
+
 
 class ApproachUnavailable(ValueError):
     """The file carries no exact geometry to cast rays against."""
@@ -127,7 +156,9 @@ class ApproachCandidate(BaseModel):
         description=(
             "'primary' when the direction is the feature's own (a hole's open end, a floor or "
             "face normal, a blended face's normal); 'flank' for a planar face side-milled by a "
-            "tool whose axis lies in its plane."
+            "tool whose axis lies in its plane, or a fillet or boss profiled by a tool "
+            "parallel to its axis; 'lathe' for a turned feature, the direction being the end "
+            "of the part that faces the tool."
         )
     )
     basis: str = Field(description="The B-Rep fact this candidate was read from.")
@@ -150,6 +181,13 @@ class FeatureApproach(BaseModel):
     feature_type: str
     subtype: str | None = None
     status: str = Field(description="'reachable', 'unreachable' or 'no_approach'.")
+    solid_index: int | None = Field(
+        default=None,
+        description=(
+            "The body whose material alone was checked, for a part of several bodies; null for "
+            "a part of one body."
+        ),
+    )
     rule: str = Field(description="Which approach rule applied, e.g. 'blind_hole_open_end'.")
     reason: str
     candidates: list[ApproachCandidate] = Field(default_factory=list)
@@ -509,7 +547,171 @@ def _plane(model: _Shape, feature: Feature) -> FeatureApproach:
     return _finish(feature, "plane_outward_normal", [candidate])
 
 
+def _axis_candidates(model: _Shape, feature: Feature, *, kind: str, basis: str) -> list[ApproachCandidate]:
+    """Both directions along the axis of the feature's cylindrical face(s), checked from its surface."""
+    faces = [i for i in feature.source_faces if model.describe(i)["type"] == "cylinder"]
+    if not faces:
+        return []
+    axis = _unit(model.describe(faces[0])["axis"])
+    origins, _ = _face_origins(model, faces)
+    if not origins:
+        return []
+    return [
+        _check(model, direction=direction, kind=kind, basis=basis, origins=origins)
+        for direction in (axis, (-axis[0], -axis[1], -axis[2]))
+    ]
+
+
+def _arc_middle(model: _Shape, feature: Feature):
+    """(direction, degrees) at the middle of the arc a cylindrical fillet turns through, or None.
+
+    Read exactly from the B-Rep: a cylinder's U parameter is its angle, so the
+    face's U bounds are the arc, and the outward normal at the middle U is the
+    direction every point of it faces. Up to a half turn every point faces a
+    tool along it (the two edges of a half round square to it); past a half
+    turn no single direction does, and the direction is None beside the arc. A
+    fillet of more than one face is not read (None).
+    """
+    faces = [i for i in feature.source_faces if model.describe(i)["type"] == "cylinder"]
+    if len(faces) != 1 or len(feature.source_faces) != 1:
+        return None
+    from OCP.BRepAdaptor import BRepAdaptor_Surface
+    from OCP.BRepLProp import BRepLProp_SLProps
+    from OCP.BRepTools import BRepTools
+    from OCP.TopAbs import TopAbs_Orientation
+
+    face = model.face(faces[0])
+    u0, u1, v0, v1 = BRepTools.UVBounds_s(face)
+    arc = u1 - u0
+    if arc <= 0:
+        return None
+    if arc > math.pi + 1e-6:
+        return None, math.degrees(arc)
+    props = BRepLProp_SLProps(BRepAdaptor_Surface(face), (u0 + u1) / 2.0, (v0 + v1) / 2.0, 1, 1e-7)
+    if not props.IsNormalDefined():
+        return None
+    n = props.Normal()
+    normal = (n.X(), n.Y(), n.Z())
+    if face.Orientation() == TopAbs_Orientation.TopAbs_REVERSED:
+        normal = (-normal[0], -normal[1], -normal[2])
+    return _unit(tuple(_clean(c) for c in normal)), math.degrees(arc)
+
+
 def _blend(model: _Shape, feature: Feature) -> FeatureApproach:
+    found = _blend_by_neighbours(model, feature)
+    if found.status == REACHABLE or feature.feature_type is not FeatureType.FILLET:
+        return found
+    extra: list[ApproachCandidate] = []
+    middle = _arc_middle(model, feature)
+    if (
+        middle is not None
+        and middle[0] is not None
+        and not any(_same(middle[0], c.direction.as_tuple()) for c in found.candidates)
+    ):
+        origins, normals = _face_origins(model, feature.source_faces)
+        extra.append(
+            _check(
+                model,
+                direction=middle[0],
+                kind=PRIMARY,
+                basis=(
+                    f"the middle of the {middle[1]:.0f}° arc the fillet turns through: every "
+                    "sampled point of it faces a tool from here — offered because no plane it "
+                    "blends into reaches it"
+                ),
+                origins=origins,
+                facing_normals=normals,
+            )
+        )
+    axial = _axis_candidates(
+        model,
+        feature,
+        kind=FLANK,
+        basis=(
+            "profiling the fillet's arc: a tool whose axis is parallel to the fillet's cuts it "
+            "with its flank — offered because no plane it blends into reaches it"
+        ),
+    )
+    if not axial and not extra:
+        return found
+    result = _finish(feature, "fillet_fallback", [*found.candidates, *extra, *axial])
+    if result.status != REACHABLE and middle is not None and middle[0] is None:
+        result = result.model_copy(
+            update={
+                "reason": (
+                    f"its arc turns through {middle[1]:.0f}° about its axis, more than a half turn, "
+                    "so no one direction of a 3-axis mill faces all of it, and a tool along its "
+                    "axis is blocked. A rotary axis about it, or cutting it across two setups, "
+                    "would reach it; neither is proposed, so place it by hand. "
+                    + result.reason
+                )
+            }
+        )
+    return result
+
+
+def _boss(model: _Shape, feature: Feature) -> FeatureApproach:
+    if feature.subtype != "shaft":
+        return _no_approach(
+            feature,
+            "cylinder_no_approach",
+            "an internal or unclassified cylinder that no hole rule claimed has no milling "
+            "approach rule",
+        )
+    candidates = _axis_candidates(
+        model,
+        feature,
+        kind=FLANK,
+        basis=(
+            "profiling round the boss: a tool whose axis is parallel to the boss's cuts its "
+            "outside with the flank, from the boss's free end"
+        ),
+    )
+    if not candidates:
+        return _no_approach(
+            feature, "boss_without_cylinder_face", "the boss's cylindrical face was not found on the B-Rep"
+        )
+    return _finish(feature, "boss_axis_flank", candidates)
+
+
+def _turned(model: _Shape, feature: Feature) -> FeatureApproach:
+    """A turned feature: which end of the part must face the tool, away from the chuck."""
+    first = model.describe(feature.source_faces[0]) if feature.source_faces else {"type": "other"}
+    if first["type"] == "plane":
+        normal = _unit(first["normal"])
+        origins, normals = _face_origins(model, feature.source_faces[:1])
+        candidate = _check(
+            model,
+            direction=normal,
+            kind=LATHE,
+            basis=(
+                f"face {feature.source_faces[0]} is faced square to the spindle, so this end of "
+                "the part faces the tool"
+            ),
+            origins=origins,
+            facing_normals=normals,
+        )
+        return _finish(feature, "turned_face_normal", [candidate])
+    candidates = _axis_candidates(
+        model,
+        feature,
+        kind=LATHE,
+        basis=(
+            "turned about this cylinder's axis: the tool reaches it from this end of the part, "
+            "with the chuck holding the other"
+        ),
+    )
+    if not candidates:
+        return _no_approach(
+            feature,
+            "turned_without_rule",
+            f"no lathe approach rule for a turned {feature.feature_type.value} without a planar or "
+            "cylindrical face",
+        )
+    return _finish(feature, "turned_about_axis", candidates)
+
+
+def _blend_by_neighbours(model: _Shape, feature: Feature) -> FeatureApproach:
     neighbours = model.planar_neighbour_normals(feature.source_faces)
     if not neighbours:
         return _no_approach(
@@ -611,56 +813,97 @@ _RULES = {
 }
 
 
-def approach_directions(shape, features: list[Feature]) -> list[FeatureApproach]:
+def _solids(shape) -> list:
+    """The shape's solids in the order `topology.build_topology` numbers them."""
+    from OCP.TopAbs import TopAbs_ShapeEnum
+    from OCP.TopExp import TopExp_Explorer
+
+    found = []
+    explorer = TopExp_Explorer(shape, TopAbs_ShapeEnum.TopAbs_SOLID)
+    while explorer.More():
+        found.append(explorer.Current())
+        explorer.Next()
+    return found
+
+
+def approach_directions(
+    shape, features: list[Feature], *, turned: frozenset[str] | set[str] = frozenset()
+) -> list[FeatureApproach]:
     """Candidate approach directions and the access check, for each feature given.
 
     `shape` must be the shape these features were recognized from, so that
     their `source_faces` index into it. Faceted features carry no faces to read
-    and are refused.
+    and are refused. `turned` names the features a turning operation cuts;
+    those get the lathe rule, every other feature a milling or drilling rule.
     """
     if any(feature.source_type != "brep" for feature in features):
         raise ApproachUnavailable(
             "Approach directions need exact B-Rep faces; features reconstructed from polygons "
             "carry none to cast rays from."
         )
-    model = _Shape(shape)
+    whole = _Shape(shape)
+    solids = _solids(shape)
+    several = len(solids) > 1
+    per_body: dict[int, _Shape] = {}
+
+    def model_for(feature: Feature) -> _Shape:
+        if not several or not 0 <= feature.solid_index < len(solids):
+            return whole
+        if feature.solid_index not in per_body:
+            per_body[feature.solid_index] = _Shape(shape, obstacle=solids[feature.solid_index])
+        return per_body[feature.solid_index]
+
     results: list[FeatureApproach] = []
     for feature in features:
-        rule = _RULES.get(feature.feature_type)
-        if rule is None:
-            results.append(
-                _no_approach(
+        model = model_for(feature)
+        if feature.feature_id in turned:
+            found = _turned(model, feature)
+        elif feature.feature_type is FeatureType.CYLINDER:
+            found = _boss(model, feature)
+        else:
+            rule = _RULES.get(feature.feature_type)
+            found = (
+                rule(model, feature)
+                if rule is not None
+                else _no_approach(
                     feature,
                     f"{feature.feature_type.value}_no_approach",
-                    (
-                        "an external or unclassified cylinder has no milling approach rule; "
-                        "turned work has no milling approach at all"
-                    )
-                    if feature.feature_type is FeatureType.CYLINDER
-                    else f"no approach rule for a {feature.feature_type.value}",
+                    f"no approach rule for a {feature.feature_type.value}",
                 )
             )
-            continue
-        results.append(rule(model, feature))
+        results.append(found)
 
-    # Flank candidates only along directions some feature already needs, so a
-    # side face never invents a setup of its own by being side-milled.
-    universe: list[tuple] = []
+    # Flank candidates only along directions some feature of the same body
+    # already needs, so a side face never invents a setup of its own by being
+    # side-milled.
+    by_id = {feature.feature_id: feature for feature in features}
+    universes: dict[int, list[tuple]] = {}
     for approach in results:
+        universe = universes.setdefault(by_id[approach.feature_id].solid_index, [])
         for candidate in approach.candidates:
             if candidate.kind != PRIMARY or not candidate.reachable:
                 continue
             vector = candidate.direction.as_tuple()
             if not any(_same(vector, other) for other in universe):
                 universe.append(vector)
-    universe.sort(key=lambda v: direction_order(direction_key(v)))
+    for universe in universes.values():
+        universe.sort(key=lambda v: direction_order(direction_key(v)))
 
-    by_id = {feature.feature_id: feature for feature in features}
-    return [
-        _flank_candidates(model, by_id[a.feature_id], a, universe)
+    finished = [
+        _flank_candidates(
+            model_for(by_id[a.feature_id]),
+            by_id[a.feature_id],
+            a,
+            universes[by_id[a.feature_id].solid_index],
+        )
         if a.rule == "plane_outward_normal"
         else a
         for a in results
+    ]
+    if not several:
+        return finished
+    return [
+        a.model_copy(update={"solid_index": by_id[a.feature_id].solid_index}) for a in finished
     ]
 
 
@@ -748,6 +991,8 @@ def shape_and_features(data: bytes, source_format: str, *, component_id: str | N
 
 
 __all__ = [
+    "BODY_NOTE",
+    "LATHE",
     "ApproachCandidate",
     "ApproachUnavailable",
     "FeatureApproach",
