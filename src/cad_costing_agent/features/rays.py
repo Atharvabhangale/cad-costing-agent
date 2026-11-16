@@ -177,6 +177,30 @@ class ShapeRays:
                 return found
         return []
 
+    def arc_and_middle_normal(self, index: int):
+        """(U span in radians, outward normal at the middle of the face), or None.
+
+        For a cylinder the U parameter is the angle about its axis, so the span
+        is the arc the face turns through.
+        """
+        from OCP.BRepAdaptor import BRepAdaptor_Surface
+        from OCP.BRepLProp import BRepLProp_SLProps
+        from OCP.BRepTools import BRepTools
+        from OCP.TopAbs import TopAbs_Orientation
+
+        face = self.face(index)
+        if face is None:
+            return None
+        u0, u1, v0, v1 = BRepTools.UVBounds_s(face)
+        props = BRepLProp_SLProps(BRepAdaptor_Surface(face), (u0 + u1) / 2.0, (v0 + v1) / 2.0, 1, 1e-7)
+        if not props.IsNormalDefined():
+            return None
+        n = props.Normal()
+        normal = (n.X(), n.Y(), n.Z())
+        if face.Orientation() == TopAbs_Orientation.TopAbs_REVERSED:
+            normal = (-normal[0], -normal[1], -normal[2])
+        return u1 - u0, _unit(normal)
+
     def planar_neighbour_normals(self, face_indices: list[int]) -> list[tuple[int, tuple]]:
         """(face index, outward normal) of each plane sharing an edge with these faces."""
         from OCP.TopAbs import TopAbs_ShapeEnum

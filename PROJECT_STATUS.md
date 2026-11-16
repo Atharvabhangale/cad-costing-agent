@@ -1031,6 +1031,11 @@ every operation (4 of 4, 5 of 5, now with lathe chuckings); the cage places 5 of
 face many radial directions, which is indexed rotary work this 3-axis proposal does not model,
 and each line says what blocked it.
 
+Full suite: **2974 passed, 8 skipped** (the one structural failure on the first run — the arc
+was read with `BRepLProp_SLProps` inside `approach.py`, where only `features/rays.py` may sample
+a surface — was fixed by moving that reading into `ShapeRays.arc_and_middle_normal`). The
+proposal panel in the browser was not driven; only its wording changed.
+
 ### Boss milling, and a stricter roll-up (2026-11-15)
 
 Two follow-ups from the real-file trial, each built by an agent, reviewed and merged. Full suite

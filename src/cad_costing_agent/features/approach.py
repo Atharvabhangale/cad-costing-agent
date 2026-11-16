@@ -575,25 +575,14 @@ def _arc_middle(model: _Shape, feature: Feature):
     faces = [i for i in feature.source_faces if model.describe(i)["type"] == "cylinder"]
     if len(faces) != 1 or len(feature.source_faces) != 1:
         return None
-    from OCP.BRepAdaptor import BRepAdaptor_Surface
-    from OCP.BRepLProp import BRepLProp_SLProps
-    from OCP.BRepTools import BRepTools
-    from OCP.TopAbs import TopAbs_Orientation
-
-    face = model.face(faces[0])
-    u0, u1, v0, v1 = BRepTools.UVBounds_s(face)
-    arc = u1 - u0
+    found = model.arc_and_middle_normal(faces[0])
+    if found is None:
+        return None
+    arc, normal = found
     if arc <= 0:
         return None
     if arc > math.pi + 1e-6:
         return None, math.degrees(arc)
-    props = BRepLProp_SLProps(BRepAdaptor_Surface(face), (u0 + u1) / 2.0, (v0 + v1) / 2.0, 1, 1e-7)
-    if not props.IsNormalDefined():
-        return None
-    n = props.Normal()
-    normal = (n.X(), n.Y(), n.Z())
-    if face.Orientation() == TopAbs_Orientation.TopAbs_REVERSED:
-        normal = (-normal[0], -normal[1], -normal[2])
     return _unit(tuple(_clean(c) for c in normal)), math.degrees(arc)
 
 
