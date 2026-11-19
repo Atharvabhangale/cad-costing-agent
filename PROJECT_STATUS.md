@@ -1027,6 +1027,9 @@ The 36 positions are the cage's 36 wall directions: the two walls of each window
 about 3° apart and are not merged, so 35 moves likely over-states a shop that cuts both walls of
 a window from one position (about 17). Merging near directions is not done.
 
+Full suite: **2987 passed, 8 skipped** (the machine-note test was reworded after the run
+started; its file was re-run green).
+
 ### Setup proposal on a 4-axis indexer (2026-11-16)
 
 The cage's window walls face each other across their 3.2 mm windows, so head-on every ray meets

@@ -18,7 +18,7 @@ uvicorn cad_costing_agent.main:app --reload
 # whatever it is pointed at.
 CAD_COSTING_DATABASE_URL=sqlite:///./scratch.db uvicorn cad_costing_agent.main:app --port 8710
 
-# Tests (2988 collected; measured without cadmodels/: 2980 pass, 8 skip; full run about 4-12 min)
+# Tests (2995 collected; measured without cadmodels/: 2987 pass, 8 skip; full run about 4-12 min)
 # cadquery-ocp must stay below 8 (pinned): 8.x drops names this code imports.
 # A git worktree has no cadmodels/ (git-ignored), so tests needing real models
 # skip there (8 skips instead of 1). Judge a branch by a run in the main tree.
