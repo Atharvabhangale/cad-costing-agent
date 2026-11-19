@@ -5490,6 +5490,27 @@ def _plan_from_form(manufacturing_plan: str) -> ManufacturingPlan:
         raise HTTPException(status_code=400, detail=exc.errors(include_url=False)) from exc
 
 
+def _index_timer(session: Session, plan: ManufacturingPlan):
+    """`estimate_index_time` under the time profile the plan's operations were estimated with.
+
+    One profile recorded across them is that profile; none, or several, is the
+    built-in baseline — which states no index time, so the line needs input.
+    """
+    from functools import partial
+
+    from cad_costing_agent.operation_time import estimate_index_time
+
+    recorded = {
+        (o.system_time_profile_id, o.system_time_profile_version)
+        for o in plan.operations
+        if o.system_time_profile_id
+    }
+    profile = (
+        _resolve_time_profile(session, *next(iter(recorded))) if len(recorded) == 1 else None
+    )
+    return partial(estimate_index_time, profile=profile)
+
+
 def _setup_proposal_for(
     data: bytes,
     filename: str,
@@ -5497,6 +5518,7 @@ def _setup_proposal_for(
     component_id: str | None,
     machine: str = setup_proposal.MACHINE,
     rotary_axis: str | None = None,
+    session: Session | None = None,
 ) -> setup_proposal.SetupProposal:
     if machine not in setup_proposal.MILLING_MACHINES:
         raise HTTPException(
@@ -5553,6 +5575,7 @@ def _setup_proposal_for(
                 component_id=component_id or None,
                 machine=machine,
                 rotary_axis=axis,
+                index_time=_index_timer(session, plan) if session is not None else None,
             )
             for axis in axes
         }
@@ -5590,6 +5613,7 @@ async def cad_setups_propose(
             "most operations is used, and the proposal says so."
         ),
     ),
+    session: Session = Depends(get_session),
 ) -> setup_proposal.SetupProposal:
     """Propose setups from the directions a tool must approach each feature from.
 
@@ -5607,7 +5631,9 @@ async def cad_setups_propose(
     """
     data = await file.read()
     plan = _plan_from_form(manufacturing_plan)
-    return _setup_proposal_for(data, file.filename or "", plan, component_id, machine, rotary_axis)
+    return _setup_proposal_for(
+        data, file.filename or "", plan, component_id, machine, rotary_axis, session
+    )
 
 
 @app.post("/cad/setups/apply-proposal", response_model=setup_proposal.AppliedProposal)
@@ -5617,6 +5643,7 @@ async def cad_setups_apply_proposal(
     component_id: str | None = Form(None),
     machine: str = Form("3_axis_mill"),
     rotary_axis: str | None = Form(None),
+    session: Session = Depends(get_session),
 ) -> setup_proposal.AppliedProposal:
     """Apply the approach-direction proposal to this plan, because a person asked.
 
@@ -5629,7 +5656,7 @@ async def cad_setups_apply_proposal(
     data = await file.read()
     plan = _plan_from_form(manufacturing_plan)
     proposal = _setup_proposal_for(
-        data, file.filename or "", plan, component_id, machine, rotary_axis
+        data, file.filename or "", plan, component_id, machine, rotary_axis, session
     )
     try:
         return setup_proposal.apply_setup_proposal(plan, proposal)

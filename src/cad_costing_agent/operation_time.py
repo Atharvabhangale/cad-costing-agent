@@ -457,6 +457,20 @@ class TimeAssumptions(BaseModel):
         ),
     )
 
+    # --- 4-axis indexing ---
+    # None by default: the seeded profile times no index move, so an index line
+    # under it needs a time entered. Per part, so it is cycle time — never the
+    # setup, which is charged once per batch.
+    rotary_index_minutes_per_position: float | None = Field(
+        default=None,
+        gt=0,
+        le=60.0,
+        description=(
+            "Time for a 4-axis indexer to unclamp, turn to the next position and clamp again, "
+            "once per index move, per part. Added to cycle time, never to the setup."
+        ),
+    )
+
     # --- sheet cutting and bending ---
     #
     # None by default, like welding: the built-in baseline describes a
@@ -1423,6 +1437,96 @@ _WELDING_HANDLING = (
 )
 
 
+INDEX_METHOD = "rotary_index_time_v1"
+
+
+def estimate_index_time(
+    index_moves: int,
+    *,
+    assumptions: TimeAssumptions | None = None,
+    profile=None,
+    suggestion_confidence: Confidence | None = None,
+) -> OperationTimeEstimate:
+    """The time a 4-axis indexer spends turning between positions, per part.
+
+    cycle = index_moves x `rotary_index_minutes_per_position`. The moves are the
+    ones between the positions a setup proposal found; a return to the loading
+    position is not counted, and every estimate says so. No setup of its own:
+    the indexed setup's fixturing is already its setup. A profile that states no
+    index time gives `needs_user_input`, never a default.
+    """
+    if assumptions is not None:
+        profile = None
+    a = assumptions if assumptions is not None else _assumptions_of(profile)
+    if index_moves < 1:
+        return _needs_input(
+            "There is no index move to time: the setup is cut at one position.",
+            ["index_moves"],
+            a.is_illustrative,
+            profile,
+        )
+    per_move = a.rotary_index_minutes_per_position
+    if per_move is None:
+        return _needs_input(
+            f"The time profile states no index time, so the {index_moves} index move(s) per part "
+            "are not timed. Enter a cycle time for this line, or use a time profile that states "
+            "rotary_index_minutes_per_position. No index time is assumed.",
+            ["rotary_index_minutes_per_position"],
+            a.is_illustrative,
+            profile,
+        )
+    cycle = index_moves * per_move
+    parameters = {"index_moves": float(index_moves), "rotary_index_minutes_per_position": per_move}
+    evidence = [f"{index_moves} index move(s) per part, between the positions the setup proposal found"]
+    formula = [
+        f"cycle = {index_moves} move(s) x {per_move:g} min per move (unclamp, turn, clamp) = "
+        f"{cycle:.6f} min per part",
+        "a return to the loading position after the last cut is not counted",
+        "no setup of its own: the indexed setup's fixturing is its setup",
+    ]
+    if _rounds_to_nothing(cycle, "milling"):
+        return OperationTimeEstimate(
+            time_status=TimeStatus.NEEDS_USER_INPUT,
+            estimated=False,
+            method=INDEX_METHOD,
+            reason=(
+                f"The index time comes to {cycle:.6f} min per part, which rounds to 0 at the "
+                f"{time_resolution_minutes('milling'):g} min an estimate is reported to. Enter a "
+                "cycle time for this line. No minimum time is assumed."
+            ),
+            evidence=evidence,
+            assumptions=formula,
+            missing=["cycle_time_minutes"],
+            is_illustrative=a.is_illustrative,
+            parameters={**parameters, "unrounded_cycle_time_minutes": round(cycle, 9)},
+            **_provenance(profile),
+        )
+    confidence = (
+        METHOD_CONFIDENCE_CEILING
+        if suggestion_confidence is None
+        else _weakest(suggestion_confidence, METHOD_CONFIDENCE_CEILING)
+    )
+    cycle = _round(cycle)
+    return OperationTimeEstimate(
+        time_status=TimeStatus.ESTIMATED,
+        estimated=True,
+        setup_time_minutes=0.0,
+        cycle_time_minutes=cycle,
+        total_time_minutes=cycle,
+        confidence=confidence,
+        method=INDEX_METHOD,
+        reason=(
+            f"{index_moves} index move(s) per part at {per_move:g} min each, charged per part "
+            "like any cycle time."
+        ),
+        evidence=evidence,
+        assumptions=formula,
+        is_illustrative=a.is_illustrative,
+        parameters=parameters,
+        **_provenance(profile),
+    )
+
+
 def _welding(weld: WeldSpec | None, a: TimeAssumptions):
     """One described weld's time — arc time, plus any per-weld handling the
     profile states — or the reason none can be given."""
@@ -2248,6 +2352,8 @@ def estimate_for_suggestion(
 
 __all__ = [
     "DEFAULT_ASSUMPTIONS",
+    "INDEX_METHOD",
+    "estimate_index_time",
     "DrillingOption",
     "drilling_options",
     "drilling_steps",

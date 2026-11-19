@@ -1,11 +1,15 @@
 # Project Status
 
-Last updated: 2026-11-16 (setup proposal: a 4-axis indexer the engineer can choose; earlier the same day bosses, wrapped fillets, turned work, multi-body parts, fewest-setup search)
+Last updated: 2026-11-19 (4-axis index time charged per part; on 2026-11-16 the 4-axis indexer, bosses, wrapped fillets, turned work, multi-body parts, fewest-setup search)
 
 `CHECKPOINT.md` is a point-in-time handoff written at the Step 30 pause and is not
 updated in place; this file is the step-by-step record.
 
 ## Current stage
+
+**A 4-axis indexer's moves are timed per part.** Applying an indexer proposal adds an index line,
+timed as moves between positions x the time profile's index time, and charged per part like any
+cycle time. Details in *Index time on the 4-axis indexer* below.
 
 **A 4-axis indexer can be chosen for the setup proposal.** On `Assembly.stp`'s needle-roller
 cage it places 41 of 79 operations in three setups — all 36 window walls in one setup indexed
@@ -988,6 +992,41 @@ not SSO or OIDC and not production-grade**: no token expiry or rotation, no rate
 best-effort (non-transactional) audit write, no user-management UI (API only), and no
 simultaneous-request test of the approval sequence.
 
+### Index time on the 4-axis indexer (2026-11-19)
+
+Asked for "the index time in the setup estimate". Setup time here is charged once per batch and
+cycle time x quantity (`operation_costing.py`), while a rotary table turns between positions on
+every part — in the setup, the index time of ten parts would have been charged once. Asked, the
+user chose per part.
+
+- `TimeAssumptions.rotary_index_minutes_per_position` (None by default; the seeded profile is
+  unchanged) and `operation_time.estimate_index_time` (`rotary_index_time_v1`): cycle = (positions
+  - 1) x that figure, setup 0, and every estimate says a return to the loading position is not
+  counted. No figure is needs-input naming the parameter; a cycle that reports as 0.00 is refused
+  like any other.
+- The indexer proposal carries `index_moves_per_part` and `index_time` on each indexed setup,
+  timed under the one profile the plan's operations were estimated with (none or several: the
+  built-in baseline). Applying adds `<setup_id>-INDEX` — a pending milling line linked to no
+  feature, its estimate uncommitted, so it is listed as left out until accepted or typed (and a
+  quotation is refused meanwhile). `estimate_missing_times` leaves it alone. The setup's own
+  estimate is still the fixturing baseline. The 3-axis proposal adds nothing.
+- `scripts/publish_illustrative_indexer_time_profile.py` publishes `illustrative-indexer-2026`
+  1.0.0: the baseline unchanged plus 0.05 min (3 s) per move, ESTIMATED with no source,
+  illustrative. The time editor has the field; the proposal card shows the line it will add.
+
+Live (scratch database, script run twice: published, then "Already published"), the cage of
+`Assembly.stp` on the indexer about Z: 36 positions, 35 moves per part. Under the baseline the
+line is added needing a time ("The time profile states no index time…"). Under
+`illustrative-indexer-2026`: 1.75 min per part, the setup estimate still 10.0 min. With every
+time accepted, `poc-default`, through `/operations/plan-cost-preview`: at 1 off 1,099.83 against
+1,047.33 without the line (run +52.50, setup 900.00 both); at 10 off 2,898.33 against 2,373.33
+(run +525.00, setup unchanged) — the index time scales with quantity. In the browser the card
+shows "Index line, added on apply — 2 move(s) per part: 0.1 min per part" on the test ring.
+
+The 36 positions are the cage's 36 wall directions: the two walls of each window face directions
+about 3° apart and are not merged, so 35 moves likely over-states a shop that cuts both walls of
+a window from one position (about 17). Merging near directions is not done.
+
 ### Setup proposal on a 4-axis indexer (2026-11-16)
 
 The cage's window walls face each other across their 3.2 mm windows, so head-on every ray meets
@@ -1007,9 +1046,9 @@ axis in one clamping.
 - Every mill direction square to the axis keys into one setup per body, labelled "4-axis,
   indexed about Z", with `index_positions` — the directions its operations are cut from. A
   direction along the axis is still its own setup; lathe chuckings are unchanged.
-- The machine note says what is not modelled: the time to index between positions (the setup's
-  estimate is the same baseline any setup gets), continuous 4-axis cutting, the table's reach and
-  clearance, and how the part is held on it.
+- The machine note says what is not modelled: continuous 4-axis cutting, the table's reach and
+  clearance, and how the part is held on it. (Index time was not estimated at first; since
+  2026-11-19 it is, per part — see *Index time on the 4-axis indexer*.)
 - The card has a *Machine* select and a *Rotary axis* select (enabled only for the indexer);
   changing either clears a proposal made for the other. Driven in a browser on a test ring: the
   indexer's three setups and the axis reason rendered, no page errors.
@@ -2866,7 +2905,7 @@ a fault of the comparison. It is the kind of gap this feature exists to expose.
 
 ## What has NOT been done (explicitly out of scope so far)
 
-- Setup proposals for 5-axis or continuous 4-axis machines, index time on the 4-axis indexer, a feature cut across two setups (a lug end wrapping past a half turn), tool-body or holder collision, and a hole drilled from the tailstock in a lathe chucking — the proposal leaves those operations where they are and says why
+- Setup proposals for 5-axis or continuous 4-axis machines, merging near-identical index positions, a feature cut across two setups (a lug end wrapping past a half turn), tool-body or holder collision, and a hole drilled from the tailstock in a lathe chucking — the proposal leaves those operations where they are and says why
 - Editing or deleting an existing rate set version — deliberately impossible; publish a new version instead
 - CAD file parsing for formats other than STL, STEP and IGES. **Native Creo `.prt`/`.asm`/`.drw` are recognized and refused with an explanation, not supported**: the formats are proprietary, the installed OpenCASCADE has no reader for them, and no reliable open-source parser exists. Parasolid, ACIS, JT and NX native are in the same position
 - Drawing information of any kind. No views, dimensions, tolerances or PMI are read from any format, STEP included

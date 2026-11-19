@@ -500,7 +500,8 @@ def test_a_4_axis_indexer_places_every_window_wall_in_one_setup():
     # Directions along the rotary axis are still their own setups.
     assert {s.direction_key for s in proposal.setups if s.machine == "3_axis_mill"} == {"+Z", "-Z"}
     assert "about the Z axis" in proposal.machine_note
-    assert "index between positions is not estimated" in proposal.machine_note
+    assert "index line timed per part" in proposal.machine_note
+    assert "never put in the setup" in proposal.machine_note
     assert proposal.confidence is Confidence.MEDIUM
 
 
@@ -572,6 +573,145 @@ def test_without_the_machine_field_the_response_is_the_3_axis_one():
         data={"manufacturing_plan": plan.model_dump_json(), "machine": "3_axis_mill"},
     )
     assert plain.status_code == 200 and plain.content == named.content
+
+
+# ----------------------------------------------------------- index time, per part
+
+
+def _indexer_profile(minutes: float = 0.05):
+    """Publish the baseline plus an index time, as a shop would, and return it as stored."""
+    from cad_costing_agent.time_profiles import TimeProfile
+
+    baseline = client.get("/time-profiles/poc-baseline-time").json()["assumptions"]
+    body = {
+        "time_profile_id": "indexer-shop-time", "name": "Indexer shop", "version": "1.0.0",
+        "description": "test", "is_illustrative": True,
+        "assumptions": {**baseline, "rotary_index_minutes_per_position": minutes},
+    }
+    response = client.post("/time-profiles", json=body)
+    assert response.status_code == 201, response.text
+    return TimeProfile.model_validate(response.json())
+
+
+def _ring_plan(profile=None):
+    shape, recognition = shape_and_features(approach_fixtures.ring_with_radial_windows(), "step")
+    return build_plan(suggest_operations(recognition).suggestions, units="mm", profile=profile)
+
+
+def _apply_indexer(plan):
+    response = client.post(
+        "/cad/setups/apply-proposal",
+        files={"file": ("ring.step", approach_fixtures.ring_with_radial_windows())},
+        data={"manufacturing_plan": plan.model_dump_json(), "machine": "4_axis_indexer", "rotary_axis": "Z"},
+    )
+    assert response.status_code == 200, response.text
+    return response.json()
+
+
+def test_index_time_is_moves_times_the_profile_figure_with_no_setup_of_its_own():
+    from cad_costing_agent.operation_time import TimeAssumptions, TimeStatus, estimate_index_time
+
+    timed = estimate_index_time(17, assumptions=TimeAssumptions(rotary_index_minutes_per_position=0.05))
+    assert timed.time_status is TimeStatus.ESTIMATED
+    assert timed.cycle_time_minutes == 0.85 and timed.setup_time_minutes == 0.0
+    assert timed.parameters == {"index_moves": 17.0, "rotary_index_minutes_per_position": 0.05}
+    assert any("return to the loading position" in line for line in timed.assumptions)
+
+    untimed = estimate_index_time(17)
+    assert untimed.time_status is TimeStatus.NEEDS_USER_INPUT
+    assert untimed.cycle_time_minutes is None
+    assert untimed.missing == ["rotary_index_minutes_per_position"]
+
+    # 1 move x 0.004 min reports as 0.00: refused, never rounded up.
+    tiny = estimate_index_time(1, assumptions=TimeAssumptions(rotary_index_minutes_per_position=0.004))
+    assert tiny.time_status is TimeStatus.NEEDS_USER_INPUT
+    assert tiny.parameters["unrounded_cycle_time_minutes"] == 0.004
+
+
+def test_the_seeded_profile_states_no_index_time():
+    assert client.get("/time-profiles/poc-baseline-time").json()["assumptions"].get(
+        "rotary_index_minutes_per_position"
+    ) is None
+
+
+def test_under_the_baseline_the_indexer_proposal_says_the_index_line_needs_a_time():
+    data = approach_fixtures.ring_with_radial_windows()
+    body = client.post(
+        "/cad/setups/propose",
+        files={"file": ("ring.step", data)},
+        data={"manufacturing_plan": _ring_plan().model_dump_json(), "machine": "4_axis_indexer", "rotary_axis": "Z"},
+    ).json()
+    indexed = next(s for s in body["setups"] if s["machine"] == "4_axis_indexer")
+    assert indexed["index_moves_per_part"] == len(indexed["index_positions"]) - 1
+    assert indexed["index_time"]["time_status"] == "needs_user_input"
+    assert "states no index time" in indexed["index_time"]["reason"]
+    # The 3-axis machine has no index line at all.
+    plain = client.post(
+        "/cad/setups/propose",
+        files={"file": ("ring.step", data)},
+        data={"manufacturing_plan": _ring_plan().model_dump_json()},
+    ).json()
+    assert all(s["index_time"] is None and s["index_moves_per_part"] is None for s in plain["setups"])
+
+
+def test_applying_adds_a_per_part_index_line_timed_from_the_plans_profile():
+    profile = _indexer_profile(0.05)
+    plan = _ring_plan(profile)
+    applied = _apply_indexer(plan)
+
+    assert len(applied["added_operation_ids"]) == 1
+    line_id = applied["added_operation_ids"][0]
+    result = ManufacturingPlan.model_validate(applied["plan"])
+    line = result.get(line_id)
+    indexer = next(s for s in result.setups if s.name == "Indexer indexed about Z")
+    assert line_id == f"{indexer.setup_id}-INDEX"
+    assert line.setup_id == indexer.setup_id
+    assert line.operation_type == "milling" and line.feature_ids == []
+    moves = int(line.dimensions["index_moves"])
+    assert moves >= 2
+    assert line.system_suggested_cycle_time == round(moves * 0.05, 2)
+    assert line.system_time_profile_id == "indexer-shop-time"
+    # Uncommitted: left out until accepted, never zero.
+    assert line.system_time_accepted is False
+    assert line_id in [o.operation_id for o in result.uncosted_operations()]
+    # The setup's own estimate is still the fixturing baseline: the index time is not in it.
+    members = [o for o in result.operations_in(indexer.setup_id) if o.operation_id != line_id]
+    assert indexer.system_setup_time_minutes == max(o.system_suggested_setup_time for o in members)
+
+
+def test_accepted_index_time_is_cycle_time_charged_per_part():
+    profile = _indexer_profile(0.05)
+    result = ManufacturingPlan.model_validate(_apply_indexer(_ring_plan(profile))["plan"])
+    line_id = next(o.operation_id for o in result.operations if o.operation_id.endswith("-INDEX"))
+    accepted = result.model_copy(
+        update={
+            "operations": [
+                o.model_copy(update={"system_time_accepted": True}) if o.operation_id == line_id else o
+                for o in result.operations
+            ]
+        }
+    )
+    requirement = next(r for r in accepted.to_operation_requirements(10) if r.operation_id == line_id)
+    # Per part: a cycle time carried with the quantity, which costing multiplies it by — and no
+    # setup on the line itself, so nothing of it is charged once per batch.
+    assert requirement.process_type == "milling"
+    assert requirement.cycle_time_minutes == accepted.get(line_id).system_suggested_cycle_time
+    assert requirement.quantity == 10
+    assert requirement.setup_time_minutes == 0
+
+
+def test_estimating_missing_times_leaves_the_index_line_alone():
+    from cad_costing_agent.manufacturing_plan import estimate_missing_times
+
+    result = ManufacturingPlan.model_validate(_apply_indexer(_ring_plan())["plan"])
+    line = next(o for o in result.operations if o.operation_id.endswith("-INDEX"))
+    again = estimate_missing_times(result).get(line.operation_id)
+    assert again == line
+
+
+def test_the_time_editor_offers_the_index_time():
+    html = (STATIC_PATH / "index.html").read_text(encoding="utf-8")
+    assert 'data-param="rotary_index_minutes_per_position"' in html
 
 
 def test_the_proposal_is_deterministic():

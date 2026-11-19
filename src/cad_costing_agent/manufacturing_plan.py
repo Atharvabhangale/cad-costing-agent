@@ -1398,6 +1398,45 @@ def manual_operation(
     return operation
 
 
+INDEX_RULE = "rotary_indexing_between_positions"
+"""`system_suggestion_rule` of the line a 4-axis indexer proposal adds for its index moves."""
+
+
+def index_operation(
+    *,
+    operation_id: str,
+    setup_id: str,
+    index_moves: int,
+    positions: int,
+    estimate: OperationTimeEstimate,
+    confidence: Confidence,
+) -> PlannedOperation:
+    """The per-part line for a 4-axis indexer's moves between positions.
+
+    Added only when the engineer applies an indexer proposal. A milling line
+    linked to no feature (no feature is cut while the table turns), proposed by
+    the system and pending like any proposed line: its time counts only once it
+    is accepted or typed. Per part, so it is charged x quantity — never in the
+    setup, which is charged once per batch.
+    """
+    line = PlannedOperation(
+        operation_id=operation_id,
+        sequence_position=1,
+        system_setup_id=setup_id,
+        feature_ids=[],
+        feature_label=f"{positions} index positions",
+        operation_name=f"Index between {positions} positions (4-axis, {index_moves} moves per part)",
+        origin=SuggestionOrigin.SYSTEM,
+        user_action=UserAction.PENDING,
+        system_suggested_operation="milling",
+        system_suggestion_confidence=confidence,
+        system_suggestion_rule=INDEX_RULE,
+        system_source_type="brep",
+        dimensions={"index_moves": float(index_moves), "index_positions": float(positions)},
+    )
+    return line.with_estimate(estimate)
+
+
 def estimate_missing_times(
     plan: ManufacturingPlan,
     *,
@@ -1413,6 +1452,11 @@ def estimate_missing_times(
     """
     updated: list[PlannedOperation] = []
     for operation in plan.operations:
+        if operation.system_suggestion_rule == INDEX_RULE:
+            # Its time is the index model's, not a milling formula's; it needs
+            # the engineer's figure, not a second estimate.
+            updated.append(operation)
+            continue
         needs = operation.system_time_status is not TimeStatus.ESTIMATED
         untouched_process = operation.user_operation_type is None
         if needs and untouched_process and operation.operation_type:
@@ -1437,6 +1481,8 @@ __all__ = [
     "NOT_COSTED_WITHOUT_SETUP_TIME",
     "NOT_COSTED_WITHOUT_TIME",
     "SETUP_TIME_DERIVATION",
+    "INDEX_RULE",
+    "index_operation",
     "SYSTEM_GROUPING_ASSUMPTIONS",
     "SYSTEM_GROUPING_REASON",
     "ManufacturingSetup",

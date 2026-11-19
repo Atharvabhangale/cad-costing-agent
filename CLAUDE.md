@@ -537,7 +537,15 @@ the reason. Each reads the shape through the single STEP/IGES readers.
   the most, saying what each placed); every mill direction square to the axis keys into one
   indexed setup per body, with its `index_positions`. Only then do planar faces get the
   side-milling direction in their plane square to the axis (`_indexed_flank_candidates`) — on
-  the 3-axis mill that direction would invent a setup. Index time is not estimated; say so.
+  the 3-axis mill that direction would invent a setup.
+  **Index time is per part, never in the setup** (setup is charged once per batch, cycle x
+  quantity). Applying an indexed setup of 2+ positions adds one line, `<setup_id>-INDEX`
+  (`index_operation`, rule `INDEX_RULE`, milling, no feature, pending): `estimate_index_time` =
+  (positions - 1) x `rotary_index_minutes_per_position`, under the one profile the plan's
+  operations recorded (`main._index_timer`; none or several -> the baseline). The seeded profile
+  states none, so the line is needs-input and left out until timed — never zero.
+  `estimate_missing_times` skips it. `illustrative-indexer-2026` is published by
+  `scripts/publish_illustrative_indexer_time_profile.py`.
 - **K is the engineer's.** `/cad/sheet-metal`'s `k_factor` (0 < K <= 0.5) has no default;
   without it `flat_pattern` is null and `needs_input` is `["k_factor"]`. `features/sheet_metal.py`
   imports only `features.topology`; what sheet cannot make is handed in from `main.py`

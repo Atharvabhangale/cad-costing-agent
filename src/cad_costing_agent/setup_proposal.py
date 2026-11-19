@@ -75,6 +75,7 @@ this one, it imports no costing arithmetic, and only `main.py` imports it.
 from __future__ import annotations
 
 import re
+from collections.abc import Callable
 from itertools import combinations
 
 from pydantic import BaseModel, Field, field_validator
@@ -95,7 +96,9 @@ from cad_costing_agent.manufacturing_plan import (
     SETUP_TIME_DERIVATION,
     ManufacturingPlan,
     ManufacturingSetup,
+    OperationTimeEstimate,
     PlannedOperation,
+    index_operation,
     _dominant_process,
     _setup_baseline_for,
 )
@@ -120,10 +123,14 @@ ROTARY_AXES = {"Z": (0.0, 0.0, 1.0), "X": (1.0, 0.0, 0.0), "Y": (0.0, 1.0, 0.0)}
 INDEXER_NOTE = (
     "Proposed for a 4-axis indexer: a rotary table about the {axis} axis turns the part between "
     "cuts, so every approach direction square to that axis is one setup, each operation cut at "
-    "its own index position. A direction along the axis is still its own setup. The time to "
-    "index between positions is not estimated, cutting while the table turns (continuous 4-axis) "
-    "is not modelled, and the rotary table's reach, clearance and the part's fixturing on it are "
-    "not checked. Turning is proposed for a 2-axis lathe as on the 3-axis proposal."
+    "its own index position. A direction along the axis is still its own setup. Turning between "
+    "positions happens on every part, so applying adds an index line timed per part (moves "
+    "between positions x the time profile's index time, which the seeded profile does not "
+    "state); it is never put in the setup, which is charged once per batch. A return to the "
+    "loading position is not counted, near-identical directions are not merged into one "
+    "position, cutting while the table turns (continuous 4-axis) is not modelled, and the "
+    "rotary table's reach, clearance and the part's fixturing on it are not checked. Turning is "
+    "proposed for a 2-axis lathe as on the 3-axis proposal."
 )
 MACHINE_NOTE = (
     "Proposed for a 3-axis mill: the tool axis is fixed, so every distinct approach direction is "
@@ -184,6 +191,20 @@ class ProposedSetup(BaseModel):
     index_positions: list[str] = Field(
         default_factory=list,
         description="For an indexed setup: the approach directions its operations are cut from, one index position each.",
+    )
+    index_moves_per_part: int | None = Field(
+        default=None,
+        description=(
+            "For an indexed setup of two or more positions: the moves between them, per part. "
+            "Applying adds an index line timed for them, charged per part."
+        ),
+    )
+    index_time: OperationTimeEstimate | None = Field(
+        default=None,
+        description=(
+            "The index line's time from the plan's time profile: estimated, or needs input when "
+            "the profile states no index time. Uncommitted until accepted."
+        ),
     )
     solid_index: int | None = Field(
         default=None, description="The body this setup machines, for a part of several bodies."
@@ -259,6 +280,10 @@ class AppliedProposal(BaseModel):
         description="Setups the apply emptied, removed as the Remove button would remove them.",
     )
     moved_operation_ids: list[str]
+    added_operation_ids: list[str] = Field(
+        default_factory=list,
+        description="Lines the apply added: an indexed setup's index line, timed per part and uncommitted.",
+    )
     left_in_place: list[str] = Field(
         default_factory=list, description="Operations the proposal did not place; their setup is unchanged."
     )
@@ -357,12 +382,15 @@ def propose_setups(
     component_id: str | None = None,
     machine: str = MACHINE,
     rotary_axis: str | None = None,
+    index_time: Callable[..., OperationTimeEstimate] | None = None,
 ) -> SetupProposal:
     """Group the plan's operations by the directions their features are reachable from.
 
     `machine` is the 3-axis mill unless the engineer chose the 4-axis indexer,
     which needs a `rotary_axis` ('X', 'Y' or 'Z') and the approaches computed
-    with that axis (`approach_directions(..., rotary_axis=...)`).
+    with that axis (`approach_directions(..., rotary_axis=...)`). `index_time`
+    (`operation_time.estimate_index_time` bound to the plan's profile, handed in
+    by `main.py`) times an indexed setup's moves per part.
     """
     if machine not in MILLING_MACHINES:
         raise ValueError(f"Unknown machine '{machine}'; expected one of {', '.join(MILLING_MACHINES)}.")
@@ -572,11 +600,13 @@ def propose_setups(
                     )
                     if used not in positions:
                         positions.append(used)
+        moves = len(positions) - 1 if on == INDEXER and len(positions) > 1 else None
         setups.append(
             ProposedSetup(
                 position=len(setups) + 1,
                 machine=on,
                 index_positions=positions,
+                index_moves_per_part=moves,
                 solid_index=solid,
                 direction=vectors[key],
                 direction_key=direction,
@@ -608,6 +638,17 @@ def propose_setups(
             "direction, but a ray is not a tool — holder, reach, undercuts and the fixture are not "
             "checked."
         )
+
+    if index_time is not None:
+        # Timed at the proposal's own confidence, never above it.
+        setups = [
+            s.model_copy(
+                update={"index_time": index_time(s.index_moves_per_part, suggestion_confidence=confidence)}
+            )
+            if s.index_moves_per_part is not None
+            else s
+            for s in setups
+        ]
 
     limitations = list(LIMITATIONS)
     if any(approach.solid_index is not None for approach in approaches):
@@ -711,6 +752,7 @@ def apply_setup_proposal(plan: ManufacturingPlan, proposal: SetupProposal) -> Ap
     updated = plan
     created: list[str] = []
     moved: list[str] = []
+    added: list[str] = []
     for proposed in proposal.setups:
         members = [plan.get(operation_id) for operation_id in proposed.operation_ids]
         setup_id = _next_setup_id(updated, prefix)
@@ -775,6 +817,17 @@ def apply_setup_proposal(plan: ManufacturingPlan, proposal: SetupProposal) -> Ap
         for operation_id in proposed.operation_ids:
             updated = updated.with_operation_in_setup(operation_id, setup_id)
             moved.append(operation_id)
+        if proposed.index_time is not None and proposed.index_moves_per_part is not None:
+            line = index_operation(
+                operation_id=f"{setup_id}-INDEX",
+                setup_id=setup_id,
+                index_moves=proposed.index_moves_per_part,
+                positions=len(proposed.index_positions),
+                estimate=proposed.index_time,
+                confidence=proposal.confidence,
+            )
+            updated = updated.with_added(line)
+            added.append(line.operation_id)
 
     # Within each setup, operations keep the order they had in the plan.
     original = {o.operation_id: index for index, o in enumerate(plan.ordered)}
@@ -783,7 +836,8 @@ def apply_setup_proposal(plan: ManufacturingPlan, proposal: SetupProposal) -> Ap
         for setup in updated.ordered_setups
         for o in sorted(
             updated.operations_in(setup.setup_id, active_only=False),
-            key=lambda o: original[o.operation_id],
+            # An added index line has no earlier place: it goes last in its setup.
+            key=lambda o: original.get(o.operation_id, len(original)),
         )
     ]
     # A line whose setup is unknown keeps its place after the rest rather than vanishing.
@@ -803,6 +857,7 @@ def apply_setup_proposal(plan: ManufacturingPlan, proposal: SetupProposal) -> Ap
         created_setup_ids=created,
         removed_setup_ids=removed,
         moved_operation_ids=moved,
+        added_operation_ids=added,
         left_in_place=[o.operation_id for o in plan.ordered if o.operation_id not in placed_ids],
     )
 

@@ -41,7 +41,7 @@ sheet unfolding.
 
 | aPriori capability | What we have | What we'd need | Effort |
 |---|---|---|---|
-| Setup count from tool access (setup-axis GCDs, capped at 4 setups on a 3-axis mill) | **Done (Iteration 7; extended 2026-11-16):** approach directions + straight-ray access check, a proposed grouping the engineer applies; milled bosses, wrapped fillets, lathe chuckings, per-body checks, fewest-setup search, a 4-axis indexer the engineer chooses | Tool-body collision, 5-axis and continuous 4-axis, index time, tailstock drilling in a lathe chucking | L |
+| Setup count from tool access (setup-axis GCDs, capped at 4 setups on a 3-axis mill) | **Done (Iteration 7; extended 2026-11-16):** approach directions + straight-ray access check, a proposed grouping the engineer applies; milled bosses, wrapped fillets, lathe chuckings, per-body checks, fewest-setup search, a 4-axis indexer the engineer chooses | Tool-body collision, 5-axis and continuous 4-axis, merging near-identical index positions, tailstock drilling in a lathe chucking | L |
 | Tolerance and roughness add finish passes or secondary operations | No tolerance input | A tolerance/Ra field per feature, a process-capability table and finish-pass logic | M |
 | Threads | None | A thread recognizer and a tap/thread-mill time rule | M |
 | Prismatic stock (bar or plate) with per-face allowances and utilisation | Bar-stock proposal for turned parts | Bounding-box stock, per-face allowances, utilisation and a saw operation | M |

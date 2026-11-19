@@ -1142,6 +1142,15 @@
           time — once per weld, per part — and never to the setup, which is charged once.</p>
       </div>
       <div class="card">
+        <h3>4-axis indexer</h3>
+        <p class="hint">Blank by default: no index time is assumed. Filled in, the index line a
+          4-axis setup proposal adds is timed as moves per part x this figure, and charged per
+          part like any cycle time — never in the setup, which is charged once per batch.</p>
+        <div class="grid3">
+          <label>Index move: unclamp, turn, clamp (min) <input id="t-rotary-index" data-param="rotary_index_minutes_per_position" type="number" step="any"></label>
+        </div>
+      </div>
+      <div class="card">
         <h3>Sheet cutting and bending</h3>
         <p class="hint">Blank by default: no laser, plasma or press-brake figure is assumed. The
           cut perimeter, pierces, thickness and bend count come from the part's measured flat

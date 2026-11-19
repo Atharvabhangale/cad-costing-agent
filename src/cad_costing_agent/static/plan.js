@@ -1697,13 +1697,24 @@ function approachSetupItem(setup) {
           ${placed.access === "flank" ? "cut by the tool's flank" : placed.access === "lathe" ? "turned" : "head-on"}</span></li>`
     )
     .join("");
+  // The index line applying adds: the server's time and reason, shown as sent.
+  const index = setup.index_time;
+  const indexLine = index
+    ? `<li><em>Index line, added on apply</em> — ${setup.index_moves_per_part} move(s) per part:
+         ${
+           index.time_status === "estimated"
+             ? `<strong>${escapeHtml(String(index.cycle_time_minutes))} min per part</strong>,
+                charged per part, uncommitted until you accept it`
+             : `<strong>needs a time</strong> — ${escapeHtml(index.reason)}`
+         }</li>`
+    : "";
   return `<li class="approach-setup" data-position="${setup.position}">
       <strong>Setup ${setup.position} — ${escapeHtml(setup.direction_label)}</strong>
       <span class="muted">· ${setup.operation_ids.length} operation(s)${
         setup.index_positions.length ? ` at ${setup.index_positions.length} index position(s)` : ""
       }</span>
       <button type="button" class="secondary tiny approach-show" data-position="${setup.position}">Show on model</button>
-      <ul class="declined-list">${operations}</ul>
+      <ul class="declined-list">${operations}${indexLine}</ul>
     </li>`;
 }
 
